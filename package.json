@@ -1,0 +1,320 @@
+{
+  "name": "aqiron-security",
+  "displayName": "Aqiron Security",
+  "description": "AI-powered security scanning, threat analysis, reporting, and workspace intelligence platform.",
+  "version": "0.0.1",
+  "publisher": "aqiron-security",
+  "icon": "resources/aqiron.png",
+  "engines": {
+    "vscode": "^1.118.0"
+  },
+  "categories": [
+    "Linters",
+    "Security",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:aqiron-security.scanWorkspace",
+    "onCommand:aqiron-security.scanCurrentFile",
+    "onCommand:aqiron-security.refreshScan",
+    "onCommand:aqiron-security.explainIssue",
+    "onCommand:aqiron-security.openChat",
+    "onCommand:aqiron-security.analyzeWorkspace",
+    "onCommand:aqiron-security.openSidebar"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aqiron-security.openSidebar",
+        "title": "Aqiron Security",
+        "category": "Aqiron Security",
+        "icon": "assets/logos/aqiron-security-logo-mono.svg"
+      },
+      {
+        "command": "aqiron-security.scanWorkspace",
+        "title": "Aqiron Security: Scan Workspace",
+        "category": "Aqiron Security",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "aqiron-security.scanCurrentFile",
+        "title": "Aqiron Security: Scan Current File",
+        "category": "Aqiron Security",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "aqiron-security.refreshScan",
+        "title": "Aqiron Security: Refresh Scan",
+        "category": "Aqiron Security",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "aqiron-security.explainIssue",
+        "title": "Aqiron Security: Explain Issue",
+        "category": "Aqiron Security",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "aqiron-security.openChat",
+        "title": "Aqiron Security: Open Security Agent",
+        "category": "Aqiron Security",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "aqiron-security.analyzeWorkspace",
+        "title": "Aqiron Security: Analyze Workspace",
+        "category": "Aqiron Security",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "aqiron-security.ragReindexWithAi",
+        "title": "Aqiron Security: Reindex RAG with AI",
+        "category": "Aqiron Security"
+      },
+      {
+        "command": "aqiron-security.ragReindexWithoutAi",
+        "title": "Aqiron Security: Reindex RAG without AI",
+        "category": "Aqiron Security"
+      },
+      {
+        "command": "aqiron-security.ragReindex",
+        "title": "Aqiron Security: Reindex RAG",
+        "category": "Aqiron Security"
+      },
+      {
+        "command": "aqiron-security.ragAddRegex",
+        "title": "Aqiron Security: Add RAG Regexes",
+        "category": "Aqiron Security"
+      },
+      {
+        "command": "aqiron-security.ragSyncRegexes",
+        "title": "Aqiron Security: Sync Trusted RAG Regexes",
+        "category": "Aqiron Security"
+      }
+    ],
+    "configuration": {
+      "title": "Aqiron Security",
+      "properties": {
+        "aqiron-security.enableQuickFixes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Aqiron Security quick fixes for supported diagnostics."
+        },
+        "aqiron-security.excludeFolders": {
+          "type": "array",
+          "default": [
+            "node_modules",
+            "dist",
+            "build",
+            "coverage",
+            ".gradle",
+            ".git",
+            ".next",
+            ".aqiron-security",
+            "target",
+            "bin",
+            "obj",
+            "ios/build",
+            "android/build",
+            "windows/flutter",
+            "linux/flutter",
+            "macos/flutter",
+            "windows/runner",
+            "macos/Runner"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Folders Aqiron Security excludes from workspace intelligence scans."
+        },
+        "aqiron-security.enableRealtimeScan": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically rescan supported files when they are saved."
+        },
+        "aqiron-security.scanGeneratedFiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "Scan generated files. Disabled by default to reduce false positives."
+        },
+        "aqiron-security.maxFileSizeKB": {
+          "type": "number",
+          "default": 512,
+          "minimum": 1,
+          "description": "Maximum file size Aqiron Security scans, in KB."
+        },
+        "aqiron-security.mobsfBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "MobSF server base URL used for Android/APK scanning."
+        },
+        "aqiron-security.mobsfApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "MobSF API key used to upload, scan, and fetch JSON reports."
+        },
+        "aqiron-security.customRules": {
+          "type": "array",
+          "default": [
+            {
+              "id": "high.firebase-open-rules",
+              "title": "Open Firebase Rules",
+              "message": "Firebase rules allow broad read/write access. Require authenticated users and resource-level authorization.",
+              "severity": "High",
+              "pattern": "allow\\s+(?:read|write|read,\\s*write)\\s*:\\s*if\\s+true",
+              "extensions": [
+                ".rules",
+                ".json"
+              ]
+            },
+            {
+              "id": "high.android-exported-component",
+              "title": "Exported Android Component",
+              "message": "Exported Android components can expose app entry points. Add permissions or set exported=false unless intentionally public.",
+              "severity": "High",
+              "pattern": "android:exported\\s*=\\s*[\"']true[\"']",
+              "extensions": [
+                ".xml"
+              ]
+            },
+            {
+              "id": "medium.gradle-dynamic-version",
+              "title": "Dynamic Dependency Version",
+              "message": "Dynamic dependency versions reduce build reproducibility and can pull unexpected vulnerable releases.",
+              "severity": "Medium",
+              "pattern": "(implementation|api|compileOnly|runtimeOnly)\\s*\\(?\\s*[\"'][^\"']+:(?:\\+|latest\\.)",
+              "extensions": [
+                ".gradle"
+              ]
+            }
+          ],
+          "description": "Editable custom Aqiron scanner rules. Each rule needs id, title, message, severity, and pattern.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "Critical",
+                  "High",
+                  "Medium",
+                  "Low"
+                ]
+              },
+              "pattern": {
+                "type": "string"
+              },
+              "extensions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "aqiron-security.scanWorkspace"
+        },
+        {
+          "command": "aqiron-security.scanCurrentFile"
+        },
+        {
+          "command": "aqiron-security.refreshScan"
+        },
+        {
+          "command": "aqiron-security.explainIssue"
+        },
+        {
+          "command": "aqiron-security.openChat"
+        },
+        {
+          "command": "aqiron-security.analyzeWorkspace"
+        },
+        {
+          "command": "aqiron-security.ragReindex"
+        },
+        {
+          "command": "aqiron-security.ragReindexWithAi"
+        },
+        {
+          "command": "aqiron-security.ragReindexWithoutAi"
+        },
+        {
+          "command": "aqiron-security.ragAddRegex"
+        },
+        {
+          "command": "aqiron-security.ragSyncRegexes"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "aqiron-security.scanCurrentFile",
+          "group": "navigation@100"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "aqiron-security.openSidebar",
+          "group": "navigation@98"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "node scripts/clean-test-output.js && tsc -p . --outDir out",
+    "core:build": "node esbuild.js",
+    "core:start": "npm run core:build && node dist/core-runtime.js",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src packages/core/src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/vscode": "^1.118.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.27.3",
+    "eslint": "^9.39.3",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.28.0",
+    "@types/d3": "^7.4.3",
+    "@vscode/codicons": "^0.0.45",
+    "d3": "^7.9.0",
+    "framer-motion": "^12.38.0",
+    "keytar": "^7.9.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "tailwindcss": "^4.3.0"
+  }
+}
