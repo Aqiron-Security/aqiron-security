@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # aqiron-security-vscode
 =======
 # Aqiron Security
