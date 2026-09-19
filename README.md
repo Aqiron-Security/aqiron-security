@@ -449,4 +449,4 @@ Scans, RAG, and threat history may create files under the workspace's `.aqiron-s
 - [`AQIRON_SECURITY_RAG.md`](AQIRON_SECURITY_RAG.md) — RAG implementation details.
 - [`TECHNICAL_REVERSE_ENGINEERING.md`](TECHNICAL_REVERSE_ENGINEERING.md) — current technical architecture and boundaries.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contribution workflow and validation.
->>>>>>> 649781c (Initial build)
+
