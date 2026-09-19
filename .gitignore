@@ -141,13 +141,3 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
-=======
-out
-dist
-node_modules
-.vscode-test/
-.aqiron-security/
-coverage/
-.codex/
-*.vsix
->>>>>>> 649781c (Initial build)
