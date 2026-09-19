@@ -85,12 +85,7 @@ For the detailed implementation view, see [`ARCHITECTURE_DIAGRAMS.md`](ARCHITECT
 | `.github/` | Issue templates and the pull-request template. |
 | `.vscode/` | Shared launch, task, extension recommendation, and workspace settings. |
 | `scripts/` | Repository helper scripts. |
-| `dist/` | Generated production bundles; do not source-control. |
-| `out/` | Compiled test output; do not source-control. |
-| `node_modules/` | Installed dependencies; do not source-control. |
-| `.vscode-test/` | Downloaded VS Code test runtime; do not source-control. |
 | `.aqiron-security/` | Generated workspace reports, RAG data, and threat history; keep local. |
-| `.codex/` | Local Codex/tooling metadata, not application source. |
 | `package.json` | Extension manifest, commands, settings, dependencies, and scripts. |
 | `packages/core/package.json` | Private core package metadata. |
 | `esbuild.js` | Extension, core-runtime, and webview bundling. |
