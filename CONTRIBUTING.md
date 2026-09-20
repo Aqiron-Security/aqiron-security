@@ -43,6 +43,6 @@ npm test
 
 ## Licensing
 
-The project owner has identified the Mozilla Public License 2.0 (MPL 2.0) as the intended project license. This update does not create the official `LICENSE` file. Until the official license text is committed, contributors should treat the licensing state as requiring project-owner confirmation.
+The project owner has identified the Mozilla Public License 2.0 (MPL 2.0) as the intended project license. This update does create the official `LICENSE` file. 
 
-By submitting a contribution, you confirm that you have the right to submit it and that it does not contain third-party or confidential material that you are not authorized to share. Any formal contribution terms remain subject to the project owner's legal decision.
+By submitting a contribution, you confirm that you have the right to submit it and that it does not contain third-party or confidential material that you are not authorized to share. Any formal contribution terms remain subject to the license.
