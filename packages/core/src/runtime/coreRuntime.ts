@@ -357,10 +357,24 @@ export class CoreRuntime {
 		return result;
 	}
 
-	private async credentialsStatus(key: string): Promise<CoreCredentialsStatusResult> {
+private async credentialsStatus(key: string): Promise<CoreCredentialsStatusResult> {
+	try {
 		const hasValue = Boolean(await this.credentialStore.get(key));
 		return { hasValue };
+	} catch (error) {
+		if (
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			(error as { code?: unknown }).code === 'CREDENTIAL_STORE_UNAVAILABLE'
+		) {
+			// Status checks must work when no desktop keychain session exists.
+			return { hasValue: false };
+		}
+
+		throw error;
 	}
+}
 
 	private async credentialsSet(request: CoreCredentialsSetRequest): Promise<CoreCredentialsStatusResult> {
 		await this.credentialStore.set(request.key, request.value);
