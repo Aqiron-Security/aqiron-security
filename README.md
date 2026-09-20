@@ -2,6 +2,8 @@
 
 Aqiron Security is a VS Code extension for local security scanning and security-focused workspace analysis. The repository contains the extension host, its webview, and a private TypeScript core runtime that the extension starts as a separate Node.js process.
 
+![Aqiron Security Demo](assets/demo/aqiron-scan.gif)
+
 ## Current status
 
 This repository is version `0.0.1` and is under active development. Workspace operations currently require a Flutter workspace. The implementation is local-first; visible UI or command paths should not be interpreted as evidence of a hosted Aqiron service, Jira integration, dynamic analysis, public report sharing, or automatic workspace-wide remediation.
@@ -17,6 +19,24 @@ This repository is version `0.0.1` and is under active development. Workspace op
 - Applies the currently implemented file-level quick fixes for a small set of deterministic findings.
 
 External scanners and AI providers are optional. Missing scanners report an unavailable status instead of being treated as successful scans. Review AI output before using it for security decisions.
+
+## Screenshots
+
+### Agent
+
+![Aqiron Security Agent](assets/screenshots/agent.png)
+
+### Scan
+
+![Aqiron Security Scan](assets/screenshots/scan.png)
+
+### Threats
+
+![Aqiron Security Threats](assets/screenshots/threats.png)
+
+### Reports
+
+![Aqiron Security Reports](assets/screenshots/reports.png)
 
 ## Requirements
 
