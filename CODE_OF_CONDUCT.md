@@ -16,4 +16,4 @@ Report conduct concerns privately to the project maintainer at [opendeveloper.ai
 
 ## Project licensing context
 
-The project owner has identified the Mozilla Public License 2.0 (MPL 2.0) as the intended project license. The official `LICENSE` file has not been created as part of this documentation update; licensing questions should be directed to the project owner until that file is present.
+The project owner has identified the Mozilla Public License 2.0 (MPL 2.0) as the intended project license. The official `LICENSE` file has been created as part of this documentation update.
