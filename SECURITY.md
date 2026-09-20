@@ -22,4 +22,4 @@ No supported-version or backport policy has been established. The current reposi
 
 ## Licensing context
 
-The project owner has identified the Mozilla Public License 2.0 (MPL 2.0) as the intended project license. The official `LICENSE` file has not been created in this update. Do not infer licensing permissions from dependency metadata; consult the project owner until the official license text is present.
+The project owner has identified the Mozilla Public License 2.0 (MPL 2.0) as the intended project license. The official `LICENSE` file has been created in this update.
