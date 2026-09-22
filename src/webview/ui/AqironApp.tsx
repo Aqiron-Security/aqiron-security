@@ -34,7 +34,7 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 
 	return (
 		<div className="aq-shell" style={{ '--aq-zoom': state.zoom } as React.CSSProperties}>
-			<div className="aq-bg" style={{ backgroundImage: `url("${state.assets.bg}")` }} />
+			<div className="aq-bg" style={{ backgroundImage: `url("${sanitizeAssetUrl(state.assets.bg)}")` }} />
 			<div className="aq-grid" />
 			<main className={active === 'agent' || active === 'aiAgent' ? 'aq-content has-composer' : 'aq-content'}>
 				<header className="aq-top">
@@ -83,7 +83,7 @@ const DashboardHero = memo(function DashboardHero({ state }: { state: WebviewSta
 	return (
 		<section className="hero-panel">
 			<div className="brandline">
-				<img src={state.assets.logo} alt="" />
+				<img src={sanitizeAssetUrl(state.assets.logo)} alt="" />
 				<div>
 					<div className="eyebrow">{state.workspace.name}</div>
 					<h1>Aqiron Security</h1>
@@ -133,12 +133,34 @@ function WorkspaceOnboarding({ state, post }: { state: WebviewState; post: (comm
 	const [open, setOpen] = useState(false);
 	return <motion.div className="workspace-onboarding" initial={{ opacity: 0 }} animate={{ opacity: 1 }}><div className="workspace-card">
 		<button className="workspace-settings" aria-label="Open settings" onClick={() => post('openRagSettings')}><span className="codicon codicon-settings-gear" aria-hidden="true" />Settings</button>
-		<img src={state.assets.logo} alt="Aqiron Security" />
+		<img src={sanitizeAssetUrl(state.assets.logo)} alt="Aqiron Security" />
 		<h1>{state.rag.restricted ? 'Workspace trust required' : 'Create your security workspace'}</h1>
 		<p>{state.rag.restricted ? 'Aqiron cannot read or index files while VS Code is in Restricted Mode. Trust this workspace, then build the local RAG index.' : 'Index code, services, APIs, secrets, and dependencies locally in .aqiron-security.'}</p>
 		{!state.rag.restricted && <div className="workspace-build"><button className="primary-action" disabled={state.rag.building} onClick={() => post(withAi ? 'ragReindexWithAi' : 'ragReindexWithoutAi')}>{state.rag.building ? 'Building workspace...' : 'Create Workspace'}</button><div className="build-menu"><button aria-label="Choose build mode" aria-expanded={open} onClick={() => setOpen((value) => !value)}><span className="codicon codicon-chevron-down" aria-hidden="true" /></button>{open && <div><button onClick={() => { setWithAi(true); setOpen(false); }}>Build with AI</button><button onClick={() => { setWithAi(false); setOpen(false); }}>Build without AI</button></div>}</div></div>}
 		<span>{withAi ? 'Build with AI is selected. Suggestions will be generated after indexing.' : 'Build without AI is selected. Suggestions can be generated later.'}</span>
 	</div></motion.div>;
+}
+
+function sanitizeAssetUrl(url: string | undefined | null): string {
+	if (!url) {
+		return '';
+	}
+	const trimmed = url.trim();
+	if (!trimmed) {
+		return '';
+	}
+	if (trimmed.startsWith('/')) {
+		return trimmed;
+	}
+	try {
+		const parsed = new URL(trimmed, window.location.origin);
+		if (parsed.protocol === 'https:' || parsed.protocol === 'vscode-webview-resource:') {
+			return parsed.href;
+		}
+	} catch {
+		return '';
+	}
+	return '';
 }
 
 function tabIcon(tab: Section, state: WebviewState): string {
