@@ -13,8 +13,18 @@ type Block =
 	| { kind: 'code'; text: string }
 	| { kind: 'table'; rows: Inline[][][] };
 
+function stripDangerousHtmlBlocks(input: string): string {
+	let current = input;
+	let previous: string;
+	do {
+		previous = current;
+		current = current.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<iframe[\s\S]*?<\/iframe>/gi, '');
+	} while (current !== previous);
+	return current;
+}
+
 export function parseBlocks(content: string): Block[] {
-	const lines = content.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<iframe[\s\S]*?<\/iframe>/gi, '').split(/\r?\n/);
+	const lines = stripDangerousHtmlBlocks(content).split(/\r?\n/);
 	const blocks: Block[] = [];
 	let index = 0;
 	while (index < lines.length) {
