@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { RagIndexService as CoreRagIndexService } from '../../packages/core/src/rag';
 import { FileSystem } from '../../packages/core/src/shared/platform';
 import { isAqExcludedPath } from '../utils/files';
@@ -50,5 +51,12 @@ export class RagIndexService extends CoreRagIndexService {
 			filesystem: createFileSystem(),
 			isExcludedPath: isAqExcludedPath,
 		});
+	}
+
+	/** Ensure the workspace storage directory exists before the core index build. */
+	override async reindex(root: string, options: Parameters<CoreRagIndexService['reindex']>[1]): Promise<Awaited<ReturnType<CoreRagIndexService['reindex']>>> {
+		const fs = await import('fs/promises');
+		await fs.mkdir(path.join(root, '.aqiron-security'), { recursive: true });
+		return super.reindex(root, options);
 	}
 }
