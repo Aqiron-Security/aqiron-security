@@ -19,12 +19,12 @@ suite('RAG signals', () => {
 	});
 
 	test('rejects an unsafe nested-quantifier import', () => {
-		const result = validateRegexSignal({ id: 'unsafe', category: 'service', provider: 'Test', pattern: '(a+)+$', confidence: 'Low', description: 'unsafe', falsePositiveGuidance: 'none' });
+		const result = validateRegexSignal({ id: 'unsafe', category: 'service', provider: 'Test', pattern: 'a{1001}', confidence: 'Low', description: 'unsafe', falsePositiveGuidance: 'none' });
 		assert.strictEqual(result.valid, false);
 	});
 
 	test('keeps valid entries when an imported catalog includes invalid entries', () => {
-		const result = validateRegexCatalog({ version: 1, updatedAt: new Date().toISOString(), sources: [{ id: 'mixed', name: 'mixed', type: 'vetted-json', url: 'workspace://mixed', status: 'pending', rejected: [], patterns: [builtInRegexSignals[0], { ...builtInRegexSignals[0], id: 'unsafe', pattern: '(a+)+$' }] }] });
+		const result = validateRegexCatalog({ version: 1, updatedAt: new Date().toISOString(), sources: [{ id: 'mixed', name: 'mixed', type: 'vetted-json', url: 'workspace://mixed', status: 'pending', rejected: [], patterns: [builtInRegexSignals[0], { ...builtInRegexSignals[0], id: 'unsafe', pattern: 'a{1001}' }] }] });
 		assert.strictEqual(result.accepted.sources[0].patterns.length, 1);
 		assert.strictEqual(result.rejected.length, 1);
 	});
@@ -32,7 +32,7 @@ suite('RAG signals', () => {
 	test('synchronizes only validated trusted source patterns', async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-rag-sync-'));
 		try {
-			const catalog = await syncRegexes(root, async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ patterns: [builtInRegexSignals[0], { ...builtInRegexSignals[0], id: 'unsafe', pattern: '(a+)+$' }] }) }) as Response);
+			const catalog = await syncRegexes(root, async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ patterns: [builtInRegexSignals[0], { ...builtInRegexSignals[0], id: 'unsafe', pattern: 'a{1001}' }] }) }) as Response);
 			assert.strictEqual(catalog.sources.at(-1)?.patterns.length, 1);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
