@@ -115,6 +115,63 @@ For the detailed implementation view, see [`ARCHITECTURE_DIAGRAMS.md`](ARCHITECT
 | `LICENSE` | Mozilla Public License 2.0 text. |
 | `CHANGELOG.md`, `ROADMAP.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md` | Project history, roadmap, contribution, security, and community documentation. |
 
+### Core package tour
+
+```text
+packages/core/
+├─ package.json                         Private package metadata and internal exports
+├─ tsconfig.json                        Core TypeScript project configuration
+└─ src/
+   ├─ index.ts                          Internal export barrel for core capabilities
+   ├─ ai/
+   │  ├─ analysis/                      AI vulnerability analysis and review
+   │  ├─ providers/                     Ollama and OpenRouter provider adapters
+   │  ├─ services/                      Provider, model, credential, and streaming services
+   │  ├─ types/                         AI-specific types
+   │  └─ utils/                         Request, retry, and timeout helpers
+   ├─ analysis/                         Analysis types and RAG retrieval services
+   ├─ context/                          Security context construction and prioritization
+   ├─ correlation/                      Finding correlation and relationship graphs
+   ├─ findings/                         Finding models and normalization helpers
+   ├─ orchestration/                    Core scan service and orchestration types
+   ├─ parsers/                          External scanner output parsers and schemas
+   ├─ pipeline/                         Scan events, state, aggregation, and worker queue
+   ├─ project/                          Project detection, profiles, and workspace models
+   ├─ rag/                              RAG indexing, retrieval, signals, and regex loading
+   ├─ reports/                          Report generation, models, exporters, and summaries
+   ├─ runtime/
+   │  ├─ main.ts                        stdin/stdout runtime process entry point
+   │  ├─ coreRuntime.ts                 Runtime request handling and service coordination
+   │  ├─ protocol.ts                    Runtime request, response, and event protocol
+   │  ├─ nodeAdapters.ts                Node filesystem, process, network, and credential adapters
+   │  └─ index.ts                        Runtime exports
+   ├─ scanners/
+   │  ├─ betterleaks/                   Betterleaks scanner adapter
+   │  ├─ mobsf/                         MobSF scanner adapter
+   │  ├─ native/                        Built-in workspace scanner
+   │  ├─ osv/                           OSV scanner adapter
+   │  ├─ semgrep/                       Semgrep scanner and rule manager
+   │  ├─ trivy/                         Trivy scanner adapter
+   │  ├─ scannerManager.ts              Scanner registration and selection
+   │  ├─ scope.ts                        Scan scope definitions
+   │  └─ types.ts                        Scanner interfaces and shared types
+   ├─ shared/                           Cross-cutting AI, finding, pipeline, report, and platform types
+   └─ telemetry/                        Core telemetry interfaces and implementation
+```
+
+| Path | Purpose |
+| --- | --- |
+| `packages/core/src/ai/` | Provider integrations and services for AI chat, review, vulnerability analysis, models, credentials, and streaming. |
+| `packages/core/src/analysis/`, `context/`, and `project/` | Build project profiles and prioritized security context for analysis and retrieval. |
+| `packages/core/src/findings/`, `correlation/`, and `reports/` | Normalize findings, correlate relationships, and produce security reports and summaries. |
+| `packages/core/src/orchestration/`, `pipeline/`, and `scanners/` | Coordinate scans, manage scan state and events, and connect native and external scanner adapters. |
+| `packages/core/src/parsers/` | Convert Betterleaks, OSV, Semgrep, Trivy, and other scanner output into the core finding model. |
+| `packages/core/src/rag/` | Index workspace security signals and retrieve relevant context for analysis. |
+| `packages/core/src/runtime/` | Run the private Node.js core process and expose its newline-delimited JSON protocol to the VS Code host. |
+| `packages/core/src/shared/` and `packages/core/src/telemetry/` | Provide shared contracts, platform abstractions, cancellation, and telemetry support across core services. |
+
+`packages/core/src/index.ts` is the internal export barrel for the core capabilities. `packages/core/src/runtime/main.ts` starts the private runtime process and communicates over stdin/stdout using newline-delimited JSON. `packages/core/src/runtime/coreRuntime.ts` coordinates protocol handling, scanning, RAG, AI, project detection, and reporting. The core package is private, is bundled into `dist/core-runtime.js`, and is not published as an independent npm package; generated `packages/core/dist/` output is therefore omitted from this source tour.
+
 Generated output, dependencies, downloaded test runtimes, and workspace-specific `.aqiron-security/` data are not source files and should not be committed.
 
 ## Known limitations
