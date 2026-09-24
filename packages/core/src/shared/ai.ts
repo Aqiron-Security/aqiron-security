@@ -1,4 +1,4 @@
-export type AIProviderId = 'ollama' | 'openrouter';
+export type AIProviderId = 'openrouter' | 'openai' | 'claude' | 'gemini';
 
 export type AIMessageRole = 'system' | 'user' | 'assistant';
 
@@ -88,7 +88,6 @@ export interface AISettings {
 	timeoutMs: number;
 	retries: number;
 	streaming: boolean;
-	ollamaEndpoint: string;
 	openRouterEndpoint: string;
 }
 
@@ -132,8 +131,7 @@ export interface AIWebviewState {
 	loadingModels: boolean;
 	modelError?: string;
 	status: ProviderConnectionStatus;
-	settings: Omit<AISettings, 'ollamaEndpoint' | 'openRouterEndpoint'> & {
-		ollamaEndpoint?: string;
+	settings: Omit<AISettings, 'openRouterEndpoint'> & {
 		openRouterEndpoint?: string;
 	};
 	apiCredentials: AIProviderCredential[];
@@ -235,7 +233,6 @@ export const defaultAISettings: AISettings = {
 	timeoutMs: 120_000,
 	retries: 2,
 	streaming: true,
-	ollamaEndpoint: 'http://localhost:11434',
 	openRouterEndpoint: 'https://openrouter.ai/api/v1',
 };
 

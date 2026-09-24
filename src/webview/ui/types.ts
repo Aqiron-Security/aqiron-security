@@ -135,7 +135,6 @@ export interface AiState {
 		timeoutMs: number;
 		retries: number;
 		streaming: boolean;
-		ollamaEndpoint?: string;
 		openRouterEndpoint?: string;
 	};
 	apiCredentials: AIProviderCredential[];

@@ -27,13 +27,19 @@ export abstract class BaseProvider {
 	}
 
 	protected async getAuthHeader(): Promise<string | undefined> {
-		if (this.id === 'openrouter') {
-			const settings = await this.getSettings();
-			const activeApi = settings.apiCredentials?.find((api) => api.id === settings.activeApiCredentialId && api.providerId === 'openrouter');
-			const key = activeApi ? await this.credentials.getSecret(aiSecretKeys.apiCredential(activeApi.id)) : await this.credentials.getSecret(aiSecretKeys.openRouterApiKey);
-			return key ? `Bearer ${key}` : undefined;
-		}
-		const token = await this.credentials.getSecret(aiSecretKeys.ollamaAuthToken);
-		return token ? `Bearer ${token}` : undefined;
+		const key = await this.getApiKey();
+		return key ? `Bearer ${key}` : undefined;
+	}
+
+	protected async getApiKey(): Promise<string | undefined> {
+		const settings = await this.getSettings();
+		const providerApis = settings.apiCredentials?.filter((api) => api.providerId === this.id) ?? [];
+		const activeApi = providerApis.find((api) => api.id === settings.activeApiCredentialId) ?? providerApis[0];
+		const key = activeApi
+			? await this.credentials.getSecret(aiSecretKeys.apiCredential(activeApi.id))
+			: this.id === 'openrouter'
+				? await this.credentials.getSecret(aiSecretKeys.openRouterApiKey)
+				: undefined;
+		return key;
 	}
 }

@@ -1154,9 +1154,6 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		if (typeof patch.streaming === 'boolean') {
 			settings.streaming = patch.streaming;
 		}
-		if (typeof patch.ollamaEndpoint === 'string' && /^https?:\/\/.+/i.test(patch.ollamaEndpoint.trim())) {
-			settings.ollamaEndpoint = patch.ollamaEndpoint.trim();
-		}
 		await this.aiService.updateSettings(settings);
 		await this.refreshAiState();
 	}
@@ -1676,6 +1673,9 @@ function createDefaultAiState(): AiWebviewState {
 	return {
 		providers: [
 			{ id: 'openrouter', name: 'OpenRouter', connected: false, message: 'Not connected', hasCredential: false },
+			{ id: 'openai', name: 'OpenAI', connected: false, message: 'Not connected', hasCredential: false },
+			{ id: 'claude', name: 'Claude', connected: false, message: 'Not connected', hasCredential: false },
+			{ id: 'gemini', name: 'Gemini', connected: false, message: 'Not connected', hasCredential: false },
 		],
 		models: [],
 		filteredModels: [],
@@ -1754,7 +1754,7 @@ function serializeIssue(issue: AqironIssue): SerializableIssue {
 }
 
 function isAiProviderId(value: unknown): value is AIProviderId {
-	return value === 'ollama' || value === 'openrouter';
+	return value === 'openrouter' || value === 'openai' || value === 'claude' || value === 'gemini';
 }
 
 function clamp(value: number, min: number, max: number): number {

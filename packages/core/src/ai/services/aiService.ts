@@ -4,8 +4,10 @@ import { aiSecretKeys, CredentialService } from './credentialService';
 import { ModelManager } from './modelManager';
 import { ProviderRegistry } from './providerRegistry';
 import { StreamingService } from './streamingService';
-import { OllamaProvider } from '../providers/ollamaProvider';
 import { OpenRouterProvider } from '../providers/openrouterProvider';
+import { OpenAIProvider } from '../providers/openaiProvider';
+import { ClaudeProvider } from '../providers/claudeProvider';
+import { GeminiProvider } from '../providers/geminiProvider';
 import { CancellationTokenLike } from '../../shared/cancellation';
 import { CredentialStore } from '../../shared/platform';
 
@@ -41,16 +43,23 @@ export class AIService {
 	constructor(opts: AIServiceOptions) {
 		this.credentials = new CredentialService(opts.credentialStore);
 		this.registry = new ProviderRegistry(this.credentials);
-		this.registry.register(new OllamaProvider(this.credentials, opts.transport));
 		this.registry.register(new OpenRouterProvider(this.credentials, opts.transport));
+		this.registry.register(new OpenAIProvider(this.credentials, opts.transport));
+		this.registry.register(new ClaudeProvider(this.credentials, opts.transport));
+		this.registry.register(new GeminiProvider(this.credentials, opts.transport));
 		this.modelManager = new ModelManager(this.registry, this.credentials);
 		this.streaming = new StreamingService(this.registry);
 	}
 
 	async initialize(): Promise<void> {
 		this.settings = await this.credentials.getJson(aiSecretKeys.settings, defaultAISettings);
-		if (this.settings.selectedProvider === 'ollama') {
-			await this.saveSettings({ ...this.settings, selectedProvider: 'openrouter' });
+		if ((this.settings as unknown as { selectedProvider?: string }).selectedProvider === 'ollama') {
+			const { ollamaEndpoint: _ollamaEndpoint, ...migrated } = this.settings as AISettings & { ollamaEndpoint?: string };
+			await this.credentials.deleteSecret('aqiron.ai.ollama.authToken');
+			await this.saveSettings({ ...migrated, selectedProvider: 'openrouter' });
+		} else if ('ollamaEndpoint' in (this.settings as unknown as Record<string, unknown>)) {
+			const { ollamaEndpoint: _ollamaEndpoint, ...withoutLegacyOllama } = this.settings as AISettings & { ollamaEndpoint?: string };
+			await this.saveSettings(withoutLegacyOllama);
 		}
 		await this.registry.initialize();
 		await this.refreshModels(false);
@@ -70,14 +79,7 @@ export class AIService {
 				}
 			}
 		} catch (error) {
-			this.models = this.settings.selectedProvider === 'ollama' ? [{
-				id: this.settings.selectedModel || 'llama3.2',
-				label: this.settings.selectedModel || 'llama3.2',
-				providerId: 'ollama',
-				description: 'Manual Ollama model entry. Pull this model locally if needed.',
-				badges: ['local', 'free', 'custom'],
-				capabilities: ['chat'],
-			}] : [];
+			this.models = [];
 			this.modelError = normalizeProviderError(error);
 			this.status = { providerId: this.settings.selectedProvider, connected: false, message: this.modelError, checkedAt: new Date().toISOString() };
 		} finally {
@@ -91,7 +93,8 @@ export class AIService {
 	}
 
 	async switchProvider(providerId: AIProviderId): Promise<void> {
-		await this.saveSettings({ ...this.settings, selectedProvider: providerId });
+		const credential = this.settings.apiCredentials?.find((api) => api.providerId === providerId);
+		await this.saveSettings({ ...this.settings, selectedProvider: providerId, activeApiCredentialId: credential?.id });
 		await this.registry.switchProvider(providerId);
 		await this.refreshModels(false);
 	}
@@ -139,12 +142,11 @@ export class AIService {
 	}
 
 	async getState(): Promise<AIWebviewState> {
-		const openRouterKey = await this.credentials.getSecret(aiSecretKeys.openRouterApiKey);
+		const providers = this.registry.getProviders();
+		const credentials = await Promise.all(providers.map(async (provider) => ({ providerId: provider.id, hasCredential: Boolean((await this.credentials.getJson<AISettings>(aiSecretKeys.settings, defaultAISettings)).apiCredentials?.some((api) => api.providerId === provider.id)) || Boolean(provider.id === 'openrouter' && await this.credentials.getSecret(aiSecretKeys.openRouterApiKey)) })));
 		const filteredModels = this.modelManager.applyFilter(this.models);
 		return {
-			providers: [
-				{ id: 'openrouter', name: 'OpenRouter', connected: this.status.providerId === 'openrouter' ? this.status.connected : false, message: this.status.providerId === 'openrouter' ? this.status.message : 'Not selected', hasCredential: Boolean(openRouterKey), endpoint: this.settings.openRouterEndpoint },
-			],
+			providers: providers.map((provider) => ({ id: provider.id as AIProviderId, name: provider.name, connected: this.status.providerId === provider.id ? this.status.connected : false, message: this.status.providerId === provider.id ? this.status.message : 'Not selected', hasCredential: credentials.find((entry) => entry.providerId === provider.id)?.hasCredential ?? false })),
 			models: this.models,
 			filteredModels,
 			modelFilter: this.modelManager.getFilter(),
@@ -163,10 +165,9 @@ export class AIService {
 				timeoutMs: this.settings.timeoutMs,
 				retries: this.settings.retries,
 				streaming: this.settings.streaming,
-				ollamaEndpoint: this.settings.selectedProvider === 'ollama' ? this.settings.ollamaEndpoint : undefined,
 				openRouterEndpoint: this.settings.selectedProvider === 'openrouter' ? this.settings.openRouterEndpoint : undefined,
 			},
-			apiCredentials: (this.settings.apiCredentials ?? []).filter((api) => api.providerId === 'openrouter'),
+			apiCredentials: this.settings.apiCredentials ?? [],
 			taskDefaults: this.settings.taskDefaults ?? {
 				useChatDefaults: true,
 				provider: this.settings.selectedProvider,

@@ -620,7 +620,7 @@ function AgentComposer({ state, post, sessionId }: { state: WebviewState; post: 
 	const tokenPercent = Math.min(100, Math.max(0, state.tokenUsage.contextUsed));
 	const selectedModel = state.ai.models.find((model) => model.id === state.ai.selection.model)?.label ?? 'No models selected';
 	const selectedProvider = state.ai.providers.find((provider) => provider.id === state.ai.selection.provider);
-	const openRouterApis = state.ai.apiCredentials.filter((api) => api.providerId === 'openrouter');
+	const providerApis = state.ai.apiCredentials;
 	const activeSession = sessionId ? state.chatSessions.find((session) => session.id === sessionId) : state.chatSessions.find((session) => session.id === state.activeChatSessionId);
 	const isStreaming = Boolean(activeSession?.streaming || activeSession?.messages.some((message) => message.streaming));
 	const send = () => {
@@ -647,7 +647,7 @@ function AgentComposer({ state, post, sessionId }: { state: WebviewState; post: 
 					<span className={state.ai.status.connected ? 'provider-dot ok-dot' : 'provider-dot warn-dot'} />
 					<button onClick={() => toggleMenu('provider')}>{selectedProvider?.name ?? 'Provider'}<span className="svg-icon" style={iconStyle(state.assets.chevronDownIcon)} /></button>
 					<div className={openMenu === 'provider' ? 'composer-pop provider-pop open-pop edge-left' : 'composer-pop provider-pop edge-left'} onClick={(event) => event.stopPropagation()}>
-						<ProviderMenu state={state} post={post} openRouterApis={openRouterApis} onClose={closeMenus} onSettings={() => setSettingsOpen(true)} />
+						<ProviderMenu state={state} post={post} providerApis={providerApis} onClose={closeMenus} onSettings={() => setSettingsOpen(true)} />
 					</div>
 				</div>
 				{state.workspace.hasGit ? (
@@ -739,6 +739,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 	const [activeSettingsPanel, setActiveSettingsPanel] = useState<'credentials' | 'general' | 'flutter'>('credentials');
 	const [frameworksOpen, setFrameworksOpen] = useState(true);
 	const [apiKey, setApiKey] = useState('');
+	const [apiProvider, setApiProvider] = useState<WebviewState['ai']['selection']['provider']>(state.ai.selection.provider);
 	const [deleteApi, setDeleteApi] = useState<WebviewState['ai']['apiCredentials'][number] | undefined>();
 	const [mobSfBaseUrl, setMobSfBaseUrl] = useState(state.mobsf.baseUrl);
 	const [mobSfApiKey, setMobSfApiKey] = useState('');
@@ -762,7 +763,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 		if (!apiKey.trim()) {
 			return;
 		}
-		post('saveApiCredential', { id: editing?.id, providerId: 'openrouter', key: apiKey });
+		post('saveApiCredential', { id: editing?.id, providerId: editing?.providerId ?? apiProvider, key: apiKey });
 		resetApiForm();
 	};
 	const saveMobSfSettings = () => {
@@ -796,9 +797,9 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 					))}
 				</div>
 				<div className="settings-form">
-					<label>Provider<span className="readonly-field">OpenRouter</span></label>
+					<label>Provider<select value={editing?.providerId ?? apiProvider} disabled={Boolean(editing)} onChange={(event) => setApiProvider(event.target.value as WebviewState['ai']['selection']['provider'])}><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="claude">Claude</option><option value="gemini">Gemini</option></select></label>
 					<label>API key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={editing ? 'Paste API key to revalidate' : 'Paste API key'} type="password" /></label>
-					<p className="settings-help">Aqiron validates the key with OpenRouter and names it from the provider response before saving.</p>
+					<p className="settings-help">Credentials are stored securely and used only with the selected provider.</p>
 					<div className="control-row"><button onClick={saveApi}>{editing ? 'Save API' : 'Add API'}</button>{editing ? <button onClick={resetApiForm}>Cancel edit</button> : null}</div>
 				</div>
 				{deleteApi ? (
@@ -884,7 +885,7 @@ function SettingsAiDropdowns({ state, post, disabled, provider, model, intellige
 	const [modelSubmenuOpen, setModelSubmenuOpen] = useState(false);
 	const selectedModel = state.ai.models.find((item) => item.id === model)?.label ?? 'No models selected';
 	const selectedProvider = state.ai.providers.find((item) => item.id === provider);
-	const openRouterApis = state.ai.apiCredentials.filter((api) => api.providerId === 'openrouter');
+	const providerApis = state.ai.apiCredentials;
 	const closeMenus = () => {
 		setOpenMenu(undefined);
 		setModelSubmenuOpen(false);
@@ -926,17 +927,17 @@ function SettingsAiDropdowns({ state, post, disabled, provider, model, intellige
 				<span className={state.ai.status.connected ? 'provider-dot ok-dot' : 'provider-dot warn-dot'} />
 				<button disabled={disabled} onClick={() => toggleMenu('provider')}>{selectedProvider?.name ?? 'Provider'}<span className="svg-icon" style={iconStyle(state.assets.chevronDownIcon)} /></button>
 				<div className={openMenu === 'provider' ? 'composer-pop provider-pop open-pop' : 'composer-pop provider-pop'} onClick={(event) => event.stopPropagation()}>
-					<ProviderMenu state={state} post={post} openRouterApis={openRouterApis} onClose={closeMenus} onSelectProvider={onProvider} />
+					<ProviderMenu state={state} post={post} providerApis={providerApis} onClose={closeMenus} onSelectProvider={onProvider} />
 				</div>
 			</div>
 		</div>
 	);
 }
 
-function ProviderMenu({ state, post, openRouterApis, onClose, onSettings, onSelectProvider }: {
+function ProviderMenu({ state, post, providerApis, onClose, onSettings, onSelectProvider }: {
 	state: WebviewState;
 	post: Post;
-	openRouterApis: WebviewState['ai']['apiCredentials'];
+	providerApis: WebviewState['ai']['apiCredentials'];
 	onClose: () => void;
 	onSettings?: () => void;
 	onSelectProvider?: (value: WebviewState['ai']['selection']['provider']) => void;
@@ -946,16 +947,22 @@ function ProviderMenu({ state, post, openRouterApis, onClose, onSettings, onSele
 		post('switchProvider', provider);
 		onClose();
 	};
+	const providers = [
+		{ id: 'openrouter' as const, name: 'OpenRouter' },
+		{ id: 'openai' as const, name: 'OpenAI' },
+		{ id: 'claude' as const, name: 'Claude' },
+		{ id: 'gemini' as const, name: 'Gemini' },
+	];
 	return (
 		<>
 			<div className="menu-title">Provider</div>
-			<div className="submenu-wrap provider-api-wrap">
-				<button className="menu-option" onClick={() => selectProvider('openrouter')}>OpenRouter<span className="option-spacer" />{state.ai.selection.provider === 'openrouter' ? <span className="hint">Active</span> : openRouterApis.length ? <span className="hint">{openRouterApis.length} saved</span> : null}<span>&gt;</span></button>
-				<div className="side-menu provider-api-menu">
-					<div className="menu-title">Saved APIs</div>
-					{openRouterApis.length === 0 ? <div className="menu-option muted">No saved APIs</div> : openRouterApis.map((api) => <button key={api.id} className="menu-option" onClick={() => { post('selectApiCredential', api.id); onClose(); }}>{api.name}<span className="option-spacer" />{api.id === state.ai.settings.activeApiCredentialId ? <span className="hint">Selected</span> : <span className="hint">{maskApiKey(api.last4)}</span>}</button>)}
-				</div>
-			</div>
+			{providers.map((provider) => {
+				const apis = providerApis.filter((api) => api.providerId === provider.id);
+				return <div className="submenu-wrap provider-api-wrap" key={provider.id}>
+					<button className="menu-option" onClick={() => selectProvider(provider.id)}>{provider.name}<span className="option-spacer" />{state.ai.selection.provider === provider.id ? <span className="hint">Active</span> : apis.length ? <span className="hint">{apis.length} saved</span> : null}<span>&gt;</span></button>
+					<div className="side-menu provider-api-menu"><div className="menu-title">Saved APIs</div>{apis.length === 0 ? <div className="menu-option muted">No saved APIs</div> : apis.map((api) => <button key={api.id} className="menu-option" onClick={() => { post('selectApiCredential', api.id); onClose(); }}>{api.name}<span className="option-spacer" />{api.id === state.ai.settings.activeApiCredentialId ? <span className="hint">Selected</span> : <span className="hint">{maskApiKey(api.last4)}</span>}</button>)}</div>
+				</div>;
+			})}
 			<div className="menu-separator" />
 			<button className="menu-option" onClick={() => { post('refreshModels'); onClose(); }}>Refresh models</button>
 			<button className="menu-option" onClick={() => { post('configureProvider', state.ai.selection.provider); onClose(); }}>Add Provider</button>

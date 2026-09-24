@@ -1,7 +1,6 @@
 import { AIModel, AIModelFilter, AIProviderId, AISettings, defaultAISettings, defaultModelFilter } from '../../shared/ai';
 import { CredentialService, aiSecretKeys } from './credentialService';
 import { ProviderRegistry } from './providerRegistry';
-
 interface ModelCacheEntry {
 	models: AIModel[];
 	loadedAt: number;
@@ -24,9 +23,8 @@ export class ModelManager {
 		}
 		const provider = this.registry.getProvider(providerId);
 		const models = await provider.getModels();
-		const withFallback = providerId === 'ollama' && models.length === 0 ? [createManualOllamaModel()] : models;
-		this.cache.set(providerId, { models: withFallback, loadedAt: Date.now() });
-		return withFallback;
+		this.cache.set(providerId, { models, loadedAt: Date.now() });
+		return models;
 	}
 
 	clear(providerId?: AIProviderId): void {
@@ -63,16 +61,4 @@ export class ModelManager {
 		const recentModelIds = [modelId, ...(settings.recentModelIds ?? []).filter((id) => id !== modelId)].slice(0, 8);
 		await this.credentials.saveJson(aiSecretKeys.settings, { ...settings, selectedModel: modelId, recentModelIds });
 	}
-}
-
-function createManualOllamaModel(): AIModel {
-	return {
-		id: 'llama3.2',
-		label: 'llama3.2',
-		providerId: 'ollama',
-		family: 'llama',
-		description: 'Manual Ollama model entry. Pull a model with `ollama pull llama3.2` if it is not installed.',
-		badges: ['local', 'free', 'custom'],
-		capabilities: ['chat'],
-	};
 }

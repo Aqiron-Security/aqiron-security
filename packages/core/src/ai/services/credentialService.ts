@@ -35,6 +35,5 @@ export class CredentialService {
 export const aiSecretKeys = {
 	settings: 'aqiron.ai.settings',
 	openRouterApiKey: 'aqiron.ai.openrouter.apiKey',
-	ollamaAuthToken: 'aqiron.ai.ollama.authToken',
 	apiCredential: (id: string) => `aqiron.ai.api.${id}`,
 };

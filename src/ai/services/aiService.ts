@@ -38,8 +38,10 @@ export class AIService implements vscode.Disposable {
 
 	async initialize(): Promise<void> {
 		this.settings = normalizeSettings(this.context.globalState.get<AISettings>(SETTINGS_KEY));
-		if (this.settings.selectedProvider === 'ollama') {
-			await this.saveSettings({ ...this.settings, selectedProvider: 'openrouter' });
+		if ((this.settings as unknown as { selectedProvider?: string }).selectedProvider === 'ollama') {
+			const { ollamaEndpoint: _ollamaEndpoint, ...migrated } = this.settings as AISettings & { ollamaEndpoint?: string };
+			await getCoreClient().credentialsDelete({ key: 'aqiron.ai.ollama.authToken' });
+			await this.saveSettings({ ...migrated, selectedProvider: 'openrouter' });
 		}
 		await this.migrateLegacyCredentials();
 		await this.refreshModels(false);
@@ -53,46 +55,24 @@ export class AIService implements vscode.Disposable {
 		}
 		const picked = await vscode.window.showQuickPick([
 			{ label: 'OpenRouter', providerId: 'openrouter' as const, description: 'Cloud models through OpenRouter' },
+			{ label: 'OpenAI', providerId: 'openai' as const, description: 'Direct OpenAI models' },
+			{ label: 'Claude', providerId: 'claude' as const, description: 'Direct Anthropic Claude models' },
+			{ label: 'Gemini', providerId: 'gemini' as const, description: 'Direct Google Gemini models' },
 		], { title: 'Choose Aqiron AI provider', placeHolder: 'Select the provider Aqiron should use first' });
 		if (!picked) {
 			await this.saveSettings(defaultAISettings);
 			return;
 		}
-		await this.configureOpenRouter();
+		await this.configureProvider(picked.providerId);
 	}
 
 	async configureProvider(providerId?: AIProviderId): Promise<void> {
 		const target = providerId ?? this.settings.selectedProvider;
-		if (target === 'openrouter') {
-			await this.configureOpenRouter();
-		} else {
-			await this.configureOllama();
-		}
+		const apiKey = await vscode.window.showInputBox({ title: `${providerLabel(target)} API key`, prompt: `Enter your ${providerLabel(target)} API key.`, password: true, ignoreFocusOut: true });
+		if (!apiKey) return;
+		await this.saveApiCredential({ providerId: target, name: providerLabel(target), key: apiKey.trim() }, false);
+		await this.saveSettings({ ...this.settings, selectedProvider: target });
 		await this.refreshModels(true);
-	}
-
-	async configureOllama(): Promise<void> {
-		const endpoint = await vscode.window.showInputBox({
-			title: 'Ollama endpoint',
-			prompt: 'Enter your Ollama endpoint.',
-			value: this.settings.ollamaEndpoint,
-			placeHolder: 'http://localhost:11434',
-			validateInput: (value) => /^https?:\/\/.+/i.test(value.trim()) ? undefined : 'Enter a valid http(s) endpoint.',
-		});
-		if (!endpoint) {
-			return;
-		}
-		const auth = await vscode.window.showInputBox({
-			title: 'Optional Ollama auth token',
-			prompt: 'Leave blank for local Ollama without auth.',
-			password: true,
-		});
-		if (auth) {
-			await getCoreClient().credentialsSet({ key: aiSecretKeys.ollamaAuthToken, value: auth });
-		}
-		await this.saveSettings({ ...this.settings, selectedProvider: 'ollama', ollamaEndpoint: endpoint.trim() });
-		const result = await getCoreClient().models('ollama');
-		this.status = result.status;
 	}
 
 	async configureOpenRouter(): Promise<void> {
@@ -117,7 +97,8 @@ export class AIService implements vscode.Disposable {
 	}
 
 	async switchProvider(providerId: AIProviderId): Promise<void> {
-		await this.saveSettings({ ...this.settings, selectedProvider: providerId });
+		const credential = this.settings.apiCredentials?.find((api) => api.providerId === providerId);
+		await this.saveSettings({ ...this.settings, selectedProvider: providerId, activeApiCredentialId: credential?.id });
 		await this.refreshModels(true);
 	}
 
@@ -131,7 +112,7 @@ export class AIService implements vscode.Disposable {
 		const existing = input.id ? this.settings.apiCredentials?.find((api) => api.id === input.id) : undefined;
 		const key = input.key?.trim();
 		if (!key) {
-			throw new Error('Paste an OpenRouter API key before saving.');
+			throw new Error(`Paste a ${providerLabel(input.providerId)} API key before saving.`);
 		}
 		const providerName = input.providerId === 'openrouter' ? await this.getOpenRouterCredentialName(key) : undefined;
 		const last4 = key.slice(-4);
@@ -178,11 +159,11 @@ export class AIService implements vscode.Disposable {
 	}
 
 	async removeProviderCredentials(providerId: AIProviderId): Promise<void> {
-		if (providerId === 'openrouter') {
-			await getCoreClient().credentialsDelete({ key: aiSecretKeys.openRouterApiKey });
-		} else {
-			await getCoreClient().credentialsDelete({ key: aiSecretKeys.ollamaAuthToken });
-		}
+		const providerCredentials = (this.settings.apiCredentials ?? []).filter((api) => api.providerId === providerId);
+		await Promise.all(providerCredentials.map((api) => getCoreClient().credentialsDelete({ key: aiSecretKeys.apiCredential(api.id) })));
+		if (providerId === 'openrouter') await getCoreClient().credentialsDelete({ key: aiSecretKeys.openRouterApiKey });
+		const apiCredentials = (this.settings.apiCredentials ?? []).filter((api) => api.providerId !== providerId);
+		await this.saveSettings({ ...this.settings, apiCredentials, activeApiCredentialId: apiCredentials[0]?.id });
 		await this.refreshModels(true);
 	}
 
@@ -203,14 +184,7 @@ export class AIService implements vscode.Disposable {
 				}
 			}
 		} catch (error) {
-			this.models = this.settings.selectedProvider === 'ollama' ? [{
-				id: this.settings.selectedModel || 'llama3.2',
-				label: this.settings.selectedModel || 'llama3.2',
-				providerId: 'ollama',
-				description: 'Manual Ollama model entry. Pull this model locally if needed.',
-				badges: ['local', 'free', 'custom'],
-				capabilities: ['chat'],
-			}] : [];
+			this.models = [];
 			this.modelError = normalizeProviderError(error);
 			this.status = { providerId: this.settings.selectedProvider, connected: false, message: this.modelError, checkedAt: new Date().toISOString() };
 		} finally {
@@ -226,15 +200,13 @@ export class AIService implements vscode.Disposable {
 		const providerIds = (await getCoreClient().providers()).providers as AIProviderId[];
 		const filteredModels = applyModelFilter(this.models, this.modelFilter);
 		const openRouterHasCredential = await getCoreClient().credentialsExists(aiSecretKeys.openRouterApiKey);
-		const ollamaHasCredential = await getCoreClient().credentialsExists(aiSecretKeys.ollamaAuthToken);
 		return {
 			providers: providerIds.map((id) => ({
 				id,
 				name: providerLabel(id),
 				connected: this.status.providerId === id ? this.status.connected : false,
 				message: this.status.providerId === id ? this.status.message : 'Not selected',
-				hasCredential: id === 'openrouter' ? openRouterHasCredential.exists : ollamaHasCredential.exists,
-				endpoint: id === 'ollama' ? this.settings.ollamaEndpoint : this.settings.openRouterEndpoint,
+				hasCredential: this.settings.apiCredentials?.some((api) => api.providerId === id) ?? (id === 'openrouter' && openRouterHasCredential.exists),
 			})),
 			models: this.models,
 			filteredModels,
@@ -254,10 +226,9 @@ export class AIService implements vscode.Disposable {
 				timeoutMs: this.settings.timeoutMs,
 				retries: this.settings.retries,
 				streaming: this.settings.streaming,
-				ollamaEndpoint: this.settings.selectedProvider === 'ollama' ? this.settings.ollamaEndpoint : undefined,
 				openRouterEndpoint: this.settings.selectedProvider === 'openrouter' ? this.settings.openRouterEndpoint : undefined,
 			},
-			apiCredentials: (this.settings.apiCredentials ?? []).filter((api) => api.providerId === 'openrouter'),
+			apiCredentials: this.settings.apiCredentials ?? [],
 			taskDefaults: this.settings.taskDefaults ?? {
 				useChatDefaults: true,
 				provider: this.settings.selectedProvider,
@@ -373,6 +344,7 @@ export class AIService implements vscode.Disposable {
 	private async saveSettings(settings: AISettings): Promise<void> {
 		this.settings = normalizeSettings(settings);
 		await this.context.globalState.update(SETTINGS_KEY, this.settings);
+		await getCoreClient().credentialsSet({ key: aiSecretKeys.settings, value: JSON.stringify(this.settings) });
 	}
 
 	private async getOpenRouterCredentialName(apiKey: string): Promise<string> {
@@ -403,12 +375,13 @@ export class AIService implements vscode.Disposable {
 	}
 }
 
-function normalizeSettings(settings?: Partial<AISettings>): AISettings {
+
+function normalizeSettings(settings?: Partial<AISettings> & { ollamaEndpoint?: string }): AISettings {
+	const { ollamaEndpoint: _legacyOllamaEndpoint, ...withoutLegacyOllama } = settings ?? {};
 	return {
 		...defaultAISettings,
-		...(settings ?? {}),
+		...withoutLegacyOllama,
 		selectedProvider: settings?.selectedProvider ?? defaultAISettings.selectedProvider,
-		ollamaEndpoint: settings?.ollamaEndpoint ?? defaultAISettings.ollamaEndpoint,
 		openRouterEndpoint: settings?.openRouterEndpoint ?? defaultAISettings.openRouterEndpoint,
 		apiCredentials: settings?.apiCredentials ?? [],
 		recentModelIds: settings?.recentModelIds ?? [],
@@ -442,10 +415,8 @@ function createId(): string {
 }
 
 function providerLabel(providerId: AIProviderId, last4 = ''): string {
-	if (providerId === 'openrouter') {
-		return last4 ? `OpenRouter ${'*'.repeat(4)}${last4}` : 'OpenRouter';
-	}
-	return 'Provider';
+	const label = providerId === 'openrouter' ? 'OpenRouter' : providerId === 'openai' ? 'OpenAI' : providerId === 'claude' ? 'Claude' : 'Gemini';
+	return last4 ? `${label} ${'*'.repeat(4)}${last4}` : label;
 }
 
 function truncate(value: string, max: number): string {
