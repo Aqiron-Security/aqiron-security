@@ -5,6 +5,7 @@ import { normalizeProviderError } from '../utils/request';
 import { aiSecretKeys } from './credentialService';
 import { getCoreClient } from '../../core/coreClientSingleton';
 import { AqironIssue, AqironWorkspaceStats } from '../../models/issue';
+import { providerCredentialFallbackName, providerLabel } from './providerCredentialName';
 
 export interface ChatHistoryItem {
 	role: 'user' | 'assistant';
@@ -114,11 +115,11 @@ export class AIService implements vscode.Disposable {
 		if (!key) {
 			throw new Error(`Paste a ${providerLabel(input.providerId)} API key before saving.`);
 		}
-		const providerName = input.providerId === 'openrouter' ? await this.getOpenRouterCredentialName(key) : undefined;
+		const providerName = await this.getProviderCredentialName(input.providerId, key);
 		const last4 = key.slice(-4);
 		const next: AIProviderCredential = {
 			id: existing?.id ?? createId(),
-			name: providerName ?? input.name?.trim() ?? existing?.name ?? providerLabel(input.providerId, last4),
+			name: providerName ?? existing?.name ?? providerCredentialFallbackName(input.providerId, last4),
 			providerId: input.providerId,
 			last4,
 			createdAt: existing?.createdAt ?? now,
@@ -347,9 +348,13 @@ export class AIService implements vscode.Disposable {
 		await getCoreClient().credentialsSet({ key: aiSecretKeys.settings, value: JSON.stringify(this.settings) });
 	}
 
-	private async getOpenRouterCredentialName(apiKey: string): Promise<string> {
+	private async getProviderCredentialName(providerId: AIProviderId, apiKey: string): Promise<string | undefined> {
+		// Regular model API keys do not expose key-name metadata. Keep this hook
+		// provider-aware so supported metadata can be added without exposing keys
+		// or introducing a new IPC method.
+		void providerId;
 		void apiKey;
-		return providerLabel('openrouter');
+		return undefined;
 	}
 
 	private async migrateLegacyCredentials(): Promise<void> {
@@ -412,11 +417,6 @@ function applyModelFilter(models: readonly AIModel[], filter: AIModelFilter): AI
 
 function createId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function providerLabel(providerId: AIProviderId, last4 = ''): string {
-	const label = providerId === 'openrouter' ? 'OpenRouter' : providerId === 'openai' ? 'OpenAI' : providerId === 'claude' ? 'Claude' : 'Gemini';
-	return last4 ? `${label} ${'*'.repeat(4)}${last4}` : label;
 }
 
 function truncate(value: string, max: number): string {

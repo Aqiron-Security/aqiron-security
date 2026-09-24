@@ -262,7 +262,8 @@ h3 { font-size: 13px; }
 .settings-form.custom-rules-form { grid-template-columns: 1fr; }
 .custom-rules-form textarea { width: 100%; min-height: 260px; resize: vertical; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: rgba(0,0,0,.24); color: var(--text); padding: 10px; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .settings-form label { display: grid; gap: 5px; color: #dbeafe; font-size: 12px; }
-.settings-form input:not([type="checkbox"]), .settings-form select { width: 100%; min-width: 0; border: 1px solid rgba(255,255,255,.14); border-radius: 7px; background: rgba(0,0,0,.24); color: var(--text); padding: 8px 9px; font: inherit; }
+.settings-form input:not([type="checkbox"]), .settings-form select { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: rgba(2,6,14,.58); color: var(--text); padding: 8px 9px; font: inherit; color-scheme: dark; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
+.settings-form select:hover, .settings-form select:focus { border-color: var(--line-strong); background: rgba(255,255,255,.045); outline: 0; box-shadow: 0 0 0 2px rgba(56,189,248,.12); }
 .settings-form .toggle-row, .settings-form .control-row { grid-column: 1 / -1; }
 .submenu-wrap { position: relative; }
 .submenu-wrap:after { content: ""; position: absolute; top: 0; bottom: 0; right: 100%; width: 10px; }

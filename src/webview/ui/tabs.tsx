@@ -2,6 +2,7 @@ import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ChatSession, Severity, WebviewIssue, WebviewState } from './types.js';
 import { Markdown } from './markdown.js';
+import { configuredProviderOptions, providerName } from './providerOptions';
 
 type Post = (command: string, payload?: unknown) => void;
 
@@ -947,16 +948,11 @@ function ProviderMenu({ state, post, providerApis, onClose, onSettings, onSelect
 		post('switchProvider', provider);
 		onClose();
 	};
-	const providers = [
-		{ id: 'openrouter' as const, name: 'OpenRouter' },
-		{ id: 'openai' as const, name: 'OpenAI' },
-		{ id: 'claude' as const, name: 'Claude' },
-		{ id: 'gemini' as const, name: 'Gemini' },
-	];
+	const providers = configuredProviderOptions(providerApis);
 	return (
 		<>
 			<div className="menu-title">Provider</div>
-			{providers.map((provider) => {
+			{providers.length === 0 ? <div className="menu-option muted">No providers configured</div> : providers.map((provider) => {
 				const apis = providerApis.filter((api) => api.providerId === provider.id);
 				return <div className="submenu-wrap provider-api-wrap" key={provider.id}>
 					<button className="menu-option" onClick={() => selectProvider(provider.id)}>{provider.name}<span className="option-spacer" />{state.ai.selection.provider === provider.id ? <span className="hint">Active</span> : apis.length ? <span className="hint">{apis.length} saved</span> : null}<span>&gt;</span></button>
@@ -970,10 +966,6 @@ function ProviderMenu({ state, post, providerApis, onClose, onSettings, onSelect
 			<div className="provider-status">{state.ai.status.message}</div>
 		</>
 	);
-}
-
-function providerName(providerId: WebviewState['ai']['selection']['provider']): string {
-	return providerId === 'openrouter' ? 'OpenRouter' : 'Provider';
 }
 
 function maskApiKey(last4: string): string {
