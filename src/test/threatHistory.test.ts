@@ -20,6 +20,20 @@ suite('Threat history', () => {
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
+
+	test('labels quick scans and deletes stored reports', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-threat-history-'));
+		try {
+			const history = new ThreatHistoryService();
+			const snapshots = await history.record(root, [fixtureIssue()], 4, undefined, 'quick');
+			assert.strictEqual(snapshots[0].title, 'Quick scan - 1 finding');
+			const remaining = await history.delete(root, snapshots[0].id);
+			assert.strictEqual(remaining.length, 0);
+			assert.strictEqual((await history.load(root)).length, 0);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
 });
 
 function fixtureIssue(): AqironIssue {

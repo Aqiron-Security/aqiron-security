@@ -25,24 +25,38 @@ export class ThreatHistoryService {
 		}
 	}
 
-	async record(workspaceRoot: string, issues: readonly AqironIssue[], filesScanned: number, executiveSummary?: string): Promise<ThreatSnapshot[]> {
+	async record(workspaceRoot: string, issues: readonly AqironIssue[], filesScanned: number, executiveSummary?: string, mode: 'quick' | 'deep' | 'analysis' = 'deep'): Promise<ThreatSnapshot[]> {
 		const snapshots = await this.load(workspaceRoot);
 		const createdAt = new Date().toISOString();
+		const label = mode === 'quick' ? 'Quick scan' : 'Security scan';
 		const snapshot: ThreatSnapshot = {
 			id: `threat-scan-${Date.now()}`,
-			title: issues.length === 0 ? 'Security scan - no findings' : `Security scan - ${issues.length} finding${issues.length === 1 ? '' : 's'}`,
+			title: issues.length === 0 ? `${label} - no findings` : `${label} - ${issues.length} finding${issues.length === 1 ? '' : 's'}`,
 			createdAt,
 			filesScanned,
 			executiveSummary,
 			issues: JSON.parse(JSON.stringify(issues)) as AqironIssue[],
 		};
 		const next = [snapshot, ...snapshots].slice(0, MAX_SNAPSHOTS);
+		await this.write(workspaceRoot, next);
+		return next;
+	}
+
+	async delete(workspaceRoot: string, id: string): Promise<ThreatSnapshot[]> {
+		const snapshots = await this.load(workspaceRoot);
+		const next = snapshots.filter((snapshot) => snapshot.id !== id);
+		if (next.length !== snapshots.length) {
+			await this.write(workspaceRoot, next);
+		}
+		return next;
+	}
+
+	private async write(workspaceRoot: string, snapshots: readonly ThreatSnapshot[]): Promise<void> {
 		await fs.mkdir(path.dirname(historyPath(workspaceRoot)), { recursive: true });
 		const target = historyPath(workspaceRoot);
 		const temporary = `${target}.${process.pid}.tmp`;
-		await fs.writeFile(temporary, JSON.stringify(next, null, 2), 'utf8');
+		await fs.writeFile(temporary, JSON.stringify(snapshots, null, 2), 'utf8');
 		await fs.rename(temporary, target);
-		return next;
 	}
 }
 

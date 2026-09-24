@@ -369,13 +369,17 @@ h3 { font-size: 13px; }
 .threat-history-resizer { position: absolute; top: 0; right: -5px; bottom: 0; z-index: 3; width: 10px; display: grid; place-items: center; cursor: col-resize; }
 .threat-history-resizer span { width: 2px; height: 44px; border-radius: 99px; background: rgba(130,180,255,.24); transition: background .16s ease, height .16s ease; }
 .threat-history-resizer:hover span { height: 72px; background: var(--blue); }
-.threat-snapshot { width: 100%; display: grid; gap: 8px; border: 1px solid transparent; border-radius: 9px; padding: 10px; background: rgba(255,255,255,.035); color: var(--text); text-align: left; transition: border-color .16s ease, background .16s ease, transform .16s ease; }
+.threat-snapshot { width: 100%; display: grid; gap: 8px; border: 1px solid transparent; border-radius: 9px; padding: 10px; background: rgba(255,255,255,.035); color: var(--text); text-align: left; cursor: pointer; transition: border-color .16s ease, background .16s ease, transform .16s ease; }
 .threat-snapshot:hover { border-color: rgba(86,184,255,.35); background: rgba(56,189,248,.07); transform: translateY(-1px); }
 .threat-snapshot.active { border-color: rgba(137,108,255,.72); background: linear-gradient(135deg, rgba(74,64,181,.4), rgba(30,46,102,.48)); box-shadow: inset 3px 0 0 #8b7aff, 0 0 0 1px rgba(139,122,255,.12); }
 .threat-snapshot-title, .threat-snapshot-meta, .threat-snapshot-counts { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .threat-snapshot-title { justify-content: space-between; }
 .threat-snapshot-title strong { overflow: hidden; color: #e7f2ff; font-size: 11px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .threat-snapshot-title .codicon { color: #a8c7e8; font-family: codicon; font-size: 14px; }
+.threat-snapshot-actions { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; }
+.threat-snapshot-delete { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #a8c7e8; cursor: pointer; }
+.threat-snapshot-delete:hover, .threat-snapshot-delete:focus-visible { border-color: rgba(255,83,112,.45); background: rgba(255,83,112,.14); color: #ffd7df; }
+.threat-snapshot-delete .codicon { color: inherit; font-size: 14px; }
 .threat-snapshot-meta { color: var(--muted); font-size: 10px; }
 .threat-snapshot-meta span + span { margin-left: auto; white-space: nowrap; }
 .threat-snapshot-counts { color: #aebfd5; font-size: 10px; }

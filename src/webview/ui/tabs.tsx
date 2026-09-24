@@ -429,6 +429,7 @@ export const ThreatTab = memo(function ThreatTab({ state, post }: { state: Webvi
 	const visibleIssues = state.issues;
 	const [historyOpen, setHistoryOpen] = useState(true);
 	const [historyWidth, setHistoryWidth] = useState(264);
+	const [deleteSnapshot, setDeleteSnapshot] = useState<WebviewState['threatSnapshots'][number] | undefined>();
 	const [selectedId, setSelectedId] = useState(state.selectedThreatId ?? visibleIssues[0]?.id);
 	useEffect(() => {
 		setSelectedId(state.selectedThreatId ?? visibleIssues[0]?.id);
@@ -456,7 +457,7 @@ export const ThreatTab = memo(function ThreatTab({ state, post }: { state: Webvi
 				{historyOpen && <>
 				<div className="threat-history-label"><span>Recent scans</span><span className="codicon codicon-history" aria-hidden="true" /></div>
 				<div className="threat-history-list">
-					{state.threatSnapshots.length ? state.threatSnapshots.map((snapshot) => <ThreatSnapshotCard key={snapshot.id} active={snapshot.id === state.activeThreatSnapshotId} snapshot={snapshot} onSelect={() => post('selectThreatSnapshot', snapshot.id)} />) : <div className="threat-history-empty"><span className="codicon codicon-search-stop" aria-hidden="true" />No scan results yet.</div>}
+					{state.threatSnapshots.length ? state.threatSnapshots.map((snapshot) => <ThreatSnapshotCard key={snapshot.id} active={snapshot.id === state.activeThreatSnapshotId} snapshot={snapshot} onSelect={() => post('selectThreatSnapshot', snapshot.id)} onDelete={() => setDeleteSnapshot(snapshot)} />) : <div className="threat-history-empty"><span className="codicon codicon-search-stop" aria-hidden="true" />No scan results yet.</div>}
 				</div>
 				<div className="threat-history-resizer" role="separator" aria-label="Resize threat results sidebar" onPointerDown={startResize}><span /></div>
 				</>}
@@ -508,17 +509,24 @@ export const ThreatTab = memo(function ThreatTab({ state, post }: { state: Webvi
 				<GraphPreview state={{ ...state, issues: visibleIssues }} />
 				</section>
 			</div>
+			{deleteSnapshot && <div className="modal-backdrop" role="presentation" onClick={() => setDeleteSnapshot(undefined)}>
+				<div className="chat-modal delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-threat-title" onClick={(event) => event.stopPropagation()}>
+					<h2 id="delete-threat-title">Delete threat report?</h2>
+					<p>This will permanently delete <strong>{deleteSnapshot.title}</strong>.</p>
+					<div className="modal-actions"><button type="button" onClick={() => setDeleteSnapshot(undefined)}>Cancel</button><button type="button" className="delete-action" onClick={() => { post('deleteThreatSnapshot', deleteSnapshot.id); setDeleteSnapshot(undefined); }}>Delete</button></div>
+				</div>
+			</div>}
 		</div>
 	);
 });
 
-function ThreatSnapshotCard({ snapshot, active, onSelect }: { snapshot: WebviewState['threatSnapshots'][number]; active: boolean; onSelect: () => void }): React.ReactElement {
+function ThreatSnapshotCard({ snapshot, active, onSelect, onDelete }: { snapshot: WebviewState['threatSnapshots'][number]; active: boolean; onSelect: () => void; onDelete: () => void }): React.ReactElement {
 	const counts = countSnapshotSeverities(snapshot.issues);
-	return <button className={active ? 'threat-snapshot active' : 'threat-snapshot'} onClick={onSelect} aria-pressed={active}>
-		<div className="threat-snapshot-title"><strong>{snapshot.title}</strong><span className="codicon codicon-files" aria-hidden="true" /></div>
+	return <div className={active ? 'threat-snapshot active' : 'threat-snapshot'} role="button" tabIndex={0} onClick={onSelect} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(); } }} aria-pressed={active}>
+		<div className="threat-snapshot-title"><strong>{snapshot.title}</strong><span className="threat-snapshot-actions"><span className="codicon codicon-files" aria-hidden="true" /><button type="button" className="threat-snapshot-delete" aria-label={`Delete ${snapshot.title}`} title="Delete threat report" onClick={(event) => { event.stopPropagation(); onDelete(); }}><span className="codicon codicon-trash" aria-hidden="true" /></button></span></div>
 		<div className="threat-snapshot-meta"><span>{formatThreatTimestamp(snapshot.createdAt)}</span><span>{snapshot.filesScanned} files</span></div>
 		<div className="threat-snapshot-counts" aria-label={`${snapshot.issues.length} findings`}><span className="critical"><i />{counts.critical}</span><span className="high"><i />{counts.high}</span><span className="medium"><i />{counts.medium}</span><span className="low"><i />{counts.low}</span></div>
-	</button>;
+	</div>;
 }
 
 function countSnapshotSeverities(issues: readonly WebviewIssue[]): Record<Lowercase<Severity>, number> {

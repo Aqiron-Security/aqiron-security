@@ -14,6 +14,7 @@ import { RagWorkspaceService } from '../rag/ragWorkspaceService';
 import { ThreatHistoryService, ThreatSnapshot } from '../security/threatHistoryService';
 
 export type AqironWebviewSection = 'agent' | 'scan' | 'threats' | 'reports' | 'settings' | 'aiAgent';
+export type WorkspaceScanMode = 'quick' | 'deep' | 'analysis';
 
 interface WebviewState {
 	issues: AqironIssue[];
@@ -143,7 +144,7 @@ const defaultStats: AqironWorkspaceStats = {
 };
 
 export interface AqironWebviewController {
-	update(issues: readonly AqironIssue[], stats?: Partial<AqironWorkspaceStats>, report?: WebviewPipelineState['lastReport']): void;
+	update(issues: readonly AqironIssue[], stats?: Partial<AqironWorkspaceStats>, report?: WebviewPipelineState['lastReport'], scanMode?: WorkspaceScanMode): void;
 	setScanStatus(scanStatus: AqironWorkspaceStats['scanStatus']): void;
 	onPipelineEvent(event: PipelineEvent): void;
 	open(): void;
@@ -312,7 +313,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		void this.refreshWorkspaceProfile();
 	}
 
-	update(issues: readonly AqironIssue[], stats?: Partial<AqironWorkspaceStats>, report?: WebviewPipelineState['lastReport']): void {
+	update(issues: readonly AqironIssue[], stats?: Partial<AqironWorkspaceStats>, report?: WebviewPipelineState['lastReport'], scanMode: WorkspaceScanMode = 'deep'): void {
 		this.state = {
 			...this.state,
 			issues: [...issues],
@@ -333,7 +334,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			}, ...memory.previousScans].slice(0, 20);
 			this.state = { ...this.state, memory: { ...memory, previousScans } };
 			void this.context.workspaceState.update(getMemoryKey(), this.state.memory);
-			void this.persistThreatSnapshot(this.state.issues, this.state.stats.filesScanned);
+			void this.persistThreatSnapshot(this.state.issues, this.state.stats.filesScanned, scanMode);
 		}
 		this.postState();
 	}
@@ -504,6 +505,11 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 					this.selectThreatSnapshot(payload);
 				}
 				return;
+			case 'deleteThreatSnapshot':
+				if (typeof payload === 'string') {
+					await this.deleteThreatSnapshot(payload);
+				}
+				return;
 			case 'openPolicy':
 				await this.openPolicyFile();
 				return;
@@ -546,13 +552,13 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		this.postState();
 	}
 
-	private async persistThreatSnapshot(issues: readonly AqironIssue[], filesScanned: number): Promise<void> {
+	private async persistThreatSnapshot(issues: readonly AqironIssue[], filesScanned: number, mode: WorkspaceScanMode = 'deep'): Promise<void> {
 		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		if (!root || !isFlutterWorkspace(root)) {
 			return;
 		}
 		try {
-			const threatSnapshots = await this.threatHistory.record(root, issues, filesScanned, this.state.pipeline.lastReport?.executiveSummary);
+			const threatSnapshots = await this.threatHistory.record(root, issues, filesScanned, this.state.pipeline.lastReport?.executiveSummary, mode);
 			this.state = {
 				...this.state,
 				threatSnapshots,
@@ -579,6 +585,46 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			pipeline: snapshot.executiveSummary ? { ...this.state.pipeline, lastReport: { ...this.state.pipeline.lastReport, executiveSummary: snapshot.executiveSummary } } : this.state.pipeline,
 			workspace: { ...this.state.workspace, risk: getRiskStatus(snapshot.issues) },
 		};
+		this.postState();
+	}
+
+	private async deleteThreatSnapshot(id: string): Promise<void> {
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!root || !isFlutterWorkspace(root)) {
+			return;
+		}
+		const wasActive = this.state.activeThreatSnapshotId === id;
+		const threatSnapshots = await this.threatHistory.delete(root, id);
+		if (threatSnapshots.length === this.state.threatSnapshots.length) {
+			return;
+		}
+		if (wasActive) {
+			const next = threatSnapshots[0];
+			if (next) {
+				this.state = {
+					...this.state,
+					threatSnapshots,
+					issues: next.issues,
+					stats: { ...this.state.stats, filesScanned: next.filesScanned, indexedFiles: next.filesScanned, scanStatus: 'Complete' },
+					activeThreatSnapshotId: next.id,
+					selectedThreatId: next.issues[0]?.id,
+					workspace: { ...this.state.workspace, risk: getRiskStatus(next.issues) },
+					pipeline: next.executiveSummary ? { ...this.state.pipeline, lastReport: { ...this.state.pipeline.lastReport, executiveSummary: next.executiveSummary } } : this.state.pipeline,
+				};
+			} else {
+				this.state = {
+					...this.state,
+					threatSnapshots,
+					issues: [],
+					stats: { ...this.state.stats, filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete' },
+					activeThreatSnapshotId: undefined,
+					selectedThreatId: undefined,
+					workspace: { ...this.state.workspace, risk: 'Secure' },
+				};
+			}
+		} else {
+			this.state = { ...this.state, threatSnapshots };
+		}
 		this.postState();
 	}
 

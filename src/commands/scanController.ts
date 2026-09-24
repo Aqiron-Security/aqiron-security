@@ -87,7 +87,7 @@ export class ScanController implements vscode.Disposable {
 				vscode.window.showInformationMessage(`Aqiron Security scan completed: ${visibleIssues.length} actionable issue${visibleIssues.length === 1 ? '' : 's'} found${suffix}.`);
 			}
 			return { ...result, issues: visibleIssues };
-		});
+		}, mode);
 	}
 
 	async analyzeWorkspace(showMessage = false): Promise<void> {
@@ -183,7 +183,7 @@ export class ScanController implements vscode.Disposable {
 		});
 	}
 
-	private async runScan(task: () => Promise<AqironScanResult>): Promise<void> {
+	private async runScan(task: () => Promise<AqironScanResult>, scanMode?: 'quick' | 'deep' | 'analysis'): Promise<void> {
 		if (this.running) {
 			this.scanWorkspaceDebounced();
 			return;
@@ -217,7 +217,7 @@ export class ScanController implements vscode.Disposable {
 			vscode.window.showErrorMessage(`Aqiron Security scan failed: ${message}`);
 		} finally {
 			this.running = false;
-			this.refreshViews();
+			this.refreshViews(scanMode);
 		}
 	}
 
@@ -234,10 +234,10 @@ export class ScanController implements vscode.Disposable {
 		this.issuesByFile.set(file, [...issues]);
 	}
 
-	private refreshViews(): void {
+	private refreshViews(scanMode?: 'quick' | 'deep' | 'analysis'): void {
 		const allIssues = [...this.issuesByFile.values()].flat();
 		this.diagnostics.setIssues(allIssues);
-		this.sidebar.update(allIssues, this.workspaceStats, this.lastReport);
+		this.sidebar.update(allIssues, this.workspaceStats, this.lastReport, scanMode);
 
 		const counts = getCounts(allIssues);
 		this.statusBar.text = `$(shield) Aqiron Security ${counts.total} Issue${counts.total === 1 ? '' : 's'}`;
