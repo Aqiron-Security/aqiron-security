@@ -58,6 +58,7 @@ export class CoreProcessManager extends EventEmitter {
 		this.state = 'starting';
 		this.emit('state', this.state);
 		this.expectedShutdown = false;
+		this.buffer = '';
 		const runtimePath = path.join(__dirname, 'core-runtime.js');
 		this.child = childProcess.spawn(process.execPath, [runtimePath], {
 			cwd: path.dirname(runtimePath),
@@ -79,6 +80,7 @@ export class CoreProcessManager extends EventEmitter {
 			this.pending.clear();
 			this.child = undefined;
 			this.started = false;
+			this.buffer = '';
 			this.state = expected ? 'stopped' : 'crashed';
 			this.emit('state', this.state);
 			this.emit('exit', { code, signal });
