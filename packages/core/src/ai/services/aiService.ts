@@ -96,7 +96,9 @@ export class AIService {
 		const credential = this.settings.apiCredentials?.find((api) => api.providerId === providerId);
 		await this.saveSettings({ ...this.settings, selectedProvider: providerId, activeApiCredentialId: credential?.id });
 		await this.registry.switchProvider(providerId);
-		await this.refreshModels(false);
+		// Provider switches commonly happen immediately after adding or changing
+		// credentials. Do not reuse an empty or stale model cache in that case.
+		await this.refreshModels(true);
 	}
 
 	async *chat(input: AIChatInput): AsyncGenerator<StreamChunk> {

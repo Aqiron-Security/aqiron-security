@@ -4,12 +4,12 @@ import { UnifiedFinding } from '../shared/finding';
 import { ScanTelemetrySnapshot } from '../telemetry/telemetry';
 import { ExecutiveSummaryGenerator, createExecutiveSummary } from './executiveSummary';
 import { createJsonReport, createPdfReport, createSarifReport, createTextReport } from './reportExporters';
-import { SecurityReportContent, SecurityReportModel } from './reportModels';
+import { SecurityReportContent, SecurityReportModel, SecurityReportPdfContext } from './reportModels';
 
 export class ReportGenerator {
 	constructor(private readonly executiveSummaryGenerator?: ExecutiveSummaryGenerator) {}
 
-	async generate(workspaceRoot: string, findings: readonly UnifiedFinding[], correlation: CorrelationResult, graph: SecurityGraph, telemetry: ScanTelemetrySnapshot): Promise<SecurityReportContent> {
+	async generate(workspaceRoot: string, findings: readonly UnifiedFinding[], correlation: CorrelationResult, graph: SecurityGraph, telemetry: ScanTelemetrySnapshot, reportContext?: SecurityReportPdfContext): Promise<SecurityReportContent> {
 		const generatedAt = new Date().toISOString();
 		const executiveSummary = await createExecutiveSummary(workspaceRoot, findings, correlation, this.executiveSummaryGenerator);
 		const model: SecurityReportModel = {
@@ -33,7 +33,7 @@ export class ReportGenerator {
 		};
 		void createJsonReport(model);
 		const sarif = createSarifReport(findings);
-		const pdf = createPdfReport(executiveSummary);
+		const pdf = createPdfReport(model, workspaceRoot, reportContext);
 		const text = createTextReport({ model, text: executiveSummary, sarif, pdf });
 		return { model, text, sarif, pdf };
 	}

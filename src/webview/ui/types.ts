@@ -200,6 +200,7 @@ export interface WebviewState {
 		tools: PipelineTool[];
 		logs: string[];
 		lastReport?: {
+			directory?: string;
 			jsonPath?: string;
 			sarifPath?: string;
 			pdfPath?: string;

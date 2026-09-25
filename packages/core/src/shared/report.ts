@@ -10,6 +10,7 @@ export interface SecurityReportBundle {
 	sarif: unknown;
 	executiveSummary: string;
 	exports: {
+		directory?: string;
 		jsonPath?: string;
 		sarifPath?: string;
 		pdfPath?: string;

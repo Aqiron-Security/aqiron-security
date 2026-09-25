@@ -67,7 +67,7 @@ export class CoreScanService {
 
 			emit({ type: 'report.started', scanId });
 			state = markReportState(state, 'running');
-			const report = await request.reportGenerator.generate(request.workspaceRoot, correlation.findings, correlation, graph, telemetry.getSnapshot());
+			const report = await request.reportGenerator.generate(request.workspaceRoot, correlation.findings, correlation, graph, telemetry.getSnapshot(), { scanMode: request.mode ?? 'deep', scanId });
 			throwIfCancelled(request.cancellationToken);
 			state = markReportState(state, 'completed');
 			emit({ type: 'report.completed', scanId });
