@@ -22,7 +22,7 @@ export class ScanController implements vscode.Disposable {
 		lastScanDurationMs: 0,
 	};
 	private running = false;
-	private lastReport?: { jsonPath?: string; sarifPath?: string; pdfPath?: string; executiveSummary?: string };
+	private lastReport?: { directory?: string; jsonPath?: string; sarifPath?: string; pdfPath?: string; executiveSummary?: string };
 	private readonly orchestrator: SecurityOrchestrator;
 	private readonly pipelineSubscription: vscode.Disposable;
 

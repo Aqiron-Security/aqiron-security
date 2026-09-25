@@ -141,7 +141,7 @@ export class CoreRuntime {
 				case 'credentials.exists':
 					return this.ok(message.id, await this.credentialsExists((message.params as { key: string }).key));
 				case 'report.generate':
-					return this.ok(message.id, await this.reportGenerate(message.params as { scanId?: string; findings?: UnifiedFinding[]; correlation?: CorrelationResult; graph?: SecurityGraph; telemetry?: unknown }));
+					return this.ok(message.id, await this.reportGenerate(message.params as { scanId?: string; mode?: 'quick' | 'deep' | 'analysis' | 'custom'; findings?: UnifiedFinding[]; correlation?: CorrelationResult; graph?: SecurityGraph; telemetry?: unknown }));
 				default:
 					return this.fail(message.id, 'INVALID_REQUEST', `Unknown method: ${message.method}`);
 			}
@@ -390,12 +390,12 @@ private async credentialsStatus(key: string): Promise<CoreCredentialsStatusResul
 		return { exists: Boolean(await this.credentialStore.get(key)) };
 	}
 
-	private async reportGenerate(request: { workspaceRoot?: string; scanId?: string; findings?: UnifiedFinding[]; correlation?: CorrelationResult; graph?: SecurityGraph; telemetry?: unknown }): Promise<SecurityReportContent> {
+	private async reportGenerate(request: { workspaceRoot?: string; scanId?: string; mode?: 'quick' | 'deep' | 'analysis' | 'custom'; findings?: UnifiedFinding[]; correlation?: CorrelationResult; graph?: SecurityGraph; telemetry?: unknown }): Promise<SecurityReportContent> {
 		const findings = request.findings ?? [];
 		const correlation = request.correlation ?? ({ findings, relationships: [], summary: { deduplicated: 0, boosted: 0, attackPaths: 0 } } as CorrelationResult);
 		const graph = request.graph ?? ({ nodes: [], edges: [] } as unknown as SecurityGraph);
 		const workspaceRoot = request.workspaceRoot ?? (findings[0]?.file ? path.dirname(findings[0].file) : process.cwd());
-		return await this.reportGenerator.generate(workspaceRoot, findings, correlation, graph, request.telemetry as never);
+		return await this.reportGenerator.generate(workspaceRoot, findings, correlation, graph, request.telemetry as never, { scanMode: request.mode, scanId: request.scanId });
 	}
 
 	private projectOptions(root: string): ProjectDetectorOptions {

@@ -25,6 +25,12 @@ export interface SecurityReportRemediationItem {
 	action: string;
 }
 
+export interface SecurityReportPdfContext {
+	scanMode?: 'quick' | 'deep' | 'analysis' | 'custom';
+	scanId?: string;
+	reportVersion?: string;
+}
+
 export interface SecurityReportModel {
 	generatedAt: string;
 	executiveSummary: string;

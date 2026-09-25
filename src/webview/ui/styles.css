@@ -50,6 +50,8 @@ h3 { font-size: 13px; }
 .hero-pills span, .badge, .sev { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; background: rgba(255,255,255,.045); color: #cfe3ff; font-size: 11px; white-space: nowrap; }
 .report-info { display: inline-flex; align-items: center; gap: 4px; color: #b8d5f3; cursor: help; }
 .report-info .codicon { font-family: codicon; font-size: 12px; }
+.report-export-note { margin: 12px 0 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.report-export-note code { color: var(--text); font-family: var(--font-mono); }
 .tab-page { min-width: 0; display: grid; gap: 14px; }
 .section { padding: 12px; display: grid; gap: 10px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -122,6 +124,7 @@ h3 { font-size: 13px; }
 .build-menu > div button { border: 0; border-radius: 6px; background: transparent; color: var(--text); padding: 8px; text-align: left; }
 .build-menu > div button:hover { background: rgba(255,255,255,.08); }
 .suggestion-actions button, .control-row button, .composer-footer button { border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.055); color: var(--text); padding: 7px 9px; font-size: 11px; }
+.control-row button:disabled { opacity: .45; cursor: not-allowed; }
 .composer { position: sticky; left: auto; right: auto; bottom: 0; width: min(900px, 100%); margin: 0 auto; z-index: 40; padding: 8px; box-shadow: 0 18px 54px rgba(0,0,0,.38); }
 .composer textarea { width: 100%; height: 58px; min-height: 58px; max-height: 58px; resize: none; overflow: auto; color: var(--text); border: 0; outline: 0; border-radius: 8px; background: rgba(2,6,14,.58); padding: 9px 10px; font-size: 13px; line-height: 1.45; }
 .composer-footer { margin-top: 5px; position: relative; min-width: 0; font-size: 11px; }

@@ -6,6 +6,7 @@ import { CoreScanResult } from '../../../packages/core/src/orchestration';
 import { getCoreClient } from '../../core/coreClientSingleton';
 import { WorkspaceScanner } from '../../scanner/workspaceScanner';
 import { ScannerResult } from '../scanners/types';
+import { createReportBundlePaths } from '../reports/reportStorage';
 
 export interface PipelineScanOptions {
 	mode?: 'quick' | 'deep' | 'analysis';
@@ -74,20 +75,15 @@ export class SecurityPipelineEngine {
 }
 
 async function writeReportBundle(workspaceRoot: string, report: CoreScanResult['report']): Promise<SecurityReportBundle> {
-	const reportDirectory = path.join(workspaceRoot, '.aqiron-security', 'reports');
-	await fs.mkdir(reportDirectory, { recursive: true });
-	const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-	const jsonPath = path.join(reportDirectory, `aqiron-security-${stamp}.json`);
-	const sarifPath = path.join(reportDirectory, `aqiron-security-${stamp}.sarif`);
-	const pdfPath = path.join(reportDirectory, `aqiron-security-${stamp}.pdf`);
-	await fs.writeFile(jsonPath, JSON.stringify(report.model, null, 2), 'utf8');
-	await fs.writeFile(sarifPath, JSON.stringify(report.sarif, null, 2), 'utf8');
-	await fs.writeFile(pdfPath, report.pdf, 'binary');
+	const paths = await createReportBundlePaths(workspaceRoot, report.model.generatedAt);
+	await fs.writeFile(paths.jsonPath, JSON.stringify(report.model, null, 2), 'utf8');
+	await fs.writeFile(paths.sarifPath, JSON.stringify(report.sarif, null, 2), 'utf8');
+	await fs.writeFile(paths.pdfPath, report.pdf, 'binary');
 	return {
 		json: report.model,
 		sarif: report.sarif,
 		executiveSummary: report.model.executiveSummary,
-		exports: { jsonPath, sarifPath, pdfPath },
+		exports: paths,
 	};
 }
 

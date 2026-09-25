@@ -109,6 +109,7 @@ interface WebviewPipelineState {
 	tools: ToolExecutionState[];
 	logs: string[];
 	lastReport?: {
+		directory?: string;
 		jsonPath?: string;
 		sarifPath?: string;
 		pdfPath?: string;
@@ -882,20 +883,34 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		const format = typeof payload === 'string' ? payload : 'json';
 		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionPath;
 		const baseName = `aqiron-security-report-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-		const extension = format === 'pdf' ? 'pdf' : format === 'jira' || format === 'share' ? 'md' : 'json';
+		const extension = format === 'pdf' ? 'pdf' : format === 'sarif' ? 'sarif' : format === 'jira' || format === 'share' ? 'md' : 'json';
 		const reportDirectory = path.join(workspaceRoot, '.aqiron-security', 'reports');
 		await fs.mkdir(reportDirectory, { recursive: true });
+		const generatedPath = format === 'pdf' ? this.state.pipeline.lastReport?.pdfPath : format === 'json' ? this.state.pipeline.lastReport?.jsonPath : format === 'sarif' ? this.state.pipeline.lastReport?.sarifPath : undefined;
+		if ((format === 'pdf' || format === 'json' || format === 'sarif') && !generatedPath) {
+			void vscode.window.showInformationMessage('Run a scan first to generate the PDF, JSON, and SARIF report bundle.');
+			return;
+		}
+		const defaultPath = generatedPath ?? path.join(reportDirectory, `${baseName}.${extension}`);
 		const target = await vscode.window.showSaveDialog({
-			defaultUri: vscode.Uri.file(path.join(reportDirectory, `${baseName}.${extension}`)),
+			defaultUri: vscode.Uri.file(defaultPath),
 			filters: getReportFilters(format),
 			saveLabel: format === 'jira' ? 'Save Jira ticket' : format === 'share' ? 'Save shareable report' : 'Export report',
 		});
 		if (!target) {
 			return;
 		}
-		const content = format === 'pdf'
-			? createPdfBuffer(this.state)
-			: Buffer.from(format === 'json' ? JSON.stringify(createReportJson(this.state), null, 2) : createReportMarkdown(this.state, format), 'utf8');
+		let content: Uint8Array;
+		if (generatedPath) {
+			try {
+				content = await fs.readFile(generatedPath);
+			} catch {
+				void vscode.window.showWarningMessage('The generated report artifact could not be read. Run the scan again to regenerate the report bundle.');
+				return;
+			}
+		} else {
+			content = Buffer.from(format === 'json' ? JSON.stringify(createReportJson(this.state), null, 2) : createReportMarkdown(this.state, format), 'utf8');
+		}
 		await vscode.workspace.fs.writeFile(target, content);
 		void vscode.window.showInformationMessage(`Saved Aqiron report: ${target.fsPath}`);
 	}
@@ -2090,6 +2105,9 @@ function safeFileName(value: string): string {
 function getReportFilters(format: string): Record<string, string[]> {
 	if (format === 'pdf') {
 		return { 'PDF': ['pdf'] };
+	}
+	if (format === 'sarif') {
+		return { 'SARIF': ['sarif'] };
 	}
 	if (format === 'jira' || format === 'share') {
 		return { 'Markdown': ['md'] };

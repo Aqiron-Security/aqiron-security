@@ -590,11 +590,22 @@ export const ReportsTab = memo(function ReportsTab({ state, post }: { state: Web
 			<section className="section">
 				<div className="section-head"><h2>Scan Timeline</h2><span>Completed scan history</span></div>
 				<div className="timeline-list">{state.timeline.map((item) => <div key={item.id} className="timeline"><div className="timeline-head"><strong>{item.title}</strong><time>{formatTimelineTimestamp(item.timestamp)}</time></div><span>{item.detail}</span></div>)}</div>
-				<div className="control-row"><button onClick={() => post('exportReport', 'pdf')}>Export PDF</button><button onClick={() => post('exportReport', 'json')}>Export JSON</button><button onClick={() => post('exportReport', 'share')}>Share Report</button><button onClick={() => post('exportReport', 'jira')}>Create Jira Ticket</button></div>
+				<p className="report-export-note">JSON, PDF, and SARIF are already generated in <code>{reportFolderLabel(state.pipeline.lastReport?.directory)}</code>. Use those existing files to avoid creating duplicate reports.</p>
+				<div className="control-row"><button disabled={!state.pipeline.lastReport?.pdfPath} title={state.pipeline.lastReport?.pdfPath ? 'Export the generated PDF' : 'Run a scan to generate a report bundle'} onClick={() => post('exportReport', 'pdf')}>Export PDF</button><button disabled={!state.pipeline.lastReport?.jsonPath} onClick={() => post('exportReport', 'json')}>Export JSON</button><button disabled={!state.pipeline.lastReport?.sarifPath} onClick={() => post('exportReport', 'sarif')}>Export SARIF</button><button onClick={() => post('exportReport', 'share')}>Share Report</button><button onClick={() => post('exportReport', 'jira')}>Create Jira Ticket</button></div>
 			</section>
 		</div>
 	);
 });
+
+function reportFolderLabel(directory?: string): string {
+	if (!directory) {
+		return '.aqiron-security/reports/<scan-folder>';
+	}
+	const normalized = directory.replace(/\\/g, '/');
+	const marker = '/.aqiron-security/reports/';
+	const markerIndex = normalized.lastIndexOf(marker);
+	return markerIndex >= 0 ? `.aqiron-security/reports/${normalized.slice(markerIndex + marker.length)}` : '.aqiron-security/reports/<scan-folder>';
+}
 
 function ContextBar({ state }: { state: WebviewState }): React.ReactElement {
 	return <div className="context-bar">{[state.workspace.currentFile, state.workspace.types[0] ?? 'Workspace', state.workspace.backend, state.branches[0] ?? 'No branch', state.stats.scanStatus, `${state.workspace.apis.length} APIs`].map((item) => <span key={item}>{item}</span>)}</div>;
