@@ -640,55 +640,51 @@ function formatTimelineTimestamp(value: string): string {
 	return Number.isNaN(date.getTime()) ? 'Unknown time' : date.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
-function summarizeTools(issues: readonly WebviewIssue[]): string {
-	const tools = [...new Set(issues.map((issue) => issue.tool))].filter(Boolean);
-	return tools.length ? tools.slice(0, 3).join(', ') + (tools.length > 3 ? ` +${tools.length - 3}` : '') : 'None';
-}
-
 export const ReportsTab = memo(function ReportsTab({ state, post }: { state: WebviewState; post: Post }): React.ReactElement {
-	const scores = useMemo(() => [78, 82, 76, 86, 89, 84, Math.max(48, 96 - state.counts.critical * 12 - state.counts.high * 6)], [state.counts]);
 	const activeReport = state.threatSnapshots.find((snapshot) => snapshot.id === state.activeThreatSnapshotId);
+	const lastReport = state.pipeline.lastReport;
+	const reportAvailable = Boolean(lastReport?.pdfPath || lastReport?.jsonPath || lastReport?.sarifPath);
+	const reportStatus = reportAvailable ? 'Available' : state.threatSnapshots.length ? 'Assessment available' : 'No report yet';
 	return (
-		<div className="tab-page">
-			<section className="metric-grid">
-				<Metric title="Security Score" value={`${scores[scores.length - 1]}`} />
-				<Metric title="Open Findings" value={`${state.counts.total}`} />
-				<Metric title="OWASP Coverage" value="92%" />
-				<Metric title="Files Scanned" value={`${state.stats.filesScanned}`} />
+		<div className="tab-page reports-workspace">
+			<section className="reports-hero aq-surface-panel">
+				<div className="reports-hero-copy"><AqironBadge tone="brand"><span className="codicon codicon-file-text" aria-hidden="true" />Assessment workspace</AqironBadge><AqironSectionHeader title="Security reports" description="Review what the latest assessment found, then export the format your workflow needs." /><div className="reports-context"><span><span className="codicon codicon-folder" aria-hidden="true" />{state.workspace.name}</span><span><span className="codicon codicon-shield" aria-hidden="true" />{state.stats.scanStatus}</span><span><span className="codicon codicon-file-code" aria-hidden="true" />{state.stats.filesScanned} files scanned</span></div></div>
+				<div className="reports-hero-status"><span className={`aq-status ${reportAvailable ? 'aq-status--success' : 'aq-status--warning'}`}>{reportStatus}</span>{activeReport ? <span>{activeReport.title}</span> : <span>Run a scan to create report artifacts</span>}</div>
 			</section>
-			<section className="section">
-				<div className="section-head"><h2>Security Score Evolution</h2><span>{activeReport ? `Report for ${activeReport.title}` : 'Rolling posture trend'} <span className="report-info" title="These bars show how Aqiron’s calculated security posture changes across recent scans. Higher bars mean fewer or lower-risk findings; use the trend to confirm remediation is improving the release posture."><span className="codicon codicon-info" aria-hidden="true" /> What is this?</span></span></div>
-				<div className="line-chart">{scores.map((score, index) => <i key={index} style={{ height: `${score}%` }} />)}</div>
+			<section className="reports-assessment">
+				<AqironSectionHeader title="Latest assessment" description={activeReport ? `${activeReport.title} · ${formatThreatTimestamp(activeReport.createdAt)}` : 'Counts and scan context from the current workspace state.'} action={<AqironButton variant="secondary" type="button" onClick={() => post('focus', 'threats')}>View findings</AqironButton>} />
+				<div className="reports-summary-grid"><AqironMetric title="Total findings" value={`${state.counts.total}`} /><AqironMetric title="Critical" value={`${state.counts.critical}`} /><AqironMetric title="High" value={`${state.counts.high}`} /><AqironMetric title="Files scanned" value={`${state.stats.filesScanned}`} />{state.stats.lastScanDurationMs > 0 ? <AqironMetric title="Last scan" value={formatDuration(state.stats.lastScanDurationMs)} /> : null}</div>
 			</section>
-			<section className="section report-grid">
-				<div>
-					<div className="section-head"><h2>Executive Summary</h2></div>
-					<div className="executive executive-scroll"><Markdown content={state.pipeline.lastReport?.executiveSummary ?? (state.counts.total ? `Aqiron found ${state.counts.total} findings. Prioritize critical secrets, injection paths, and permissions before the next release gate.` : 'No open findings are currently indexed. Continue scheduled scans, dependency monitoring, and release-gate audits.')} /></div>
-				</div>
-				<div>
-					<div className="section-head"><h2>Compliance</h2></div>
-					{state.compliance.map((item) => <div key={item.name} className="compliance"><strong>{item.name}</strong><span>{item.score}%</span><em>{item.status}</em></div>)}
-				</div>
+			<section className="reports-outputs">
+				<AqironSectionHeader title="Report outputs" description={reportAvailable ? 'Generated artifacts are ready to export or share.' : 'A report bundle becomes available after a completed scan.'} action={<AqironButton variant="secondary" type="button" disabled={!lastReport?.pdfPath} title={lastReport?.pdfPath ? 'Export the generated PDF' : 'Run a scan first to generate a PDF'} onClick={() => post('exportReport', 'pdf')}><span className="codicon codicon-file-pdf" aria-hidden="true" />Export PDF</AqironButton>} />
+				<div className="report-format-grid"><ReportFormatCard format="PDF" description="Readable assessment document for review and release evidence." path={lastReport?.pdfPath} onExport={() => post('exportReport', 'pdf')} onRename={() => post('renameReportArtifact', 'pdf')} /><ReportFormatCard format="JSON" description="Structured report data for automation and integrations." path={lastReport?.jsonPath} onExport={() => post('exportReport', 'json')} onRename={() => post('renameReportArtifact', 'json')} /><ReportFormatCard format="SARIF" description="Standardized findings format for code-scanning workflows." path={lastReport?.sarifPath} onExport={() => post('exportReport', 'sarif')} onRename={() => post('renameReportArtifact', 'sarif')} /></div>
+				<div className="reports-secondary-actions"><AqironButton variant="secondary" type="button" onClick={() => post('exportReport', 'share')}>Share report</AqironButton><AqironButton variant="secondary" type="button" onClick={() => post('exportReport', 'jira')}>Create Jira ticket</AqironButton></div>
 			</section>
-			<section className="section report-graph-card">
-				<div className="section-head"><h2>Security Influence Graph</h2><span>Which tool found the risk and where the evidence lives</span></div>
-				<div className="report-graph-layout">
-					<GraphPreview state={state} />
-					<div className="graph-insights">
-						<p className="graph-explanation">Each path reads left to right: scanner → finding → file. Betterleaks represents exposed secrets; OSV-Scanner represents dependency vulnerabilities.</p>
-						<div className="tool-influence-list">{summarizeToolInfluence(state.issues).map((item) => <div key={item.tool} className="tool-influence"><span className="tool-influence-dot" /><div><strong>{item.tool}</strong><small>{item.findings} finding{item.findings === 1 ? '' : 's'} · {item.highRisk} high-risk</small></div><span className="tool-influence-count">{item.findings}</span></div>)}</div>
-					</div>
-				</div>
+			<section className="reports-history">
+				<AqironSectionHeader title="Report history" description={state.threatSnapshots.length ? 'Stored assessment snapshots from completed scans.' : 'Completed scan assessments will appear here.'} />
+				{state.threatSnapshots.length ? <div className="report-history-list">{state.threatSnapshots.map((snapshot) => <ReportHistoryCard key={snapshot.id} snapshot={snapshot} active={snapshot.id === state.activeThreatSnapshotId} onSelect={() => post('selectThreatSnapshot', snapshot.id)} />)}</div> : <div className="reports-empty aq-empty-state"><span className="codicon codicon-file-text" aria-hidden="true" /><strong>No report history yet</strong><span>Run a scan to create the first assessment snapshot.</span></div>}
 			</section>
-			<section className="section">
-				<div className="section-head"><h2>Scan Timeline</h2><span>Completed scan history</span></div>
-				<div className="timeline-list">{state.timeline.map((item) => <div key={item.id} className="timeline"><div className="timeline-head"><strong>{item.title}</strong><time>{formatTimelineTimestamp(item.timestamp)}</time></div><span>{item.detail}</span></div>)}</div>
-				<p className="report-export-note">JSON, PDF, and SARIF are already generated in <code>{reportFolderLabel(state.pipeline.lastReport?.directory)}</code>. Use those existing files to avoid creating duplicate reports.</p>
-				<div className="control-row"><button disabled={!state.pipeline.lastReport?.pdfPath} title={state.pipeline.lastReport?.pdfPath ? 'Export the generated PDF' : 'Run a scan to generate a report bundle'} onClick={() => post('exportReport', 'pdf')}>Export PDF</button><button disabled={!state.pipeline.lastReport?.jsonPath} onClick={() => post('exportReport', 'json')}>Export JSON</button><button disabled={!state.pipeline.lastReport?.sarifPath} onClick={() => post('exportReport', 'sarif')}>Export SARIF</button><button onClick={() => post('exportReport', 'share')}>Share Report</button><button onClick={() => post('exportReport', 'jira')}>Create Jira Ticket</button></div>
+			<section className="reports-details">
+				<details className="reports-metadata"><summary><span><strong>Report metadata</strong><small>Paths and assessment context</small></span><span className="codicon codicon-chevron-down" aria-hidden="true" /></summary><div className="reports-metadata-grid"><span><strong>Output folder</strong><code>{reportFolderLabel(lastReport?.directory)}</code></span><span><strong>Assessment</strong>{activeReport?.title ?? 'No selected assessment'}</span><span><strong>Generated formats</strong>{[lastReport?.pdfPath && 'PDF', lastReport?.jsonPath && 'JSON', lastReport?.sarifPath && 'SARIF'].filter(Boolean).join(', ') || 'None yet'}</span><span><strong>Executive summary</strong>{lastReport?.executiveSummary ? 'Available' : 'Not supplied'}</span></div></details>
 			</section>
 		</div>
 	);
 });
+
+function ReportFormatCard({ format, description, path, onExport, onRename }: { format: string; description: string; path?: string; onExport: () => void; onRename: () => void }): React.ReactElement {
+		const available = Boolean(path);
+		return <article className={`report-format-card ${available ? 'available' : 'unavailable'}`}><div className="report-format-heading"><span className="report-format-icon"><span className={`codicon ${format === 'PDF' ? 'codicon-file-pdf' : format === 'SARIF' ? 'codicon-bracket-dot' : 'codicon-json'}`} aria-hidden="true" /></span><div><strong>{format}</strong><span>{available ? 'Available' : 'Not generated'}</span></div></div><p>{description}</p>{available && path ? <span className="report-artifact-name"><code title={path}>{reportArtifactLabel(path)}</code><AqironIconButton className="report-artifact-rename" aria-label={`Rename ${reportArtifactLabel(path)}`} title={`Rename ${reportArtifactLabel(path)}`} disabled={!available} onClick={onRename}><span className="codicon codicon-edit" aria-hidden="true" /></AqironIconButton></span> : <span className="report-format-helper">Run a scan to generate this artifact.</span>}<AqironButton variant={available ? 'secondary' : 'ghost'} type="button" disabled={!available} onClick={onExport}>{available ? `Export ${format}` : 'Unavailable'}</AqironButton></article>;
+}
+
+function ReportHistoryCard({ snapshot, active, onSelect }: { snapshot: WebviewState['threatSnapshots'][number]; active: boolean; onSelect: () => void }): React.ReactElement {
+	const counts = countSnapshotSeverities(snapshot.issues);
+	return <button type="button" className={active ? 'report-history-card active' : 'report-history-card'} onClick={onSelect} aria-pressed={active}><span className="report-history-card-main"><strong>{snapshot.title}</strong><small>{formatThreatTimestamp(snapshot.createdAt)} · {snapshot.filesScanned} files scanned</small></span><span className="report-history-counts"><span><AqironSeverity severity="Critical" />{counts.critical}</span><span><AqironSeverity severity="High" />{counts.high}</span><span><AqironSeverity severity="Medium" />{counts.medium}</span><span><AqironSeverity severity="Low" />{counts.low}</span></span><span className="codicon codicon-chevron-right" aria-hidden="true" /></button>;
+}
+
+function reportArtifactLabel(value: string): string {
+	const normalized = value.replace(/\\/g, '/');
+	return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+}
 
 function reportFolderLabel(directory?: string): string {
 	if (!directory) {
@@ -1195,21 +1191,6 @@ function buildThreatGraph(state: WebviewState): { nodes: ThreatGraphNode[]; link
 	return { nodes: [...nodeMap.values()], links };
 }
 
-function summarizeToolInfluence(issues: readonly WebviewIssue[]): Array<{ tool: string; findings: number; highRisk: number }> {
-	const preferredOrder = ['Betterleaks', 'OSV-Scanner', 'Semgrep', 'Trivy', 'MobSF', 'AI Analysis', 'Custom Rules', 'AI Security Review'];
-	const counts = new Map<string, { findings: number; highRisk: number }>();
-	for (const issue of issues) {
-		const current = counts.get(issue.tool) ?? { findings: 0, highRisk: 0 };
-		current.findings += 1;
-		if (issue.severity === 'Critical' || issue.severity === 'High') {
-			current.highRisk += 1;
-		}
-		counts.set(issue.tool, current);
-	}
-	return [...new Set([...preferredOrder, ...counts.keys()])]
-		.map((tool) => ({ tool, ...(counts.get(tool) ?? { findings: 0, highRisk: 0 }) }));
-}
-
 function selectGraphFindings(issues: readonly WebviewIssue[]): WebviewIssue[] {
 	const selected: WebviewIssue[] = [];
 	const seenTools = new Set<string>();
@@ -1303,10 +1284,6 @@ function looksLikeStructuredBlob(value: string): boolean {
 	const text = String(value ?? '').trim();
 	return (text.startsWith('{') && text.includes('"runs"')) || (text.startsWith('{') && text.includes('"toolExecutionNotifications"')) || text.includes('Syntax error at line');
 }
-function Metric({ title, value }: { title: string; value: string }): React.ReactElement {
-	return <AqironMetric title={title} value={value} />;
-}
-
 function SeverityBadge({ severity }: { severity: Severity }): React.ReactElement {
 	return <AqironSeverity severity={severity} />;
 }
