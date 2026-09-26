@@ -33,10 +33,13 @@ button:disabled { cursor: not-allowed; opacity: .52; }
 .has-composer { padding-bottom: 14px; }
 .aq-scroll { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; overflow-x: hidden; padding-right: 4px; scrollbar-color: rgba(86,184,255,.55) rgba(255,255,255,.06); }
 .aq-view { min-height: 0; display: flex; flex-direction: column; }
-.aq-top { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
-.aq-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.035); backdrop-filter: blur(18px); }
+.aq-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "context actions" "nav nav"; gap: 10px; align-items: center; }
+.aq-top > .hero-panel { grid-area: context; min-width: 0; padding: 9px 12px; border-color: var(--aq-color-border-subtle); border-radius: var(--aq-radius-card); background: var(--aq-color-surface-1); box-shadow: none; backdrop-filter: none; }
+.aq-tabs { grid-area: nav; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--aq-color-surface-1); }
+.aq-top .orb-actions { grid-area: actions; justify-self: end; }
+.aq-top .aq-status { white-space: nowrap; }
 .tab { min-width: 0; padding: 8px 4px; }
-.tab.active { color: #fff; background: linear-gradient(135deg, rgba(85,217,255,.16), rgba(155,138,251,.12)); box-shadow: inset 0 0 0 1px rgba(165,213,255,.16); }
+.tab.active { color: var(--aq-color-text-primary); background: rgba(85,217,255,.12); box-shadow: inset 0 0 0 1px rgba(85,217,255,.24); }
 .orb-actions { display: flex; align-items: center; gap: 9px; }
 .top-settings { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.045); color: #b9cde7; }
 .top-settings:hover { border-color: var(--line-strong); color: #fff; background: rgba(56,189,248,.1); }
@@ -602,7 +605,8 @@ h3 { font-size: 13px; }
 	.hero-panel, .suggestion-card { grid-template-columns: 1fr; flex-direction: column; align-items: flex-start; }
 	.settings-page { grid-template-columns: 1fr; }
 	.settings-sidebar { position: static; width: 100%; max-width: none; resize: none; }
-	.aq-top { grid-template-columns: 1fr; }
+	.aq-top { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "context context" "nav nav" "actions actions"; }
+	.aq-top .orb-actions { justify-self: end; }
 	.aq-content { padding: 10px; gap: 10px; }
 	.aq-scroll { gap: 10px; padding-right: 0; }
 	.composer { width: 100%; }
@@ -618,6 +622,19 @@ h3 { font-size: 13px; }
 	.chat-sidebar-resize { display: none; }
 	.chat-titlebar { flex-wrap: wrap; }
 	.conversation-scroll { padding-bottom: 24px; }
+}
+
+@media (max-width: 420px) {
+	.aq-tabs { gap: 2px; padding: 3px; }
+	.aq-tabs .aq-tab { gap: 4px; padding-inline: 2px; }
+	.aq-tabs .tab-svg { width: 12px; height: 12px; }
+	.aq-top > .hero-panel { padding: 8px; }
+	.aq-top > .hero-panel .hero-pills span:nth-child(2) { display: none; }
+}
+
+@media (max-width: 360px) {
+	.aq-tabs .tab-svg { display: none; }
+	.aq-tabs .aq-tab { gap: 0; }
 }
 
 /* Agent density pass: container queries follow the actual VS Code webview width. */

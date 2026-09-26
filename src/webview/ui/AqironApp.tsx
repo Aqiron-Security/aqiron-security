@@ -32,6 +32,12 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 	const post = (command: string, payload?: unknown) => vscode.postMessage({ command, payload });
 	const active = state.section;
 	const orb = getOrbState(state);
+	const primaryDestinations: Array<{ id: Section; label: string }> = [
+		{ id: 'agent', label: 'Agent' },
+		{ id: 'scan', label: 'Scan' },
+		{ id: 'threats', label: 'Findings' },
+		{ id: 'reports', label: 'Reports' },
+	];
 
 	return (
 		<div className="aq-shell" style={{ '--aq-zoom': state.zoom } as React.CSSProperties}>
@@ -39,15 +45,9 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 			<div className="aq-grid" />
 			<main className={active === 'agent' || active === 'aiAgent' ? 'aq-content has-composer' : 'aq-content'}>
 				<header className="aq-top">
-					<nav className="aq-tabs">
-						{(['agent', 'scan', 'threats', 'reports'] as Section[]).map((tab) => (
-							<button key={tab} aria-selected={tab === active} className={tab === active ? 'tab aq-tab active' : 'tab aq-tab'} onClick={() => post('focus', tab)}>
-								<span className="svg-icon tab-svg" style={{ '--icon': `url("${tabIcon(tab, state)}")` } as React.CSSProperties} />
-								<span>{tab === 'threats' ? 'Threat' : tab[0].toUpperCase() + tab.slice(1)}</span>
-							</button>
-						))}
-					</nav>
+					<DashboardHero state={state} />
 					<div className="orb-actions">
+						<span className={`aq-status ${getScanStatusTone(state.stats.scanStatus)}`} aria-label={`Scan status: ${state.stats.scanStatus}`}>{state.stats.scanStatus}</span>
 						<AqironIconButton className="top-settings" aria-label="Open settings" onClick={() => post('focus', 'settings')}><span className="codicon codicon-settings-gear" aria-hidden="true" /></AqironIconButton>
 						<div className="orb-wrap">
 						<button className={`security-orb ${orb}`} aria-label="Security summary" />
@@ -58,9 +58,17 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 						</div>
 						</div>
 					</div>
+					<nav className="aq-tabs" aria-label="Primary navigation">
+						{primaryDestinations.map(({ id, label }) => {
+							const selected = id === active || (id === 'agent' && active === 'aiAgent');
+							return <button key={id} type="button" aria-current={selected ? 'page' : undefined} className={selected ? 'tab aq-tab active' : 'tab aq-tab'} onClick={() => post('focus', id)}>
+								<span className="svg-icon tab-svg" style={{ '--icon': `url("${tabIcon(id, state)}")` } as React.CSSProperties} />
+								<span>{label}</span>
+							</button>;
+						})}
+					</nav>
 				</header>
 				<div className="aq-scroll">
-					<DashboardHero state={state} />
 					<Suspense fallback={<div className="skeleton">Loading secure workspace...</div>}>
 						<AnimatePresence mode="wait">
 							<motion.section className="aq-view" key={active} initial={{ opacity: 0, scale: 0.992 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.992 }} transition={{ duration: 0.2 }}>
@@ -93,7 +101,6 @@ const DashboardHero = memo(function DashboardHero({ state }: { state: WebviewSta
 			<div className="hero-pills">
 				<span>{state.workspace.types[0] ?? 'Workspace'}</span>
 				<span>{state.workspace.backend}</span>
-				<span>{state.stats.scanStatus}</span>
 				<span>{state.workspace.risk}</span>
 			</div>
 		</section>
@@ -191,4 +198,17 @@ function getOrbState(state: WebviewState): string {
 		return 'yellow';
 	}
 	return 'green';
+}
+
+function getScanStatusTone(status: WebviewState['stats']['scanStatus']): string {
+	if (status === 'Scanning') {
+		return 'aq-status--info';
+	}
+	if (status === 'Complete') {
+		return 'aq-status--success';
+	}
+	if (status === 'Failed') {
+		return 'aq-status--danger';
+	}
+	return '';
 }
