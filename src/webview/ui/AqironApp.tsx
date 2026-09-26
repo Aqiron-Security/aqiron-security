@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, memo, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Section, VsCodeApi, WebviewState } from './types.js';
+import { AqironIconButton } from './design/primitives.js';
 
 const AgentTab = lazy(async () => ({ default: (await import('./tabs.js')).AgentTab }));
 const AgentPanel = lazy(async () => ({ default: (await import('./tabs.js')).AgentPanel }));
@@ -40,14 +41,14 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 				<header className="aq-top">
 					<nav className="aq-tabs">
 						{(['agent', 'scan', 'threats', 'reports'] as Section[]).map((tab) => (
-							<button key={tab} className={tab === active ? 'tab active' : 'tab'} onClick={() => post('focus', tab)}>
+							<button key={tab} aria-selected={tab === active} className={tab === active ? 'tab aq-tab active' : 'tab aq-tab'} onClick={() => post('focus', tab)}>
 								<span className="svg-icon tab-svg" style={{ '--icon': `url("${tabIcon(tab, state)}")` } as React.CSSProperties} />
 								<span>{tab === 'threats' ? 'Threat' : tab[0].toUpperCase() + tab.slice(1)}</span>
 							</button>
 						))}
 					</nav>
 					<div className="orb-actions">
-						<button className="top-settings" aria-label="Open settings" onClick={() => post('focus', 'settings')}><span className="codicon codicon-settings-gear" aria-hidden="true" /></button>
+						<AqironIconButton className="top-settings" aria-label="Open settings" onClick={() => post('focus', 'settings')}><span className="codicon codicon-settings-gear" aria-hidden="true" /></AqironIconButton>
 						<div className="orb-wrap">
 						<button className={`security-orb ${orb}`} aria-label="Security summary" />
 						<div className="orb-pop">

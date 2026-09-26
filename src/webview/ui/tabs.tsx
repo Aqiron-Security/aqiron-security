@@ -3,42 +3,53 @@ import { motion } from 'framer-motion';
 import { ChatSession, Severity, WebviewIssue, WebviewState } from './types.js';
 import { Markdown } from './markdown.js';
 import { configuredProviderOptions, providerName } from './providerOptions';
+import { AqironBadge, AqironButton, AqironIconButton, AqironMetric, AqironSectionHeader, AqironSeverity } from './design/primitives.js';
 
 type Post = (command: string, payload?: unknown) => void;
 
 export const AgentTab = memo(function AgentTab({ state, post }: { state: WebviewState; post: Post }): React.ReactElement {
 	return (
-		<div className="tab-page">
-			<ContextBar state={state} />
-			<section className="section">
-				<div className="section-head"><h2>Smart Actions</h2><span>AI-native DevSecOps workflows</span></div>
+		<div className="tab-page agent-tab">
+			<section className="agent-hero aq-surface-panel">
+				<div className="agent-hero-copy">
+					<AqironBadge tone="ai"><span className="codicon codicon-sparkle" aria-hidden="true" />Aqiron AI</AqironBadge>
+					<AqironSectionHeader title="Security assistant" description="Context-aware analysis for the active workspace" />
+				</div>
+				<div className="agent-hero-state"><span className="agent-state-dot" aria-hidden="true" />{state.stats.scanStatus === 'Scanning' ? 'Working from live scan data' : 'Ready for workspace context'}</div>
+			</section>
+			<section className="agent-context section">
+				<AqironSectionHeader title="Project context" description="Signals available to Aqiron for the next action" />
+				<ContextBar state={state} />
+			</section>
+			<section className="section agent-actions-section">
+				<AqironSectionHeader title="Security actions" description="Start with a focused workflow" />
 				<div className="action-grid">
-					{['Explain this code', 'Hunt secrets', 'Analyze network security', 'Review auth flow', 'Scan dependencies', 'Reverse engineer APK', 'Generate exploit simulation'].map((title, index) => (
-						<motion.button key={title} className="action-card" whileHover={{ y: -2 }} transition={{ duration: 0.16 }} onClick={() => post('sendChat', { text: title })}>
-							<span className="mini-icon">{index + 1}</span>
-							<strong>{title}</strong>
-							<small>{actionDetail(title)}</small>
+					{['Explain this code', 'Hunt secrets', 'Analyze network security', 'Review auth flow', 'Scan dependencies', 'Reverse engineer APK', 'Generate exploit simulation'].map((title) => (
+						<motion.button key={title} className="action-card agent-action-card" whileHover={{ y: -2 }} whileTap={{ scale: 0.99 }} transition={{ duration: 0.16 }} onClick={() => post('sendChat', { text: title })}>
+							<span className="mini-icon" aria-hidden="true"><span className={`codicon ${actionIcon(title)}`} /></span>
+							<span className="agent-action-copy"><strong>{title}</strong><small>{actionDetail(title)}</small></span>
+							<span className="codicon codicon-arrow-right agent-action-arrow" aria-hidden="true" />
 						</motion.button>
 					))}
 				</div>
 			</section>
-			<section className="section">
-				<div className="section-head"><h2>Chat Sessions</h2></div>
+			<section className="section agent-sessions-section">
+				<AqironSectionHeader title="Conversation history" description="Pick up where you left off" />
 				<ChatSessionList state={state} post={post} />
 			</section>
-			<section className="section">
-				<div className="section-head"><h2>Smart Suggestions</h2><span>Generated from workspace graph and memory</span><button className="rag-refresh" title="Refresh AI regenerates Smart Suggestions from the current workspace index using the configured AI provider." aria-label="Refresh AI suggestions" onClick={() => post('ragRefreshSuggestions')} disabled={state.rag.building}>Refresh AI</button></div>
+			<section className="section agent-recommendations-section">
+				<AqironSectionHeader title="Recommended actions" description="Generated from the workspace graph and memory" action={<AqironButton variant="ghost" className="rag-refresh" title="Refresh AI regenerates Smart Suggestions from the current workspace index using the configured AI provider." aria-label="Refresh AI suggestions" onClick={() => post('ragRefreshSuggestions')} disabled={state.rag.building}>Refresh AI</AqironButton>} />
 				<div className="suggestion-list">
 					{state.suggestions.length ? state.suggestions.map((suggestion) => (
-						<div key={suggestion.command} className="suggestion-card">
+						<motion.div key={suggestion.command} className="suggestion-card agent-suggestion-card" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }}>
 							<div className="suggestion-copy"><strong>{suggestion.title}</strong><Markdown content={suggestion.detail} /></div>
 							<div className="suggestion-actions">
 								<SeverityBadge severity={suggestion.severity} />
-								{suggestion.recommended && <span className="badge">Recommended</span>}
-								<button type="button" onClick={() => post('sendChat', { text: suggestion.command, useTaskDefaults: true })}>Run</button>
-								<button type="button" onClick={() => post('sendChat', { text: `Explain ${suggestion.title}`, useTaskDefaults: true })}>Explain</button>
+								{suggestion.recommended && <AqironBadge>Recommended</AqironBadge>}
+								<AqironButton variant="secondary" type="button" onClick={() => post('sendChat', { text: suggestion.command, useTaskDefaults: true })}>Run</AqironButton>
+								<AqironButton variant="ghost" type="button" onClick={() => post('sendChat', { text: `Explain ${suggestion.title}`, useTaskDefaults: true })}>Explain</AqironButton>
 							</div>
-						</div>
+						</motion.div>
 					)) : <div className="empty">No suggestions are generated. Build with AI or use Refresh AI after configuring a provider.</div>}
 				</div>
 			</section>
@@ -79,16 +90,17 @@ export const AgentPanel = memo(function AgentPanel({ state, post }: { state: Web
 		node.scrollTo({ top: node.scrollHeight, behavior: latestMessage?.streaming ? 'auto' : 'smooth' });
 	}, [activeSession?.id, activeSession?.messages.length, latestMessage?.content, latestMessage?.streaming]);
 	return (
-		<div ref={panelRef} className={sidebarOpen ? 'agent-panel codex-chat sidebar-open' : 'agent-panel codex-chat sidebar-closed'} style={{ '--chat-sidebar-width': `${sidebarWidth}px` } as React.CSSProperties}>
+		<div ref={panelRef} className={sidebarOpen ? 'agent-panel agent-conversation-panel codex-chat sidebar-open' : 'agent-panel agent-conversation-panel codex-chat sidebar-closed'} style={{ '--chat-sidebar-width': `${sidebarWidth}px` } as React.CSSProperties}>
 			{sidebarOpen && <><aside className="chat-sidebar"><div className="chat-sidebar-head"><strong>Chats</strong></div><ChatSessionList state={state} post={post} compact /></aside><div className="chat-sidebar-resize" role="separator" aria-label="Resize chat sidebar" onPointerDown={(event) => { resizing.current = true; event.currentTarget.setPointerCapture?.(event.pointerId); }} /></>}
 			<div className="chat-workspace">
 				<div className="chat-titlebar">
 					<button className="sidebar-toggle" aria-label={sidebarOpen ? 'Hide chat sidebar' : 'Show chat sidebar'} title={sidebarOpen ? 'Hide chat sidebar' : 'Show chat sidebar'} onClick={() => setSidebarOpen((value) => !value)}><span className={`codicon ${sidebarOpen ? 'codicon-layout-sidebar-left-off' : 'codicon-layout-sidebar-left'}`} aria-hidden="true" /></button>
 					<div><h2>{activeSession?.title ?? 'New chat'}</h2><span>{activeSession ? `${activeSession.model} | ${activeSession.intelligence}` : 'Aqiron Agent'}</span></div>
 				</div>
-				<div className="conversation-scroll" ref={scrollRef}>
-					{!activeSession || activeSession.messages.length === 0 ? <div className="agent-empty">Ask about this workspace, a finding, or a release risk.</div> : activeSession.messages.map((message) => (
-						<div key={message.id} className={`chat-turn ${message.role}`}>
+				<div className="conversation-scroll agent-conversation-scroll" ref={scrollRef}>
+					{!activeSession || activeSession.messages.length === 0 ? <div className="agent-empty aq-empty-state"><span className="codicon codicon-comment-discussion" aria-hidden="true" /><strong>Start a security conversation</strong><span>Ask about this workspace, a finding, or a release risk.</span></div> : activeSession.messages.map((message) => (
+						<div key={message.id} className={`chat-turn agent-chat-turn ${message.role}${message.streaming ? ' streaming' : ''}`}>
+							<span className="agent-message-label">{message.role === 'user' ? 'You' : 'Aqiron'}</span>
 							<div className="chat-bubble"><Markdown content={message.content || (message.streaming ? 'Thinking...' : '')} />{message.commands?.length ? <CommandCards commands={message.commands} /> : null}</div>
 						</div>
 					))}
@@ -123,7 +135,7 @@ function ChatSessionList({ state, post, compact = false }: { state: WebviewState
 								<small>{session.model} | {session.intelligence} | {new Date(session.updatedAt).toLocaleString()}</small>
 							</div>
 							<div className={openSessionMenu === session.id ? 'session-options open' : 'session-options'} onClick={(event) => event.stopPropagation()}>
-								<button className="session-option-trigger" aria-label="Session options" onClick={() => setOpenSessionMenu((current) => current === session.id ? undefined : session.id)}><span className="svg-icon" style={iconStyle(state.assets.sessionOptionIcon)} /></button>
+								<AqironIconButton className="session-option-trigger" aria-label="Session options" onClick={() => setOpenSessionMenu((current) => current === session.id ? undefined : session.id)}><span className="svg-icon" style={iconStyle(state.assets.sessionOptionIcon)} /></AqironIconButton>
 								<div className="session-menu">
 									<button onClick={() => { setOpenSessionMenu(undefined); post('shareChatSession', session.id); }}><span className="svg-icon" style={iconStyle(state.assets.sessionShareIcon)} />Share</button>
 									<button onClick={() => { setOpenSessionMenu(undefined); setRenameSession(session); setRenameTitle(session.title); }}><span className="svg-icon" style={iconStyle(state.assets.sessionRenameIcon)} />Rename</button>
@@ -608,7 +620,7 @@ function reportFolderLabel(directory?: string): string {
 }
 
 function ContextBar({ state }: { state: WebviewState }): React.ReactElement {
-	return <div className="context-bar">{[state.workspace.currentFile, state.workspace.types[0] ?? 'Workspace', state.workspace.backend, state.branches[0] ?? 'No branch', state.stats.scanStatus, `${state.workspace.apis.length} APIs`].map((item) => <span key={item}>{item}</span>)}</div>;
+	return <div className="context-bar agent-context-bar">{[state.workspace.currentFile, state.workspace.types[0] ?? 'Workspace', state.workspace.backend, state.branches[0] ?? 'No branch', state.stats.scanStatus, `${state.workspace.apis.length} APIs`].map((item) => <span key={item}>{item}</span>)}</div>;
 }
 
 function ReasoningPanel(): React.ReactElement {
@@ -652,7 +664,7 @@ function AgentComposer({ state, post, sessionId }: { state: WebviewState; post: 
 			<textarea value={text} onClick={closeMenus} onFocus={closeMenus} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} placeholder="Ask Aqiron to analyze, explain, fuzz, patch, or report..." />
 			<div className="composer-footer">
 				<div className="composer-control edge">
-					<button className="round" onClick={() => post('attachContext')}><span className="svg-icon" style={iconStyle(state.assets.addIcon)} /></button>
+					<AqironIconButton className="round" aria-label="Add files and more" onClick={() => post('attachContext')}><span className="svg-icon" style={iconStyle(state.assets.addIcon)} /></AqironIconButton>
 					<span className="tip edge-left">Add files and more</span>
 				</div>
 				<div className={openMenu === 'provider' ? 'provider-pill provider-slot open' : 'provider-pill provider-slot'}>
@@ -704,7 +716,7 @@ function AgentComposer({ state, post, sessionId }: { state: WebviewState; post: 
 						</div>
 					</div>
 				</div>
-				<div className="send-wrap"><button className="send" onClick={isStreaming ? () => post('cancelGeneration', sessionId) : send}>{isStreaming ? 'Stop' : <span className="svg-icon" style={iconStyle(state.assets.upArrowIcon)} />}</button><span className="tip">{isStreaming ? 'Cancel generation' : 'Send'}</span></div>
+				<div className="send-wrap"><AqironButton variant={isStreaming ? 'danger' : 'primary'} className="send" aria-label={isStreaming ? 'Cancel generation' : 'Send'} disabled={!isStreaming && !text.trim()} onClick={isStreaming ? () => post('cancelGeneration', sessionId) : send}>{isStreaming ? 'Stop' : <span className="svg-icon" style={iconStyle(state.assets.upArrowIcon)} />}</AqironButton><span className="tip">{isStreaming ? 'Cancel generation' : 'Send'}</span></div>
 			</div>
 			{settingsOpen ? <AISettingsModal state={state} post={post} onClose={() => setSettingsOpen(false)} /> : null}
 		</div>
@@ -1228,11 +1240,11 @@ function looksLikeStructuredBlob(value: string): boolean {
 	return (text.startsWith('{') && text.includes('"runs"')) || (text.startsWith('{') && text.includes('"toolExecutionNotifications"')) || text.includes('Syntax error at line');
 }
 function Metric({ title, value }: { title: string; value: string }): React.ReactElement {
-	return <div className="metric"><strong>{value}</strong><span>{title}</span></div>;
+	return <AqironMetric title={title} value={value} />;
 }
 
 function SeverityBadge({ severity }: { severity: Severity }): React.ReactElement {
-	return <span className={`sev sev-${severity.toLowerCase()}`}>{severity}</span>;
+	return <AqironSeverity severity={severity} />;
 }
 
 function actionDetail(title: string): string {
@@ -1246,5 +1258,15 @@ function actionDetail(title: string): string {
 		return 'Build and inspect Android artifacts with MobSF.';
 	}
 	return 'Run a contextual AI security workflow.';
+}
+
+function actionIcon(title: string): string {
+	if (title.includes('code')) return 'codicon-code';
+	if (title.includes('secrets')) return 'codicon-key';
+	if (title.includes('network')) return 'codicon-globe';
+	if (title.includes('auth')) return 'codicon-lock';
+	if (title.includes('dependencies')) return 'codicon-package';
+	if (title.includes('APK')) return 'codicon-device-mobile';
+	return 'codicon-beaker';
 }
 
