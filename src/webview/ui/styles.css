@@ -911,7 +911,6 @@ h3 { font-size: 13px; }
 .report-artifact-rename:hover { color: var(--aq-color-text-primary); }
 .report-format-helper { min-height: 19px; color: var(--aq-color-text-muted); font: var(--aq-type-caption); }
 .report-format-card .aq-button { justify-self: start; min-height: var(--aq-density-compact); }
-.reports-secondary-actions { display: flex; flex-wrap: wrap; gap: var(--aq-space-2); }
 .report-history-list { display: grid; gap: var(--aq-space-2); }
 .report-history-card { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--aq-space-4); border: 1px solid var(--aq-color-border-subtle); border-radius: var(--aq-radius-card); padding: var(--aq-space-4); background: var(--aq-color-surface-1); color: var(--aq-color-text-primary); text-align: left; cursor: pointer; transition: border-color var(--aq-motion-fast) var(--aq-ease-standard), background var(--aq-motion-fast) var(--aq-ease-standard), box-shadow var(--aq-motion-fast) var(--aq-ease-standard); }
 .report-history-card:hover, .report-history-card:focus-visible { border-color: var(--aq-color-border-strong); background: var(--aq-color-surface-2); outline: none; }
