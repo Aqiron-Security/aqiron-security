@@ -484,6 +484,9 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			case 'exportReport':
 				await this.exportReport(payload);
 				return;
+			case 'renameReportArtifact':
+				await this.renameReportArtifact(payload);
+				return;
 			case 'exportFinding':
 				await this.exportFinding(payload);
 				return;
@@ -882,7 +885,8 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 	private async exportReport(payload: unknown): Promise<void> {
 		const format = typeof payload === 'string' ? payload : 'json';
 		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? this.context.extensionPath;
-		const baseName = `aqiron-security-report-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+		const reportName = format === 'jira' ? 'aqiron-security-jira-ticket' : format === 'share' ? 'aqiron-security-share-report' : 'aqiron-security-report';
+		const baseName = `${reportName}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
 		const extension = format === 'pdf' ? 'pdf' : format === 'sarif' ? 'sarif' : format === 'jira' || format === 'share' ? 'md' : 'json';
 		const reportDirectory = path.join(workspaceRoot, '.aqiron-security', 'reports');
 		await fs.mkdir(reportDirectory, { recursive: true });
@@ -913,6 +917,51 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		}
 		await vscode.workspace.fs.writeFile(target, content);
 		void vscode.window.showInformationMessage(`Saved Aqiron report: ${target.fsPath}`);
+	}
+
+	private async renameReportArtifact(payload: unknown): Promise<void> {
+		if (payload !== 'pdf' && payload !== 'json' && payload !== 'sarif') {
+			return;
+		}
+		const field = payload === 'pdf' ? 'pdfPath' : payload === 'json' ? 'jsonPath' : 'sarifPath';
+		const currentPath = this.state.pipeline.lastReport?.[field];
+		if (!currentPath) {
+			return;
+		}
+		const extension = path.extname(currentPath);
+		const currentName = path.basename(currentPath, extension);
+		const enteredName = await vscode.window.showInputBox({
+			prompt: `Enter a new name for the ${payload.toUpperCase()} report`,
+			value: currentName,
+			validateInput: (value) => !value.trim() ? 'Enter a filename.' : /[<>:"/\\|?*\x00-\x1F]/.test(value.trim()) || /[. ]$/.test(value.trim()) || value.trim() === '.' || value.trim() === '..' ? 'Use a filename without path separators or reserved characters.' : undefined,
+		});
+		if (enteredName === undefined) {
+			return;
+		}
+		const safeName = enteredName.trim();
+		if (!safeName || /[<>:"/\\|?*\x00-\x1F]/.test(safeName) || /[. ]$/.test(safeName) || safeName === '.' || safeName === '..') {
+			void vscode.window.showWarningMessage('Enter a valid report filename.');
+			return;
+		}
+		const targetPath = path.join(path.dirname(currentPath), `${safeName}${extension}`);
+		if (targetPath === currentPath) {
+			return;
+		}
+		if (await pathExists(targetPath)) {
+			void vscode.window.showWarningMessage(`A report named ${path.basename(targetPath)} already exists.`);
+			return;
+		}
+		try {
+			await fs.rename(currentPath, targetPath);
+		} catch (error) {
+			void vscode.window.showErrorMessage(`Could not rename the report: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		const lastReport = this.state.pipeline.lastReport;
+		if (lastReport) {
+			this.state = { ...this.state, pipeline: { ...this.state.pipeline, lastReport: { ...lastReport, [field]: targetPath } } };
+			this.postState();
+		}
 	}
 
 	private async exportFinding(payload: unknown): Promise<void> {
@@ -1404,12 +1453,13 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			await this.refreshRagState();
 			return;
 		}
-		const [types, branches, hasGit, graph, threatSnapshots] = await Promise.all([
+		const [types, branches, hasGit, graph, threatSnapshots, storedReport] = await Promise.all([
 			detectProjectTypes(root),
 			getGitBranches(root),
 			pathExists(path.join(root, '.git')),
 			buildWorkspaceGraph(root),
 			this.threatHistory.load(root),
+			loadLatestReportBundle(root),
 		]);
 		const memory = this.getMemory();
 		const frameworksDetected = [...new Set([...memory.frameworksDetected, ...types])].slice(0, 16);
@@ -1418,6 +1468,12 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		const activeThreatSnapshotId = this.state.activeThreatSnapshotId && threatSnapshots.some((snapshot) => snapshot.id === this.state.activeThreatSnapshotId) ? this.state.activeThreatSnapshotId : threatSnapshots[0]?.id;
 		const activeThreatSnapshot = threatSnapshots.find((snapshot) => snapshot.id === activeThreatSnapshotId);
 		const issues = this.state.issues.length ? this.state.issues : activeThreatSnapshot?.issues ?? [];
+		const currentReport = this.state.pipeline.lastReport;
+		const restoredReport = storedReport || currentReport ? {
+			...storedReport,
+			...currentReport,
+			executiveSummary: currentReport?.executiveSummary ?? storedReport?.executiveSummary ?? activeThreatSnapshot?.executiveSummary,
+		} : undefined;
 		await this.context.workspaceState.update(getMemoryKey(), nextMemory);
 
 		this.state = {
@@ -1439,6 +1495,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			threatSnapshots,
 			activeThreatSnapshotId,
 			selectedThreatId: this.state.selectedThreatId ?? issues[0]?.id,
+			pipeline: restoredReport ? { ...this.state.pipeline, lastReport: restoredReport } : this.state.pipeline,
 			zoom: this.state.zoom,
 			memory: nextMemory,
 		};
@@ -1862,6 +1919,36 @@ async function pathExists(candidate: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+async function loadLatestReportBundle(root: string): Promise<WebviewPipelineState['lastReport'] | undefined> {
+	const reportsRoot = path.join(root, '.aqiron-security', 'reports');
+	try {
+		const entries = await fs.readdir(reportsRoot, { withFileTypes: true });
+		const folders = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort((left, right) => right.localeCompare(left));
+		for (const folder of folders) {
+			const directory = path.join(reportsRoot, folder);
+			const artifacts = await fs.readdir(directory, { withFileTypes: true });
+			const artifactPath = (extension: string): string | undefined => {
+				const entry = artifacts.find((candidate) => candidate.isFile() && path.extname(candidate.name).toLowerCase() === extension);
+				return entry ? path.join(directory, entry.name) : undefined;
+			};
+			const jsonPath = artifactPath('.json');
+			const sarifPath = artifactPath('.sarif');
+			const pdfPath = artifactPath('.pdf');
+			if (jsonPath || sarifPath || pdfPath) {
+				return {
+					directory,
+					jsonPath,
+					sarifPath,
+					pdfPath,
+				};
+			}
+		}
+	} catch {
+		return undefined;
+	}
+	return undefined;
 }
 
 async function getGitBranches(root: string): Promise<string[]> {
