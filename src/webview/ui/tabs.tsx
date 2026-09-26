@@ -500,12 +500,37 @@ export const ThreatTab = memo(function ThreatTab({ state, post }: { state: Webvi
 	const [historyOpen, setHistoryOpen] = useState(true);
 	const [historyWidth, setHistoryWidth] = useState(264);
 	const [deleteSnapshot, setDeleteSnapshot] = useState<WebviewState['threatSnapshots'][number] | undefined>();
-	const [selectedId, setSelectedId] = useState(state.selectedThreatId ?? visibleIssues[0]?.id);
+	const initialSelected = visibleIssues.find((issue) => issue.id === state.selectedThreatId) ?? visibleIssues[0];
+	const [selectedKey, setSelectedKey] = useState(initialSelected ? findingSelectionKey(initialSelected, visibleIssues.indexOf(initialSelected)) : undefined);
+	const [query, setQuery] = useState('');
+	const [severityFilter, setSeverityFilter] = useState<Severity | 'all'>('all');
+	const [toolFilter, setToolFilter] = useState('all');
+	const [statusFilter, setStatusFilter] = useState('all');
+	const [filtersOpen, setFiltersOpen] = useState(false);
 	useEffect(() => {
-		setSelectedId(state.selectedThreatId ?? visibleIssues[0]?.id);
+		const nextSelected = visibleIssues.find((issue) => issue.id === state.selectedThreatId) ?? visibleIssues[0];
+		setSelectedKey(nextSelected ? findingSelectionKey(nextSelected, visibleIssues.indexOf(nextSelected)) : undefined);
 	}, [state.activeThreatSnapshotId, state.selectedThreatId, visibleIssues]);
-	const selected = visibleIssues.find((issue) => issue.id === selectedId) ?? visibleIssues[0];
-	const toolSummary = summarizeTools(visibleIssues);
+	const toolOptions = useMemo(() => [...new Set(visibleIssues.map((issue) => formatSourceTool(issue.tool)).filter(Boolean))].sort(), [visibleIssues]);
+	const statusOptions = useMemo(() => [...new Set(visibleIssues.map((issue) => issue.status).filter(Boolean))].sort(), [visibleIssues]);
+	const filteredIssues = useMemo(() => {
+		const normalizedQuery = query.trim().toLowerCase();
+		return visibleIssues.filter((issue) => {
+			const matchesQuery = !normalizedQuery || [issue.title, issue.message, issue.relativeFile, issue.ruleId, issue.cwe, issue.owasp, issue.tool, issue.status, issue.lineText].some((value) => value.toLowerCase().includes(normalizedQuery));
+			const matchesSeverity = severityFilter === 'all' || issue.severity === severityFilter;
+			const matchesTool = toolFilter === 'all' || formatSourceTool(issue.tool) === toolFilter;
+			const matchesStatus = statusFilter === 'all' || issue.status === statusFilter;
+			return matchesQuery && matchesSeverity && matchesTool && matchesStatus;
+		});
+	}, [query, severityFilter, statusFilter, toolFilter, visibleIssues]);
+	const selected = filteredIssues.find((issue) => findingSelectionKey(issue, visibleIssues.indexOf(issue)) === selectedKey) ?? filteredIssues[0];
+	const filtersActive = Boolean(query.trim()) || severityFilter !== 'all' || toolFilter !== 'all' || statusFilter !== 'all';
+	const clearFilters = () => {
+		setQuery('');
+		setSeverityFilter('all');
+		setToolFilter('all');
+		setStatusFilter('all');
+	};
 	const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
 		if (!historyOpen) {
 			return;
@@ -532,51 +557,46 @@ export const ThreatTab = memo(function ThreatTab({ state, post }: { state: Webvi
 				<div className="threat-history-resizer" role="separator" aria-label="Resize threat results sidebar" onPointerDown={startResize}><span /></div>
 				</>}
 			</aside>
-			<div className="tab-page threat-layout">
-				<section className="section table-section">
-				<div className="section-head"><h2>Threat Intelligence</h2><span>{visibleIssues.length} actionable findings</span></div>
-				<div className="threat-summary">
-					<span><strong>{visibleIssues.length}</strong>Open findings</span>
-					<span><strong>{toolSummary}</strong>Source coverage</span>
-					<span><strong>{state.stats.filesScanned}</strong>Files scanned</span>
-				</div>
-				<div className="threat-help">
-					<span><strong>CWE</strong>Common Weakness Enumeration: the underlying software weakness class.</span>
-					<span><strong>OWASP</strong>The OWASP Top 10 risk category mapped to the finding.</span>
-					<span><strong>Confidence</strong>How strongly the scanner evidence supports the finding.</span>
-				</div>
-				<div className="threat-table-scroll">
-				<div className="threat-table" role="table" aria-label="Threat intelligence findings">
-					<div className="th-row head" role="row"><span>Threat</span><span>Severity</span><span>File</span><span>CWE</span><span>OWASP</span><span>Source Tool</span><span>Confidence</span><span>Status</span></div>
-					{visibleIssues.length ? visibleIssues.map((issue) => (
-						<button key={issue.id} className={issue.id === selected?.id ? 'th-row active' : 'th-row'} onClick={() => setSelectedId(issue.id)}>
-							<span className="th-threat-copy">
-								<strong>{issue.title}</strong>
-								<small>{formatThreatMessage(issue)}</small>
-								<span className="th-threat-meta">
-									<span>{issue.relativeFile}:{issue.line}</span>
-									<span>{formatSourceTool(issue.tool)}</span>
-								</span>
-							</span>
-							<SeverityBadge severity={issue.severity} />
-							<span>{issue.relativeFile}:{issue.line}</span>
-							<span>{issue.cwe}</span>
-							<span>{issue.owasp}</span>
-							<span>{formatSourceTool(issue.tool)}</span>
-							<span>{issue.confidence}</span>
-							<span>{issue.status}</span>
-						</button>
-					)) : <div className="empty">No actionable threats indexed. Start a scan to build the vulnerability inventory.</div>}
-				</div>
-			</div>
+			<div className="tab-page threat-layout findings-layout">
+				<section className="findings-hero">
+					<AqironSectionHeader title="Findings" description="Triage security issues by severity, source, status, and code location." action={<AqironBadge tone={state.stats.scanStatus === 'Scanning' ? 'ai' : 'brand'}><span className="codicon codicon-shield" aria-hidden="true" />{state.stats.scanStatus === 'Scanning' ? 'Scan in progress' : `${filteredIssues.length} shown`}</AqironBadge>} />
+					<div className="findings-context"><span><span className="codicon codicon-folder" aria-hidden="true" />{state.workspace.name}</span><span><span className="codicon codicon-file-code" aria-hidden="true" />{state.stats.filesScanned} files scanned</span><span><span className="codicon codicon-symbol-method" aria-hidden="true" />{toolOptions.length || 'No'} source tools</span></div>
 				</section>
-				<section className="section">
-				<div className="section-head"><h2>Threat Details</h2><span>Evidence, impact, remediation</span></div>
-				{selected ? <ThreatDetails issue={selected} post={post} /> : <div className="empty">No threats indexed yet.</div>}
+				<section className="findings-summary" aria-label="Finding summary">
+					<AqironMetric title="All findings" value={`${state.counts.total}`} />
+					<AqironMetric title="Critical" value={`${state.counts.critical}`} />
+					<AqironMetric title="High" value={`${state.counts.high}`} />
+					<AqironMetric title="Medium" value={`${state.counts.medium}`} />
+					<AqironMetric title="Low" value={`${state.counts.low}`} />
 				</section>
-				<section className="section">
-				<div className="section-head"><h2>Relationship Graph</h2><span>Files - tools - risk clusters</span></div>
-				<GraphPreview state={{ ...state, issues: visibleIssues }} />
+				<section className="findings-toolbar aq-surface-panel" aria-label="Finding filters">
+					<label className="findings-search"><span className="codicon codicon-search" aria-hidden="true" /><span className="sr-only">Search findings</span><input className="aq-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search findings, files, rules, CWE, or OWASP..." /></label>
+					<div className="findings-toolbar-actions"><AqironButton variant={filtersOpen ? 'secondary' : 'ghost'} type="button" onClick={() => setFiltersOpen((value) => !value)} aria-expanded={filtersOpen}><span className="codicon codicon-filter" aria-hidden="true" />Filters{filtersActive ? ` · ${[severityFilter !== 'all', toolFilter !== 'all', statusFilter !== 'all'].filter(Boolean).length}` : ''}</AqironButton>{filtersActive && <AqironButton variant="ghost" type="button" onClick={clearFilters}>Clear</AqironButton>}</div>
+					{filtersOpen && <div className="findings-filter-grid">
+						<label className="aq-field"><span className="aq-field__label">Severity</span><select className="aq-select" value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value as Severity | 'all')}><option value="all">All severities</option>{(['Critical', 'High', 'Medium', 'Low'] as Severity[]).map((severity) => <option key={severity} value={severity}>{severity}</option>)}</select></label>
+						<label className="aq-field"><span className="aq-field__label">Source tool</span><select className="aq-select" value={toolFilter} onChange={(event) => setToolFilter(event.target.value)}><option value="all">All source tools</option>{toolOptions.map((tool) => <option key={tool} value={tool}>{tool}</option>)}</select></label>
+						<label className="aq-field"><span className="aq-field__label">Status</span><select className="aq-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All statuses</option>{statusOptions.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
+					</div>}
+				</section>
+				<section className="findings-list-section" aria-label="Security findings">
+					<AqironSectionHeader title="Security findings" description={filtersActive ? `${filteredIssues.length} of ${visibleIssues.length} findings match the current view.` : 'Select a finding to inspect evidence and available actions.'} />
+					<div className="findings-list" role="list">
+						{filteredIssues.length ? filteredIssues.map((issue) => { const rowKey = findingSelectionKey(issue, visibleIssues.indexOf(issue)); return <button key={rowKey} type="button" className={issue === selected ? 'finding-row active' : 'finding-row'} onClick={() => setSelectedKey(rowKey)} role="listitem" aria-pressed={issue === selected}>
+							<span className={`finding-row-severity severity-${issue.severity.toLowerCase()}`}><AqironSeverity severity={issue.severity} /></span>
+							<span className="finding-row-main"><strong>{issue.title}</strong><small>{formatThreatMessage(issue)}</small><span className="finding-row-location"><span className="codicon codicon-file-code" aria-hidden="true" />{issue.relativeFile}:{issue.line}</span></span>
+							<span className="finding-row-context"><AqironBadge>{formatSourceTool(issue.tool)}</AqironBadge><span>{issue.cwe}</span><span>{issue.owasp}</span></span>
+							<span className="finding-row-status"><span>{issue.status}</span><small>{issue.confidence} confidence</small></span>
+							<span className="codicon codicon-chevron-right finding-row-chevron" aria-hidden="true" />
+						</button>; }) : <div className="findings-empty aq-empty-state"><span className="codicon codicon-search-stop" aria-hidden="true" /><strong>{visibleIssues.length ? 'No findings match these filters' : 'No findings indexed yet'}</strong><span>{visibleIssues.length ? 'Clear or adjust the filters to widen the triage view.' : 'Run a scan to build the vulnerability inventory.'}</span>{filtersActive && <AqironButton variant="secondary" type="button" onClick={clearFilters}>Clear filters</AqironButton>}</div>}
+					</div>
+				</section>
+				<section className="findings-detail-section" aria-label="Selected finding details">
+					<AqironSectionHeader title="Finding detail" description="Evidence, context, and next actions" />
+					{selected ? <ThreatDetails issue={selected} post={post} /> : <div className="findings-empty aq-empty-state"><span className="codicon codicon-info" aria-hidden="true" /><strong>Select a finding to inspect it</strong><span>Finding details will appear here.</span></div>}
+				</section>
+				<section className="findings-graph-section" aria-label="Finding relationships">
+					<AqironSectionHeader title="Related context" description="Files, source tools, and risk relationships" />
+					<GraphPreview state={{ ...state, issues: visibleIssues }} />
 				</section>
 			</div>
 			{deleteSnapshot && <div className="modal-backdrop" role="presentation" onClick={() => setDeleteSnapshot(undefined)}>
@@ -609,6 +629,10 @@ function countSnapshotSeverities(issues: readonly WebviewIssue[]): Record<Lowerc
 function formatThreatTimestamp(value: string): string {
 	const date = new Date(value);
 	return Number.isNaN(date.getTime()) ? 'Unknown time' : date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+function findingSelectionKey(issue: WebviewIssue, index: number): string {
+	return `${issue.id}:${issue.relativeFile}:${issue.line}:${issue.column}:${index}`;
 }
 
 function formatTimelineTimestamp(value: string): string {
@@ -1059,31 +1083,14 @@ function filterLabel(key: 'freeOnly' | 'codingOnly' | 'reasoningOnly' | 'visionO
 function ThreatDetails({ issue, post }: { issue: WebviewIssue; post: Post }): React.ReactElement {
 	const codePreview = compactText(getThreatCodePreview(issue), 360);
 	return (
-		<div className="detail-card">
-			<div className="detail-head">
-				<SeverityBadge severity={issue.severity} />
-				<span>{formatSourceTool(issue.tool)}</span>
-				<span>{issue.confidence} confidence</span>
-				<span>Risk {issue.riskScore}%</span>
-			</div>
-			<h3>{issue.title}</h3>
-			<p>{formatThreatMessage(issue)}</p>
-			<div className="detail-meta">
-				<span><strong>CWE</strong>{issue.cwe}</span>
-				<span><strong>OWASP</strong>{issue.owasp}</span>
-				<span><strong>Status</strong>{issue.status}</span>
-			</div>
-			<pre className="detail-snippet">{codePreview}</pre>
+		<div className="finding-detail aq-surface-panel">
+			<div className="finding-detail-top"><div className="finding-detail-badges"><AqironSeverity severity={issue.severity} /><AqironBadge>{formatSourceTool(issue.tool)}</AqironBadge><AqironBadge>{issue.status}</AqironBadge></div><AqironBadge tone="neutral"><span className="codicon codicon-location" aria-hidden="true" />{issue.relativeFile}:{issue.line}</AqironBadge></div>
+			<div className="finding-detail-title"><h3>{issue.title}</h3><span>{issue.confidence} confidence</span></div>
+			<p className="finding-detail-description">{formatThreatMessage(issue)}</p>
+			<div className="finding-detail-meta"><span><strong>CWE</strong>{issue.cwe}</span><span><strong>OWASP</strong>{issue.owasp}</span><span><strong>Rule</strong>{issue.ruleId}</span><span><strong>Column</strong>{issue.column}</span></div>
+			<div className="finding-evidence"><div className="finding-detail-block-head"><div><strong>Evidence</strong><span>Captured source context</span></div><AqironBadge tone="brand">{issue.lineText ? 'Source line' : 'Location only'}</AqironBadge></div><pre className="detail-snippet">{codePreview}</pre></div>
 			{issue.tool === 'AI Analysis' && renderAiEvidence(issue.rawEvidence)}
-			<p><strong>Attack scenario:</strong> An attacker chains this finding through exposed inputs, weak trust boundaries, or leaked credentials.</p>
-			<p><strong>Remediation:</strong> Validate input, reduce privileges, rotate credentials, and add regression tests.</p>
-			<div className="control-row">
-				<button onClick={() => post('sendChat', { text: `Explain ${issue.title} in ${issue.relativeFile}:${issue.line}` })}>Explain</button>
-				<button onClick={() => post('sendChat', { text: `Fix ${issue.title} in ${issue.relativeFile}:${issue.line}` })}>Fix</button>
-				<button onClick={() => post('ignoreIssue', issue.id)}>Ignore</button>
-				<button onClick={() => post('exportFinding', issue.id)}>Export</button>
-				<button onClick={() => post('createRuleFromFinding', issue.id)}>Create Rule</button>
-				<button onClick={() => post('openIssue', issue.id)}>Open File</button>
+			<div className="finding-detail-actions"><AqironButton variant="primary" type="button" onClick={() => post('openIssue', issue.id)}><span className="codicon codicon-go-to-file" aria-hidden="true" />Open file</AqironButton><AqironButton variant="secondary" type="button" onClick={() => post('sendChat', { text: `Explain ${issue.title} in ${issue.relativeFile}:${issue.line}` })}>Explain</AqironButton><AqironButton variant="secondary" type="button" onClick={() => post('sendChat', { text: `Fix ${issue.title} in ${issue.relativeFile}:${issue.line}` })}>Fix with AI</AqironButton><AqironButton variant="ghost" type="button" onClick={() => post('exportFinding', issue.id)}>Export</AqironButton><AqironButton variant="ghost" type="button" onClick={() => post('createRuleFromFinding', issue.id)}>Create rule</AqironButton><AqironButton variant="danger" type="button" onClick={() => post('ignoreIssue', issue.id)}>Ignore</AqironButton>
 			</div>
 		</div>
 	);
