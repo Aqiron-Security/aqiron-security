@@ -200,68 +200,125 @@ function CommandCard({ item }: { item: NonNullable<WebviewState['chatSessions'][
 }
 
 export const ScanTab = memo(function ScanTab({ state, post }: { state: WebviewState; post: Post }): React.ReactElement {
+	const [target, setTarget] = useState<'workspace' | 'current-file'>('workspace');
+	const [mode, setMode] = useState<'quick' | 'deep' | 'analysis'>('deep');
+	const [advancedOpen, setAdvancedOpen] = useState(false);
+	const [executionOpen, setExecutionOpen] = useState(false);
 	const fallbackStages = ['Preparing', 'Indexing', 'Dependency Analysis', 'SAST', 'Secret Scanning', 'AI Vulnerability Analysis', 'AI Correlation', 'Report Generation'];
 	const pipelineStages = state.pipeline?.stages.length ? state.pipeline.stages : [];
 	const toolStates = new Map((state.pipeline?.tools ?? []).map((tool) => [normalizeToolName(tool.label), tool]));
 	const terminalLines = state.pipeline?.logs.length ? state.pipeline.logs.slice(-80).join('\n') : 'No scan logs yet. Start a scan to stream real engine output.';
 	const visibleStages = getVisiblePipelineStages(pipelineStages, state.stats.scanStatus);
 	const visibleTools = getVisiblePipelineTools(state.pipeline?.tools ?? [], state.stats.scanStatus);
+	const activeStage = pipelineStages.find((stage) => stage.status === 'running') ?? visibleStages.at(-1);
+	const activeTool = state.pipeline?.tools.find((tool) => tool.status === 'running');
+	const currentFileAvailable = Boolean(state.workspace.currentFile && state.workspace.currentFile !== 'No file');
+	const startScan = () => {
+		if (state.stats.scanStatus === 'Scanning') {
+			return;
+		}
+		if (target === 'current-file') {
+			post('scanCurrentFile');
+			return;
+		}
+		if (mode === 'analysis') {
+			post('aiVulnerabilityAnalysis');
+			return;
+		}
+		post('scanWorkspace', { mode });
+	};
+	const runAgain = () => {
+		setExecutionOpen(false);
+		startScan();
+	};
 	return (
-		<div className="tab-page">
-			<section className="section">
-				<div className="section-head"><h2>Live Pipeline</h2><span>{getPipelineHeadline(state.stats.scanStatus, visibleStages.length)}</span></div>
-				{visibleStages.length ? (
-					<div className="pipeline">
-						{visibleStages.map((stage) => (
-							<details key={stage.name} className={`stage ${stage.status}`} open={stage.status === 'running'}>
-								<summary>
-									<span className="stage-status" aria-hidden="true">{getStageMarker(stage.status)}</span>
-									<strong>{stage.name}</strong>
-									<em>{formatStageStatus(stage)}</em>
-								</summary>
-								<div className="stage-progress" aria-label={`${stage.name} progress`}><span style={{ width: `${Math.max(0, Math.min(100, stage.progress))}%` }} /></div>
-								<pre>[{stage.name}] {formatStageTelemetry(stage)}</pre>
-							</details>
-						))}
-					</div>
-				) : <PipelineEmptyState scanStatus={state.stats.scanStatus} fallbackStages={fallbackStages} durationMs={state.stats.lastScanDurationMs} />}
+		<div className="tab-page scan-tab">
+			<section className="scan-hero aq-surface-panel">
+				<AqironSectionHeader title="Security scan" description="Choose a target and depth, then review the evidence as it arrives." />
+				<span className={`aq-status aq-status--${scanStatusTone(state.stats.scanStatus)}`}>{formatScanStatus(state.stats.scanStatus)}</span>
 			</section>
-			<section className="section">
-				<div className="section-head"><h2>Tool Execution</h2><span>SAST - DAST - IAST - SCA - AI penetration testing</span></div>
-				{visibleTools.length ? (
-					<div className="tool-grid">
-						{visibleTools.map((tool) => (
-							<details key={tool.id} className={`tool-card ${tool.status}`} open={tool.status === 'running'}>
-								<summary><strong>{tool.label}</strong><span>{formatToolStatus(tool.status)}</span></summary>
-								<p>{getToolDetail(tool.label, toolStates)}</p>
-							</details>
-						))}
-					</div>
-				) : <div className="empty">No tools are running right now. Start a scan to show live tool execution.</div>}
+			<section className="scan-context section">
+				<AqironSectionHeader title="Project context" description="Current workspace signals" />
+				<div className="scan-context-list"><span>{state.workspace.name}</span><span>{state.workspace.types[0] ?? 'Workspace'}</span><span>{state.branches[0] ?? 'No branch'}</span><span>{state.stats.scanStatus}</span></div>
 			</section>
-			<section className="section">
-				<div className="section-head"><h2>Terminal Stream</h2><span>Colorized realtime logs</span></div>
-				<pre className="terminal">{terminalLines}</pre>
-				<div className="control-row ai-analysis-row">
-					<button title={scanActionDetail('AI Vulnerability Analysis')} onClick={() => post('aiVulnerabilityAnalysis')}>AI Vulnerability Analysis</button>
+			<section className="scan-config section">
+				<AqironSectionHeader title="What do you want to scan?" description="Start with the smallest useful scope." />
+				<div className="scan-choice-grid" role="group" aria-label="Scan target">
+					<button type="button" className={target === 'workspace' ? 'scan-choice active' : 'scan-choice'} aria-pressed={target === 'workspace'} onClick={() => setTarget('workspace')}>
+						<span className="scan-choice-icon codicon codicon-root-folder" aria-hidden="true" /><span><strong>Current workspace</strong><small>Analyze the supported project and its dependencies.</small></span>
+					</button>
+					<button type="button" className={target === 'current-file' ? 'scan-choice active' : 'scan-choice'} aria-pressed={target === 'current-file'} disabled={!currentFileAvailable} onClick={() => setTarget('current-file')}>
+						<span className="scan-choice-icon codicon codicon-file-code" aria-hidden="true" /><span><strong>Current file</strong><small>{currentFileAvailable ? state.workspace.currentFile : 'Open a supported file to enable this target.'}</small></span>
+					</button>
 				</div>
-				<div className="control-row">
-					<button title={scanActionDetail('Quick Scan')} onClick={() => post('scanWorkspace', { mode: 'quick' })}>Quick Scan</button>
-					<button title={scanActionDetail('Deep Scan')} onClick={() => post('scanWorkspace', { mode: 'deep' })}>Deep Scan</button>
-					<button title={scanActionDetail('AI Audit')} onClick={() => post('sendChat', { text: 'Analyze this workspace security posture and prioritize risk using the current scan context.' })}>AI Audit</button>
-					<button title={scanActionDetail('Dynamic Analysis')} onClick={() => post('sendChat', { text: 'Assess runtime security behavior and execution risks from the current workspace context.' })}>Dynamic Analysis</button>
-					<button onClick={() => post('clearTerminal')}>Clear Terminal</button>
-					<button className="danger" onClick={() => post('cancelScan')}>Cancel Scan</button>
-				</div>
-				<div className="scan-action-help">
-					{['Quick Scan', 'Deep Scan', 'AI Vulnerability Analysis', 'Dynamic Analysis', 'AI Audit'].map((label) => (
-						<span key={label}><strong>{label}</strong>{scanActionDetail(label)}</span>
+				<AqironSectionHeader title="Scan mode" description="Coverage follows the existing scanner pipeline." />
+				<div className="scan-mode-grid" role="group" aria-label="Scan mode">
+					{([['quick', 'Quick', 'Fast workspace coverage with the native and configured security engines.'], ['deep', 'Deep', 'Adds deeper dependency and mobile artifact analysis when configured.'], ['analysis', 'AI analysis', 'Runs the existing dedicated AI vulnerability analysis workflow.']] as const).map(([value, label, detail]) => (
+						<button key={value} type="button" className={mode === value ? 'scan-mode active' : 'scan-mode'} aria-pressed={mode === value} onClick={() => setMode(value)}><strong>{label}</strong><small>{detail}</small></button>
 					))}
 				</div>
+				<div className="scan-config-actions"><AqironButton variant="primary" className="scan-start" disabled={state.stats.scanStatus === 'Scanning' || (target === 'current-file' && !currentFileAvailable)} onClick={startScan}><span className="codicon codicon-play" aria-hidden="true" />{state.stats.scanStatus === 'Scanning' ? 'Scan running' : 'Start scan'}</AqironButton><span className="scan-config-hint">{target === 'current-file' ? 'Uses the existing current-file scanner.' : mode === 'analysis' ? 'Uses the existing AI analysis command.' : `Runs the existing ${mode} workspace pipeline.`}</span></div>
+				<details className="scan-advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+					<summary><span><strong>Advanced options and actions</strong><small>AI review, dynamic analysis, terminal controls</small></span><span className="codicon codicon-chevron-down" aria-hidden="true" /></summary>
+					<div className="scan-advanced-content">
+						<div className="control-row"><AqironButton variant="secondary" title={scanActionDetail('AI Vulnerability Analysis')} onClick={() => post('aiVulnerabilityAnalysis')}>AI Vulnerability Analysis</AqironButton><AqironButton variant="secondary" title={scanActionDetail('AI Audit')} onClick={() => post('sendChat', { text: 'Analyze this workspace security posture and prioritize risk using the current scan context.' })}>AI Audit</AqironButton><AqironButton variant="secondary" title={scanActionDetail('Dynamic Analysis')} onClick={() => post('sendChat', { text: 'Assess runtime security behavior and execution risks from the current workspace context.' })}>Dynamic Analysis</AqironButton></div>
+						<div className="scan-action-help">{['Quick Scan', 'Deep Scan', 'AI Vulnerability Analysis', 'Dynamic Analysis', 'AI Audit'].map((label) => <span key={label}><strong>{label}</strong>{scanActionDetail(label)}</span>)}</div>
+					</div>
+				</details>
 			</section>
+			<section className={`scan-status-section section scan-status-${state.stats.scanStatus.toLowerCase()}`}>
+				{state.stats.scanStatus === 'Idle' ? <ScanIdleState onStart={startScan} disabled={target === 'current-file' && !currentFileAvailable} /> : null}
+				{state.stats.scanStatus === 'Scanning' ? <ScanRunningState activeStage={activeStage} activeTool={activeTool} stages={pipelineStages} tools={state.pipeline?.tools ?? []} onCancel={() => post('cancelScan')} /> : null}
+				{state.stats.scanStatus === 'Complete' ? <ScanCompleteState state={state} onRunAgain={runAgain} post={post} /> : null}
+				{state.stats.scanStatus === 'Failed' ? <ScanFailedState stages={pipelineStages} logs={state.pipeline?.logs ?? []} onRetry={runAgain} /> : null}
+			</section>
+			{state.stats.scanStatus !== 'Idle' && <details className="scan-execution" open={executionOpen} onToggle={(event) => setExecutionOpen(event.currentTarget.open)}>
+				<summary><span><strong>Execution details</strong><small>Pipeline, scanner output, and terminal stream</small></span><span className="codicon codicon-chevron-down" aria-hidden="true" /></summary>
+				<div className="scan-execution-content">
+					<section className="scan-detail-block"><AqironSectionHeader title="Pipeline" description={getPipelineHeadline(state.stats.scanStatus, visibleStages.length)} />{visibleStages.length ? <div className="scan-pipeline-list">{visibleStages.map((stage) => <ScanPipelineRow key={stage.name} stage={stage} />)}</div> : <PipelineEmptyState scanStatus={state.stats.scanStatus} fallbackStages={fallbackStages} durationMs={state.stats.lastScanDurationMs} />}</section>
+					<section className="scan-detail-block"><AqironSectionHeader title="Tool execution" description="Scanner status and concise telemetry" />{visibleTools.length ? <div className="scan-tool-list">{visibleTools.map((tool) => <ScanToolRow key={tool.id} tool={tool} detail={getToolDetail(tool.label, toolStates)} />)}</div> : <div className="empty">No tool telemetry is available for this scan state.</div>}</section>
+					<section className="scan-detail-block"><AqironSectionHeader title="Terminal stream" description="Colorized realtime logs" action={<AqironButton variant="ghost" onClick={() => post('clearTerminal')}>Clear</AqironButton>} /><pre className="terminal">{terminalLines}</pre></section>
+				</div>
+			</details>}
 		</div>
 	);
 });
+
+function ScanIdleState({ onStart, disabled }: { onStart: () => void; disabled: boolean }): React.ReactElement {
+	return <div className="scan-empty-state"><span className="scan-empty-icon codicon codicon-shield" aria-hidden="true" /><div><strong>Run your first security scan</strong><span>Select a target and scan mode above to analyze the current project.</span></div><AqironButton variant="secondary" disabled={disabled} onClick={onStart}>Start scan</AqironButton></div>;
+}
+
+function ScanRunningState({ activeStage, activeTool, stages, tools, onCancel }: { activeStage?: WebviewState['pipeline']['stages'][number]; activeTool?: WebviewState['pipeline']['tools'][number]; stages: WebviewState['pipeline']['stages']; tools: WebviewState['pipeline']['tools']; onCancel: () => void }): React.ReactElement {
+	const completedStages = stages.filter((stage) => stage.status === 'completed').length;
+	const completedTools = tools.filter((tool) => tool.status === 'completed').length;
+	const progress = activeStage && activeStage.progress > 0 ? activeStage.progress : undefined;
+	return <div className="scan-run-state"><div className="scan-run-heading"><div><span className="aq-status aq-status--info">Scanning</span><h2>{activeStage?.name ?? 'Preparing scan'}</h2><p>{activeTool ? `${activeTool.label} is running.` : completedStages || completedTools ? `${completedStages} stage${completedStages === 1 ? '' : 's'} completed.` : 'Waiting for engine telemetry.'}</p></div><AqironButton variant="danger" onClick={onCancel}><span className="codicon codicon-stop" aria-hidden="true" />Cancel scan</AqironButton></div>{progress !== undefined ? <div className="scan-progress"><div><span>Current stage progress</span><strong>{progress}%</strong></div><div className="scan-progress-track"><span style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} /></div></div> : <div className="scan-indeterminate"><span />Analyzing with the active security engines</div>}<div className="scan-run-meta">{activeTool ? <span><strong>Current scanner</strong>{activeTool.label}</span> : null}{tools.length ? <span><strong>Tools completed</strong>{completedTools} / {tools.length}</span> : null}</div></div>;
+}
+
+function ScanCompleteState({ state, onRunAgain, post }: { state: WebviewState; onRunAgain: () => void; post: Post }): React.ReactElement {
+	return <div className="scan-complete-state"><div className="scan-complete-heading"><div><span className="aq-status aq-status--success">Complete</span><h2>Scan complete</h2><p>{state.stats.lastScanDurationMs ? `Completed in ${formatDuration(state.stats.lastScanDurationMs)}.` : 'The existing scan pipeline completed.'}</p></div><AqironButton variant="primary" onClick={onRunAgain}>Run again</AqironButton></div><div className="scan-findings-summary"><span><strong>{state.counts.total}</strong>Total findings</span><span><AqironSeverity severity="Critical" /><strong>{state.counts.critical}</strong></span><span><AqironSeverity severity="High" /><strong>{state.counts.high}</strong></span><span><AqironSeverity severity="Medium" /><strong>{state.counts.medium}</strong></span><span><AqironSeverity severity="Low" /><strong>{state.counts.low}</strong></span><span><strong>{state.stats.filesScanned}</strong>Files scanned</span></div><div className="scan-result-actions"><AqironButton variant="secondary" onClick={() => post('focus', 'threats')}>View findings</AqironButton><AqironButton variant="secondary" onClick={() => post('focus', 'reports')}>Open reports</AqironButton>{state.pipeline.lastReport?.pdfPath ? <AqironButton variant="ghost" onClick={() => post('exportReport', 'pdf')}>Export PDF</AqironButton> : null}</div></div>;
+}
+
+function ScanFailedState({ stages, logs, onRetry }: { stages: WebviewState['pipeline']['stages']; logs: string[]; onRetry: () => void }): React.ReactElement {
+	const cancelled = stages.some((stage) => stage.status === 'cancelled');
+	return <div className="scan-failed-state"><div><span className="aq-status aq-status--danger">Failed</span><h2>{cancelled ? 'Scan stopped' : 'Scan did not complete'}</h2><p>{cancelled ? 'Cancellation was requested before the pipeline finished.' : 'The scan stopped before all stages completed.'}</p></div><AqironButton variant="secondary" onClick={onRetry}>Try again</AqironButton>{logs.length ? <details className="scan-error-detail"><summary>Show technical detail</summary><pre>{logs.slice(-8).join('\n')}</pre></details> : null}</div>;
+}
+
+function ScanPipelineRow({ stage }: { stage: WebviewState['pipeline']['stages'][number] }): React.ReactElement {
+	return <div className={`scan-pipeline-row ${stage.status}`}><span className="stage-status" aria-hidden="true">{getStageMarker(stage.status)}</span><strong>{stage.name}</strong><span>{formatStageStatus(stage)}</span>{stage.progress > 0 ? <div className="scan-row-progress" aria-label={`${stage.name} progress`}><span style={{ width: `${Math.max(0, Math.min(100, stage.progress))}%` }} /></div> : null}<small>{formatStageTelemetry(stage)}</small></div>;
+}
+
+function ScanToolRow({ tool, detail }: { tool: WebviewState['pipeline']['tools'][number]; detail: string }): React.ReactElement {
+	return <div className={`scan-tool-row ${tool.status}`}><span className="stage-status" aria-hidden="true">{getStageMarker(tool.status)}</span><strong>{tool.label}</strong><span>{formatToolStatus(tool.status)}</span><small>{detail}</small></div>;
+}
+
+function scanStatusTone(status: WebviewState['stats']['scanStatus']): 'info' | 'success' | 'danger' | 'warning' {
+	return status === 'Scanning' ? 'info' : status === 'Complete' ? 'success' : status === 'Failed' ? 'danger' : 'warning';
+}
+
+function formatScanStatus(status: WebviewState['stats']['scanStatus']): string {
+	return status === 'Idle' ? 'Ready to scan' : status;
+}
 
 function getVisiblePipelineStages(stages: WebviewState['pipeline']['stages'], scanStatus: WebviewState['stats']['scanStatus']): WebviewState['pipeline']['stages'] {
 	if (scanStatus === 'Scanning') {
