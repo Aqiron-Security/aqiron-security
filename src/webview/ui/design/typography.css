@@ -1,0 +1,17 @@
+:root {
+	--aq-font-ui: Manrope, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	--aq-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+	--aq-type-display: 700 24px/1.15 var(--aq-font-ui);
+	--aq-type-h1: 700 18px/1.2 var(--aq-font-ui);
+	--aq-type-h2: 700 14px/1.3 var(--aq-font-ui);
+	--aq-type-h3: 650 13px/1.35 var(--aq-font-ui);
+	--aq-type-body: 400 13px/1.5 var(--aq-font-ui);
+	--aq-type-body-small: 400 12px/1.45 var(--aq-font-ui);
+	--aq-type-label: 650 11px/1.3 var(--aq-font-ui);
+	--aq-type-caption: 500 10px/1.35 var(--aq-font-ui);
+	--aq-type-code: 400 12px/1.55 var(--aq-font-mono);
+	--aq-type-numeric: 700 20px/1.1 var(--aq-font-ui);
+}
+
+body, button, input, select, textarea { font-family: var(--aq-font-ui); }
+code, pre, kbd { font-family: var(--aq-font-mono); }

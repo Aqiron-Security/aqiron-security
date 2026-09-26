@@ -1,0 +1,59 @@
+:root {
+	/* Aqiron semantic palette. VS Code values remain the first choice where they
+	 * provide better host integration, with Aqiron fallbacks for consistency. */
+	--aq-color-canvas: #06080d;
+	--aq-color-surface-1: #0b1018;
+	--aq-color-surface-2: #111824;
+	--aq-color-surface-3: #172130;
+	--aq-color-border-subtle: #1b2738;
+	--aq-color-border: #243247;
+	--aq-color-border-strong: #344863;
+	--aq-color-text-primary: var(--vscode-foreground, #f4f7fb);
+	--aq-color-text-secondary: #a9b5c7;
+	--aq-color-text-muted: #748197;
+	--aq-color-brand-primary: #55d9ff;
+	--aq-color-brand-primary-hover: #7ae3ff;
+	--aq-color-brand-secondary: #9b8afb;
+	--aq-color-success: #4ccb91;
+	--aq-color-warning: #f4c95d;
+	--aq-color-danger: #ff4d67;
+	--aq-color-info: #5ca8ff;
+	--aq-color-severity-critical: #ff4d67;
+	--aq-color-severity-high: #ff9a52;
+	--aq-color-severity-medium: #f4c95d;
+	--aq-color-severity-low: #4ccb91;
+	--aq-color-severity-info: #5ca8ff;
+
+	--aq-space-1: 4px;
+	--aq-space-2: 6px;
+	--aq-space-3: 8px;
+	--aq-space-4: 12px;
+	--aq-space-5: 16px;
+	--aq-space-6: 20px;
+	--aq-space-7: 24px;
+	--aq-space-8: 32px;
+	--aq-space-9: 40px;
+	--aq-space-10: 48px;
+	--aq-space-11: 64px;
+
+	--aq-radius-control: 8px;
+	--aq-radius-card: 12px;
+	--aq-radius-panel: 16px;
+	--aq-radius-modal: 20px;
+	--aq-radius-pill: 999px;
+
+	--aq-elevation-none: none;
+	--aq-elevation-low: 0 2px 8px rgba(0, 0, 0, .16);
+	--aq-elevation-medium: 0 8px 24px rgba(0, 0, 0, .22);
+	--aq-elevation-elevated: 0 16px 40px rgba(0, 0, 0, .30);
+
+	--aq-density-compact: 28px;
+	--aq-density-normal: 34px;
+	--aq-density-wide: 40px;
+	--aq-icon-1: 12px;
+	--aq-icon-2: 14px;
+	--aq-icon-3: 16px;
+	--aq-icon-4: 18px;
+	--aq-icon-5: 20px;
+	--aq-icon-6: 24px;
+}
