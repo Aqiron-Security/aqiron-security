@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, memo, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Section, VsCodeApi, WebviewState } from './types.js';
-import { AqironIconButton } from './design/primitives.js';
+import { AqironBadge, AqironButton, AqironIconButton, AqironSectionHeader } from './design/primitives.js';
 
 const AgentTab = lazy(async () => ({ default: (await import('./tabs.js')).AgentTab }));
 const AgentPanel = lazy(async () => ({ default: (await import('./tabs.js')).AgentPanel }));
@@ -138,15 +138,32 @@ function InitializationOverlay({ state, post }: { state: WebviewState; post: (co
 
 function WorkspaceOnboarding({ state, post }: { state: WebviewState; post: (command: string, payload?: unknown) => void }): React.ReactElement {
 	const [withAi, setWithAi] = useState(true);
-	const [open, setOpen] = useState(false);
-	return <motion.div className="workspace-onboarding" initial={{ opacity: 0 }} animate={{ opacity: 1 }}><div className="workspace-card">
-		<button className="workspace-settings" aria-label="Open settings" onClick={() => post('openRagSettings')}><span className="codicon codicon-settings-gear" aria-hidden="true" />Settings</button>
-		<img src={sanitizeAssetUrl(state.assets.logo)} alt="Aqiron Security" />
-		<h1>{state.rag.restricted ? 'Workspace trust required' : 'Create your security workspace'}</h1>
-		<p>{state.rag.restricted ? 'Aqiron cannot read or index files while VS Code is in Restricted Mode. Trust this workspace, then build the local RAG index.' : 'Index code, services, APIs, secrets, and dependencies locally in .aqiron-security.'}</p>
-		{!state.rag.restricted && <div className="workspace-build"><button className="primary-action" disabled={state.rag.building} onClick={() => post(withAi ? 'ragReindexWithAi' : 'ragReindexWithoutAi')}>{state.rag.building ? 'Building workspace...' : 'Create Workspace'}</button><div className="build-menu"><button aria-label="Choose build mode" aria-expanded={open} onClick={() => setOpen((value) => !value)}><span className="codicon codicon-chevron-down" aria-hidden="true" /></button>{open && <div><button onClick={() => { setWithAi(true); setOpen(false); }}>Build with AI</button><button onClick={() => { setWithAi(false); setOpen(false); }}>Build without AI</button></div>}</div></div>}
-		<span>{withAi ? 'Build with AI is selected. Suggestions will be generated after indexing.' : 'Build without AI is selected. Suggestions can be generated later.'}</span>
-	</div></motion.div>;
+	const hasWorkspace = Boolean(state.workspace.root && state.workspace.status !== 'No workspace');
+	return <motion.div className="workspace-onboarding" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+		<section className="workspace-card aq-surface-panel" aria-label="Workspace setup">
+			<div className="workspace-card-top">
+				<div className="workspace-brand"><img src={sanitizeAssetUrl(state.assets.logo)} alt="" /><AqironBadge tone="brand">AQIRON SECURITY</AqironBadge></div>
+				<AqironButton type="button" variant="ghost" className="workspace-settings" onClick={() => post('openRagSettings')}><span className="codicon codicon-settings-gear" aria-hidden="true" />Settings</AqironButton>
+			</div>
+			<AqironSectionHeader title={state.rag.restricted ? 'Workspace trust required' : 'Set up this security workspace'} description={state.rag.restricted ? 'Aqiron needs workspace trust before it can read files and build the local index.' : 'Build Aqiron’s local security index for the folder currently open in VS Code.'} />
+			<div className="workspace-context">
+				<div className="workspace-context-heading"><span className="codicon codicon-folder" aria-hidden="true" /><strong>Open workspace</strong><AqironBadge>{state.workspace.status}</AqironBadge></div>
+				<strong className="workspace-context-name">{state.workspace.name}</strong>
+				{hasWorkspace ? <code title={state.workspace.root}>{state.workspace.root}</code> : <span className="workspace-context-empty">Open a project folder in VS Code to index its files.</span>}
+				{state.workspace.types.length > 0 && <div className="workspace-project-types" aria-label="Detected project types">{state.workspace.types.map((type) => <AqironBadge key={type}>{type}</AqironBadge>)}</div>}
+			</div>
+			{state.rag.restricted ? <div className="workspace-notice" role="status"><span className="codicon codicon-lock" aria-hidden="true" /><span>Trust this folder using VS Code’s workspace trust controls, then return here to build the index.</span></div> : <>
+				<div className="workspace-setup-options">
+					<div><strong>Indexing setup</strong><span>Choose whether Aqiron should also generate suggestions after indexing.</span></div>
+					<div className="workspace-mode-options" role="group" aria-label="Workspace indexing mode">
+						<button type="button" aria-pressed={withAi} className={withAi ? 'workspace-mode active' : 'workspace-mode'} onClick={() => setWithAi(true)}><span className="codicon codicon-sparkle" aria-hidden="true" /><span><strong>Build with AI</strong><small>Generate suggestions after indexing</small></span><span className="workspace-mode-check" aria-hidden="true" /></button>
+						<button type="button" aria-pressed={!withAi} className={!withAi ? 'workspace-mode active' : 'workspace-mode'} onClick={() => setWithAi(false)}><span className="codicon codicon-database" aria-hidden="true" /><span><strong>Build without AI</strong><small>Generate suggestions later</small></span><span className="workspace-mode-check" aria-hidden="true" /></button>
+					</div>
+				</div>
+				<div className="workspace-card-footer"><span className={state.rag.building ? 'aq-status aq-status--info' : 'workspace-footer-note'} role={state.rag.building ? 'status' : undefined}>{state.rag.building ? 'Building local workspace index…' : 'Your source files remain in the open VS Code workspace.'}</span><AqironButton type="button" variant="primary" disabled={state.rag.building} onClick={() => post(withAi ? 'ragReindexWithAi' : 'ragReindexWithoutAi')}><span className={state.rag.building ? 'codicon codicon-loading codicon-modifier-spin' : 'codicon codicon-shield'} aria-hidden="true" />{state.rag.building ? 'Building workspace…' : 'Create Workspace'}</AqironButton></div>
+			</>}
+		</section>
+	</motion.div>;
 }
 
 function sanitizeAssetUrl(url: string | undefined | null): string {
