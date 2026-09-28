@@ -1,197 +1,114 @@
 # Aqiron Security
 
-Aqiron Security is a VS Code extension for local security scanning and security-focused workspace analysis. The repository contains the extension host, its webview, and a private TypeScript core runtime that the extension starts as a separate Node.js process.
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 
-![Aqiron Security Demo](assets/demo/aqiron-scan.gif)
+Aqiron Security is an open-source application-security workbench for developers. It brings security scanning, finding triage, workspace intelligence, optional AI-assisted analysis, and assessment reporting together in a VS Code workflow. The current product is delivered as a VS Code extension with a bundled TypeScript Core runtime; Core is not a separate public repository or package.
 
-## Current status
+The project is intended for developers and security practitioners who want to run supported checks in their own workspace, inspect evidence in context, and produce useful assessment artifacts. Scanning works without an AI provider. AI features are optional and use a provider configured by the user.
 
-This repository is version `0.0.1` and is under active development. Workspace operations currently require a Flutter workspace. The implementation is local-first; visible UI or command paths should not be interpreted as evidence of a hosted Aqiron service, Jira integration, dynamic analysis, public report sharing, or automatic workspace-wide remediation.
-
-## What Aqiron currently does
-
-- Scans a supported current file or Flutter workspace.
-- Publishes findings as VS Code diagnostics and in the Aqiron sidebar.
-- Runs native pattern-based rules for selected Dart, Python, Android XML, and Dockerfile patterns.
-- Integrates optional Betterleaks, MobSF, OSV-Scanner, Semgrep OSS, and Trivy scanners when their required tools or services are available.
-- Normalizes and correlates findings, builds a relationship graph, and generates JSON, SARIF, and PDF report artifacts under `.aqiron-security/reports/`.
-- Provides optional Ollama or OpenRouter AI operations and a workspace RAG index.
-- Applies the currently implemented file-level quick fixes for a small set of deterministic findings.
-
-External scanners and AI providers are optional. Missing scanners report an unavailable status instead of being treated as successful scans. Review AI output before using it for security decisions.
+> Current workspace operations are gated to Flutter projects. Individual scanners and rules can understand other file types, but this does not mean that arbitrary workspace types are currently supported end to end.
 
 ## Screenshots
 
-### Agent
+These are the screenshots currently checked into `assets/screenshots/`. They show representative UI states; some captures intentionally show empty findings or reports before a scan has been run.
 
-![Aqiron Security Agent](assets/screenshots/agent.png)
+| Scan workflow | Findings triage |
+| --- | --- |
+| ![Aqiron application shell and Scan configuration, with workspace target and Deep mode selected](assets/screenshots/scan.png) | ![Findings triage workspace in its no-scan empty state](assets/screenshots/threats.png) |
 
-### Scan
+| Reports workspace | Agent |
+| --- | --- |
+| ![Reports workspace before report artifacts have been generated](assets/screenshots/reports.png) | ![Aqiron Agent with workspace context and security actions](assets/screenshots/agent.png) |
 
-![Aqiron Security Scan](assets/screenshots/scan.png)
+The current webview also has redesigned application navigation, Settings, and workspace-index onboarding. Dedicated screenshots for Settings and onboarding are not present in the repository. The report exporter produces a structured, multi-section PDF, but no PDF page/sample screenshots were found in the checked-in assets or repository history; no substitute image is shown here.
 
-### Threats
+## What is implemented
 
-![Aqiron Security Threats](assets/screenshots/threats.png)
+- **Security scanning:** Quick and deep workspace scans, current-file scanning where supported, live pipeline/tool status, cancellation, and scan results. Workspace operations currently require a Flutter workspace. Built-in pattern rules cover Dart plus selected Python, Android XML, Dockerfile, and configurable custom-rule patterns; this is not a claim of general workspace support for those languages.
+- **Scanner integrations:** The Core runtime registers Betterleaks, OSV-Scanner, Semgrep, Trivy, and MobSF adapters. They are optional: availability, mode, target, and configuration affect whether an adapter can run. Install executable tools separately and make them available to the extension environment. MobSF requires a configured server URL and API key. A missing or unconfigured tool is reported as unavailable rather than as a successful scan.
+- **Finding pipeline and triage:** Scanner results are normalized into Aqiron findings, correlated/deduplicated, and can be inspected by severity, source, status, and location. The Findings screen supports search/filtering, stored scan snapshots, source navigation, ignore actions, AI explanation/fix prompts, export, and rule creation where applicable.
+- **Workspace intelligence (RAG):** A bounded local index of supported workspace files and security signals supports retrieval of relevant project context. Index building can run without AI. AI suggestions can optionally be generated after indexing. The index and scan history are workspace data; keep `.aqiron-security/` private and out of commits.
+- **Optional AI:** The implemented providers are OpenRouter, OpenAI, Anthropic Claude, and Google Gemini. The Agent supports streamed chat and workspace-aware security actions. Separate AI review and vulnerability-analysis flows can use normalized findings and retrieved workspace evidence to produce explanations, analysis, and remediation guidance. AI output is advisory; validate it against the source and scanner evidence. Requests send selected context to the configured provider. **Ollama is not a current provider** (legacy Ollama settings are migrated away).
+- **Reports:** A completed assessment can be exported as PDF, JSON, and SARIF. The structured PDF includes a cover and assessment context, executive summary, overview, findings, and applicable correlation/scanner/remediation sections. JSON contains the report model; SARIF uses version 2.1.0. Artifacts are written under `.aqiron-security/reports/`; locally stored scan snapshots are available as report/findings history.
+- **VS Code integration:** The extension contributes commands, diagnostics, status-bar access, current-file scanning, save-triggered scanning for supported files, and limited deterministic quick fixes for specific findings. Workspace exclusions and related options are declared in the extension settings.
 
-### Reports
+External scanner binaries/services and AI credentials are not bundled. Aqiron does not require an Aqiron-hosted service or an AI subscription to run its non-AI scanning and local-index paths; provider costs and data-handling terms depend on the AI service a user chooses.
 
-![Aqiron Security Reports](assets/screenshots/reports.png)
+## Security workflow
 
-## Requirements
-
-- VS Code `^1.118.0`.
-- Node.js and npm compatible with `package.json` and `package-lock.json`.
-- A trusted Flutter workspace for workspace scans and RAG operations.
-- Optional scanner executables or services: Betterleaks, OSV-Scanner, Semgrep, Trivy, and MobSF.
-- Optional Ollama or OpenRouter configuration for AI operations.
-
-## Development quickstart
-
-Run these commands from the repository root:
-
-```powershell
-npm ci
-npm run compile
-npm test
-npm run package
+```text
+Create/Open Workspace → Configure / Settings → Scan → Findings → Reports → Agent
 ```
 
-For interactive extension development, open the repository in VS Code, press `F5`, and use the `Run Extension` configuration to launch an Extension Development Host. `npm run watch` starts the TypeScript and esbuild watchers in parallel.
+1. **Create/Open Workspace:** Open a project folder in VS Code. Aqiron’s onboarding builds a local security workspace/index for that folder; it does not create or open folders itself. Workspace indexing and scanning require a trusted Flutter workspace.
+2. **Configure / Settings:** Add optional AI credentials, set MobSF URL/key, adjust general/accessibility preferences, and edit the existing Flutter custom rules.
+3. **Scan:** Choose a supported target and scan mode. Review progress, tool availability, execution output, and completion state.
+4. **Findings:** Search and filter the normalized results, inspect evidence and remediation, navigate to source locations, and use available triage actions. Scan snapshots are stored locally in `.aqiron-security/threats.json` (up to the implementation’s configured retention limit).
+5. **Reports:** Review assessment context/history and export available PDF, JSON, or SARIF artifacts.
+6. **Agent:** Ask questions about the workspace, findings, and code, or launch focused security actions using the selected AI provider. The Agent is optional and does not replace deterministic scans.
 
-The main validation commands are also available independently:
-
-```powershell
-npm run check-types
-npm run lint
-```
-
-`npm test` compiles test output, builds the extension, runs linting, and launches the VS Code test CLI. Tests are under `src/test/`.
-
-## Commands and settings
-
-The extension contributes commands for opening the sidebar, scanning a workspace or current file, refreshing scans, explaining issues, opening the security agent, analyzing a workspace, and managing the RAG index. The exact command IDs and settings are authoritative in [`package.json`](package.json).
-
-Important settings include `aqiron-security.enableQuickFixes`, `excludeFolders`, `enableRealtimeScan`, `scanGeneratedFiles`, `maxFileSizeKB`, `mobsfBaseUrl`, `mobsfApiKey`, and `customRules`.
+The current UI redesign is implemented as screens inside the VS Code webview: application shell/navigation, Scan workflow, Findings triage, Reports workspace, Agent, Settings, and workspace-index onboarding. These are not separate desktop applications or independently deployed product modules.
 
 ## Architecture
 
 ```text
-VS Code extension host (`src/`)
-  ├─ commands, diagnostics, sidebar/webview, settings, AI/RAG services
-  ├─ current-file scanning and VS Code integration
-  └─ CoreClient ── newline-delimited JSON over stdin/stdout ──┐
-                                                              │
-private core runtime (`packages/core/`)                      │
-  ├─ native rules and optional scanner adapters                │
-  ├─ finding normalization, correlation, graph, and reports    │
-  ├─ AI and RAG services                                       │
-  └─ filesystem, process, network, and credential adapters    │
-                                                              └─ `dist/core-runtime.js`
+VS Code Extension (host, commands, diagnostics, React webview)
+       ↓
+Core Client / Process Manager
+       ↓
+stdin/stdout IPC (newline-delimited JSON)
+       ↓
+Aqiron Core Runtime (TypeScript, bundled with the extension)
+       ↓
+scanners → finding normalization/correlation → optional AI/RAG → reports
 ```
 
-`src/` is the VS Code host and user interface. `packages/core/` is marked private and is bundled into `dist/core-runtime.js`; it is not currently published as a standalone npm package. `src/core/CoreClient` starts the runtime, performs the protocol handshake, forwards events, and exposes runtime operations to the extension.
+The extension owns VS Code integration and the webview. The Core Client starts and supervises the bundled Node.js runtime and exchanges requests/events over stdio. The runtime coordinates registered scanners, finding normalization and correlation, optional AI and RAG services, and report generation. Current-file quick scans also have an extension-side scanner path. `packages/core/` is private and bundled into `dist/core-runtime.js`; it has not been split into a separately published repository.
 
-For the detailed implementation view, see [`ARCHITECTURE_DIAGRAMS.md`](ARCHITECTURE_DIAGRAMS.md), [`TECHNICAL_REVERSE_ENGINEERING.md`](TECHNICAL_REVERSE_ENGINEERING.md), and [`AQIRON_SECURITY_RAG.md`](AQIRON_SECURITY_RAG.md).
+Useful implementation references: [architecture diagrams](ARCHITECTURE_DIAGRAMS.md), [RAG implementation notes](AQIRON_SECURITY_RAG.md), [extension manifest and settings](package.json), and [contribution guide](CONTRIBUTING.md).
 
-## Repository tour
+## Requirements and optional tools
+
+- VS Code version satisfying `^1.118.0` (from `package.json`).
+- Node.js and npm suitable for the checked-in package lock and development scripts.
+- A trusted Flutter workspace for workspace scanning and RAG indexing.
+- Optional external scanner installations/configuration for the corresponding checks: Betterleaks, OSV-Scanner, Semgrep, Trivy, and MobSF.
+- Optional credentials for one of the implemented AI providers (OpenRouter, OpenAI, Claude, or Gemini).
+
+Exact scanner invocation, target, and availability behavior is determined by the current scan mode and adapter. See the scanner implementations under [`packages/core/src/scanners/`](packages/core/src/scanners/) and extension-side scope/configuration in [`src/security/scanners/`](src/security/scanners/). Do not treat example commands in older design notes as proof that a tool runs in every mode.
+
+## Build and run from source
+
+Clone the repository and install the lockfile-pinned dependencies:
+
+```powershell
+git clone https://github.com/aqiron-security/aqiron-security.git
+cd aqiron-security
+npm ci
+```
+
+Compile and validate the extension:
+
+```powershell
+npm run compile
+npm test
+```
+
+For interactive development, open the repository in VS Code and press **F5** to launch the configured Extension Development Host. `npm run watch` starts the TypeScript and esbuild watchers. Individual checks are available with `npm run check-types` and `npm run lint`; `npm run package` runs the production build checks and bundling. `npm test` runs the configured VS Code test suite (with the repository’s `pretest` compilation steps).
+
+## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | VS Code extension host, commands, diagnostics, webview, AI, RAG, scanners, and tests. |
-| `packages/core/` | Private core runtime and shared security services. |
-| `assets/` | UI images, icons, logos, backgrounds, and generated visual assets. |
-| `resources/` | Extension branding assets referenced by `package.json`. |
-| `.github/` | Issue templates and the pull-request template. |
-| `.vscode/` | Shared launch, task, extension recommendation, and workspace settings. |
-| `scripts/` | Repository helper scripts. |
-| `.aqiron-security/` | Generated workspace reports, RAG data, and threat history; keep local. |
-| `package.json` | Extension manifest, commands, settings, dependencies, and scripts. |
-| `packages/core/package.json` | Private core package metadata. |
-| `esbuild.js` | Extension, core-runtime, and webview bundling. |
-| `tsconfig.json` | TypeScript configuration. |
-| `.gitignore` | Ignored local and generated content. |
-| `.vscodeignore` | Files excluded from the packaged VS Code extension. |
-| `LICENSE` | Mozilla Public License 2.0 text. |
-| `CHANGELOG.md`, `ROADMAP.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md` | Project history, roadmap, contribution, security, and community documentation. |
+| `src/` | VS Code extension host, commands, scanners, AI/RAG services, React webview, and tests. |
+| `packages/core/` | Private TypeScript Core runtime, scanner adapters, findings pipeline, AI/RAG services, and report exporters. |
+| `assets/`, `resources/` | UI screenshots, icons, logos, and extension resources. |
+| `scripts/`, `esbuild.js` | Test/build helpers and extension/Core/webview bundling. |
+| `.vscode/`, `.github/` | Development launch/tasks and issue/pull-request templates. |
+| `.aqiron-security/` | Generated workspace index, history, and report artifacts; do not commit workspace data. |
 
-### Core package tour
+## Contributing and community
 
-```text
-packages/core/
-├─ package.json                         Private package metadata and internal exports
-├─ tsconfig.json                        Core TypeScript project configuration
-└─ src/
-   ├─ index.ts                          Internal export barrel for core capabilities
-   ├─ ai/
-   │  ├─ analysis/                      AI vulnerability analysis and review
-   │  ├─ providers/                     Ollama and OpenRouter provider adapters
-   │  ├─ services/                      Provider, model, credential, and streaming services
-   │  ├─ types/                         AI-specific types
-   │  └─ utils/                         Request, retry, and timeout helpers
-   ├─ analysis/                         Analysis types and RAG retrieval services
-   ├─ context/                          Security context construction and prioritization
-   ├─ correlation/                      Finding correlation and relationship graphs
-   ├─ findings/                         Finding models and normalization helpers
-   ├─ orchestration/                    Core scan service and orchestration types
-   ├─ parsers/                          External scanner output parsers and schemas
-   ├─ pipeline/                         Scan events, state, aggregation, and worker queue
-   ├─ project/                          Project detection, profiles, and workspace models
-   ├─ rag/                              RAG indexing, retrieval, signals, and regex loading
-   ├─ reports/                          Report generation, models, exporters, and summaries
-   ├─ runtime/
-   │  ├─ main.ts                        stdin/stdout runtime process entry point
-   │  ├─ coreRuntime.ts                 Runtime request handling and service coordination
-   │  ├─ protocol.ts                    Runtime request, response, and event protocol
-   │  ├─ nodeAdapters.ts                Node filesystem, process, network, and credential adapters
-   │  └─ index.ts                        Runtime exports
-   ├─ scanners/
-   │  ├─ betterleaks/                   Betterleaks scanner adapter
-   │  ├─ mobsf/                         MobSF scanner adapter
-   │  ├─ native/                        Built-in workspace scanner
-   │  ├─ osv/                           OSV scanner adapter
-   │  ├─ semgrep/                       Semgrep scanner and rule manager
-   │  ├─ trivy/                         Trivy scanner adapter
-   │  ├─ scannerManager.ts              Scanner registration and selection
-   │  ├─ scope.ts                        Scan scope definitions
-   │  └─ types.ts                        Scanner interfaces and shared types
-   ├─ shared/                           Cross-cutting AI, finding, pipeline, report, and platform types
-   └─ telemetry/                        Core telemetry interfaces and implementation
-```
+Aqiron Security is developed in the open. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md), then check the [GitHub repository](https://github.com/aqiron-security/aqiron-security) for current issues and pull requests. Use the repository’s [bug report](.github/ISSUE_TEMPLATE/bug_report.md) or [feature request](.github/ISSUE_TEMPLATE/feature_request.md) template for public, non-sensitive discussion. Do not report exploitable vulnerabilities, credentials, or private workspace data publicly; follow [`SECURITY.md`](SECURITY.md) instead. The [Code of Conduct](CODE_OF_CONDUCT.md) applies to project participation.
 
-| Path | Purpose |
-| --- | --- |
-| `packages/core/src/ai/` | Provider integrations and services for AI chat, review, vulnerability analysis, models, credentials, and streaming. |
-| `packages/core/src/analysis/`, `context/`, and `project/` | Build project profiles and prioritized security context for analysis and retrieval. |
-| `packages/core/src/findings/`, `correlation/`, and `reports/` | Normalize findings, correlate relationships, and produce security reports and summaries. |
-| `packages/core/src/orchestration/`, `pipeline/`, and `scanners/` | Coordinate scans, manage scan state and events, and connect native and external scanner adapters. |
-| `packages/core/src/parsers/` | Convert Betterleaks, OSV, Semgrep, Trivy, and other scanner output into the core finding model. |
-| `packages/core/src/rag/` | Index workspace security signals and retrieve relevant context for analysis. |
-| `packages/core/src/runtime/` | Run the private Node.js core process and expose its newline-delimited JSON protocol to the VS Code host. |
-| `packages/core/src/shared/` and `packages/core/src/telemetry/` | Provide shared contracts, platform abstractions, cancellation, and telemetry support across core services. |
-
-`packages/core/src/index.ts` is the internal export barrel for the core capabilities. `packages/core/src/runtime/main.ts` starts the private runtime process and communicates over stdin/stdout using newline-delimited JSON. `packages/core/src/runtime/coreRuntime.ts` coordinates protocol handling, scanning, RAG, AI, project detection, and reporting. The core package is private, is bundled into `dist/core-runtime.js`, and is not published as an independent npm package; generated `packages/core/dist/` output is therefore omitted from this source tour.
-
-Generated output, dependencies, downloaded test runtimes, and workspace-specific `.aqiron-security/` data are not source files and should not be committed.
-
-## Known limitations
-
-- Workspace scans are currently limited to Flutter workspaces at the extension boundary.
-- Pattern-based rules can miss data-flow issues or produce false positives.
-- External scanner results depend on local tools, server configuration, network access, and tool versions.
-- AI operations depend on the configured provider and may send selected workspace context to that provider.
-- YARA, cloud orchestration, executable fuzzing, dynamic sandbox analysis, Jira integration, public report sharing, and automatic workspace-wide remediation are not current implemented capabilities.
-
-## Contributing
-
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request. Run the documented validation commands and describe security-relevant changes clearly. Security vulnerabilities should be reported using [`SECURITY.md`](SECURITY.md), not a public issue.
-
-## Roadmap
-
-The evidence-based roadmap is in [`ROADMAP.md`](ROADMAP.md). It distinguishes current implementation from work that still requires design, implementation, validation, or maintainer decisions.
-
-## License and trademark
-
-This repository includes the Mozilla Public License 2.0 in [`LICENSE`](LICENSE). The private `packages/core` package is not a separately published npm package.
-
-“Aqiron” and “Aqiron Security” are project names. This README does not grant trademark rights; permitted uses and any trademark policy require owner or legal review.
+The project is licensed under the [Mozilla Public License 2.0](LICENSE). See [`ROADMAP.md`](ROADMAP.md) for ideas and areas to validate; roadmap items are not implemented features or delivery commitments.
