@@ -10,7 +10,7 @@ The project is intended for developers and security practitioners who want to ru
 
 ## Screenshots
 
-These are the screenshots currently checked into `assets/screenshots/`. They show representative UI states; some captures intentionally show empty findings or reports before a scan has been run.
+These are the screenshots currently included under `assets/screenshots/`. The webview captures show representative UI states; some intentionally show empty findings or reports before a scan has been run.
 
 | Scan workflow | Findings triage |
 | --- | --- |
@@ -20,7 +20,36 @@ These are the screenshots currently checked into `assets/screenshots/`. They sho
 | --- | --- |
 | ![Reports workspace before report artifacts have been generated](assets/screenshots/reports.png) | ![Aqiron Agent with workspace context and security actions](assets/screenshots/agent.png) |
 
-The current webview also has redesigned application navigation, Settings, and workspace-index onboarding. Dedicated screenshots for Settings and onboarding are not present in the repository. The report exporter produces a structured, multi-section PDF, but no PDF page/sample screenshots were found in the checked-in assets or repository history; no substitute image is shown here.
+The current webview also has redesigned application navigation, Settings, and workspace-index onboarding. Dedicated screenshots for Settings and onboarding are not included.
+
+### Generated PDF assessment
+
+The following supplied screenshots are pages from one generated Aqiron Security assessment PDF. They show its cover, contents, assessment summaries, finding detail, correlation, remediation, and appendix. Counts and findings visible in these screenshots belong to that sample report.
+
+<details>
+<summary>View the generated PDF page gallery (10 pages)</summary>
+
+| Cover | Contents |
+| --- | --- |
+| ![PDF cover showing the Aqiron Security assessment title and workspace context](assets/screenshots/pdf-report/00-cover.png) | ![PDF contents page listing report sections](assets/screenshots/pdf-report/01-contents.png) |
+
+| Executive summary | Security overview |
+| --- | --- |
+| ![PDF executive summary with assessment context, status, findings summary, and observations](assets/screenshots/pdf-report/02-executive-summary.png) | ![PDF security overview with severity distribution, finding inventory, mappings, and status](assets/screenshots/pdf-report/03-security-overview.png) |
+
+| Key findings | Detailed finding: container configuration |
+| --- | --- |
+| ![PDF key findings page with prioritized findings and locations](assets/screenshots/pdf-report/04-key-findings.png) | ![PDF detailed finding page showing the Trivy Dockerfile finding, evidence, and remediation](assets/screenshots/pdf-report/05-detailed-findings-container.png) |
+
+| Detailed finding: application code | Correlation and relationships |
+| --- | --- |
+| ![PDF detailed findings page showing application finding evidence, remediation, and CWE and OWASP mappings](assets/screenshots/pdf-report/06-detailed-findings-application.png) | ![PDF correlation page showing relationship summary and finding graph](assets/screenshots/pdf-report/07-correlation-relationships.png) |
+
+| Remediation summary | Appendix |
+| --- | --- |
+| ![PDF remediation summary with prioritized actions](assets/screenshots/pdf-report/08-remediation-summary.png) | ![PDF appendix with report metadata, technical inventory, and finding identifiers](assets/screenshots/pdf-report/09-appendix.png) |
+
+</details>
 
 ## What is implemented
 
