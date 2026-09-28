@@ -836,7 +836,7 @@ function AISettingsModal({ state, post, onClose }: { state: WebviewState; post: 
 export const SettingsTab = memo(function SettingsTab({ state, post }: { state: WebviewState; post: Post }): React.ReactElement {
 	const [editingId, setEditingId] = useState<string | undefined>();
 	const editing = state.ai.apiCredentials.find((api) => api.id === editingId);
-	const [activeSettingsPanel, setActiveSettingsPanel] = useState<'credentials' | 'general' | 'flutter'>('credentials');
+	const [activeSettingsPanel, setActiveSettingsPanel] = useState<'credentials' | 'integrations' | 'general' | 'flutter'>('credentials');
 	const [frameworksOpen, setFrameworksOpen] = useState(true);
 	const [apiKey, setApiKey] = useState('');
 	const [apiProvider, setApiProvider] = useState<WebviewState['ai']['selection']['provider']>(state.ai.selection.provider);
@@ -882,7 +882,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 		post('saveCustomRules', customRules);
 	};
 	const apiManagementCard = (
-		<section className="section">
+		<section className="section settings-panel aq-surface-card">
 				<div className="section-head"><h2>API Management</h2><span>Saved provider credentials</span></div>
 				<div className="api-list">
 					{state.ai.apiCredentials.length === 0 ? <div className="empty">No API keys saved yet.</div> : state.ai.apiCredentials.map((api) => (
@@ -915,7 +915,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 			</section>
 	);
 	const mobSfCard = (
-		<section className="section">
+		<section className="section settings-panel aq-surface-card">
 				<div className="section-head"><h2>MobSF Integration</h2><span>Mobile artifact scanning</span></div>
 				<div className="settings-form">
 					<label>Base URL<input value={mobSfBaseUrl} onChange={(event) => setMobSfBaseUrl(event.target.value)} placeholder="http://localhost:1337/" /></label>
@@ -926,7 +926,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 			</section>
 	);
 	const generalCard = (
-		<section className="section">
+		<section className="section settings-panel aq-surface-card">
 				<div className="section-head"><h2>Threats & Reports AI</h2><span>Defaults for non-agent features</span></div>
 				<div className="settings-form ai-defaults-form">
 					<label className="toggle-row"><input type="checkbox" checked={useChatDefaults} onChange={(event) => updateTaskDefaults({ useChatDefaults: event.target.checked })} /> Use chat widget provider, model, and intelligence</label>
@@ -937,7 +937,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 			</section>
 	);
 	const flutterCard = (
-		<section className="section">
+		<section className="section settings-panel aq-surface-card">
 				<div className="section-head"><h2>Flutter Custom Rules</h2><span>Framework-specific scanner rules</span></div>
 				<div className="settings-form custom-rules-form">
 					<textarea value={customRules} onChange={(event) => setCustomRules(event.target.value)} spellCheck={false} />
@@ -949,20 +949,23 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 	return (
 		<div className="tab-page settings-page">
 			<aside className="settings-sidebar" aria-label="Settings navigation">
-				<div className="settings-sidebar-head"><strong>Settings</strong></div>
-				<button className={activeSettingsPanel === 'credentials' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('credentials')}><span className="codicon codicon-key" aria-hidden="true" /><span>Api and credentials</span></button>
-				<button className={activeSettingsPanel === 'general' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('general')}><span className="codicon codicon-settings-gear" aria-hidden="true" /><span>General</span></button>
+				<div className="settings-sidebar-head"><strong>Settings</strong><span>Workspace configuration</span></div>
+				<button type="button" aria-current={activeSettingsPanel === 'credentials' ? 'page' : undefined} className={activeSettingsPanel === 'credentials' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('credentials')}><span className="codicon codicon-key" aria-hidden="true" /><span>AI &amp; Credentials</span></button>
+				<button type="button" aria-current={activeSettingsPanel === 'integrations' ? 'page' : undefined} className={activeSettingsPanel === 'integrations' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('integrations')}><span className="codicon codicon-plug" aria-hidden="true" /><span>Integrations</span></button>
+				<button type="button" aria-current={activeSettingsPanel === 'general' ? 'page' : undefined} className={activeSettingsPanel === 'general' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('general')}><span className="codicon codicon-settings-gear" aria-hidden="true" /><span>General &amp; Accessibility</span></button>
 				<div className={frameworksOpen ? 'settings-nav-group open' : 'settings-nav-group'}>
-					<button className="settings-nav group-trigger" onClick={() => setFrameworksOpen((value) => !value)} aria-expanded={frameworksOpen}>
+					<button type="button" className="settings-nav group-trigger" onClick={() => setFrameworksOpen((value) => !value)} aria-expanded={frameworksOpen}>
 						<span className="codicon codicon-library" aria-hidden="true" />
-						<span>Languages and framework</span>
+						<span>Languages &amp; Frameworks</span>
 						<span className={frameworksOpen ? 'codicon codicon-chevron-down' : 'codicon codicon-chevron-right'} aria-hidden="true" />
 					</button>
-					{frameworksOpen ? <button className={activeSettingsPanel === 'flutter' ? 'settings-nav child active' : 'settings-nav child'} onClick={() => setActiveSettingsPanel('flutter')}><span className="settings-child-dot" />Flutter</button> : null}
+					{frameworksOpen ? <button type="button" aria-current={activeSettingsPanel === 'flutter' ? 'page' : undefined} className={activeSettingsPanel === 'flutter' ? 'settings-nav child active' : 'settings-nav child'} onClick={() => setActiveSettingsPanel('flutter')}><span className="settings-child-dot" />Flutter</button> : null}
 				</div>
 			</aside>
 			<div className="settings-content">
-				{activeSettingsPanel === 'credentials' ? <>{apiManagementCard}{mobSfCard}</> : null}
+				<div className="settings-content-heading"><span className="eyebrow">AQIRON SETTINGS</span><h1>{activeSettingsPanel === 'credentials' ? 'AI & Credentials' : activeSettingsPanel === 'integrations' ? 'Integrations' : activeSettingsPanel === 'general' ? 'General & Accessibility' : 'Languages & Frameworks'}</h1><p>{activeSettingsPanel === 'credentials' ? 'Manage saved provider credentials and defaults without exposing secret values.' : activeSettingsPanel === 'integrations' ? 'Configure external security tools connected to Aqiron.' : activeSettingsPanel === 'general' ? 'Set AI defaults and adjust interface readability.' : 'Configure framework-specific scanner rules available in this workspace.'}</p></div>
+				{activeSettingsPanel === 'credentials' ? apiManagementCard : null}
+				{activeSettingsPanel === 'integrations' ? mobSfCard : null}
 				{activeSettingsPanel === 'general' ? generalCard : null}
 				{activeSettingsPanel === 'flutter' ? flutterCard : null}
 			</div>
