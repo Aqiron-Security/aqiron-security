@@ -63,7 +63,7 @@ The actual runtime dispatch in `CoreRuntime.handle` is the authoritative method 
 |---|---|---|
 | `core.handshake`, `core.health`, `core.info`, `core.shutdown`, `core.cancel` | Generic Core runtime operations | Lifecycle and request cancellation, not security-domain operations. |
 | `project.detect`, `project.profile` | Generic project/domain operations | Uses workspace root; profile result includes detected security signals. |
-| `scan.start`, `scan.cancel`, `scan.status` | Generic security operations | Scan request includes root, target, mode, trust and current file. Events stream under the scan request id. |
+| `scan.start`, `scan.file`, `scan.cancel`, `scan.status` | Generic security operations | `scan.start` remains the existing workspace pipeline. New `scan.file` is an exact-file operation with explicit content and resolved policy; it does not redirect existing callers. |
 | `rag.index`, `rag.status`, `rag.query` | Generic security-context operations | Index request can request AI; query currently builds a minimal profile around the query. |
 | `ai.providers`, `ai.models`, `ai.cancel`, `ai.chat`, `ai.review`, `ai.vulnerabilityAnalysis` | Generic AI/security-analysis operations | Provider and model selection are domain/service capabilities; selection settings and UX remain client concerns. |
 | `credentials.status`, `credentials.set`, `credentials.delete`, `credentials.exists` | Generic credential service operations | Credential storage implementation is injected/defaulted by the host runtime. Client must own consent and secret-entry UX. |
@@ -99,7 +99,7 @@ The following is a **Near-term boundary proposal**, not a claim that a stable cl
 |---|---|---|
 | Runtime lifecycle | `core.handshake/health/info/shutdown/cancel` | Keep transport/lifecycle envelope outside security application service. |
 | Project context | `project.detect/profile` | Keep profile detection in Core; accept an explicit workspace descriptor and configuration. |
-| Scanning | `scan.start/cancel/status`, `CoreScanService.run` | Core owns orchestration, scanners, parsing, normalization, correlation and results; clients request a scan and consume domain events/result. |
+| Scanning | `scan.start/cancel/status`, `CoreScanService.run`; new `scan.file` | Core owns workspace orchestration as before. The new file operation scans exactly the supplied path/content and returns `UnifiedFinding[]`; client adapters still resolve policy and present results. |
 | Findings | Finding converters and Core finding model | Use canonical finding DTOs and client-side projections; define schema/version and stable ids. |
 | AI/RAG | Existing AI/RAG dispatch and services | Core owns retrieval/index/query and finding analysis/review; clients own provider choice UX, prompts as user interaction, consent, and display. Provider configuration/credential policy remains explicit. |
 | Reports | `report.generate`, `ReportGenerator` | Core owns report model and format generation. Client owns file chooser, destination, reveal/share actions and any UI-specific naming flow. |
@@ -130,7 +130,7 @@ sequenceDiagram
   A-->>C: present results in client-native UI
 ```
 
-**Current caveat:** the runtime emits scanner/pipeline progress, but some events are presentation-shaped (`tool`, `log`, stages) and scan ids inside `CoreScanService` payloads can differ from the outer IPC request id and final scan result id. The VS Code scan adapter now filters by the outer request id; it does not normalize the inner payload ids. See the detailed scan call graph and migration constraints in [core-implementation-inventory.md](core-implementation-inventory.md).
+**Current caveat:** workspace scan events include pipeline progress, some of which is presentation-shaped (`tool`, `log`, stages). Workspace scan identity is canonicalized by `CoreScanService`. The new file operation emits only start/completion metadata and uses the IPC request id as its scan id. See [file-scan-contract.md](file-scan-contract.md) for its limits and migration status.
 
 ## Future client boundaries
 
@@ -170,7 +170,7 @@ An investigation aggregate can own hypothesis text, scope/constraints, linked ob
 
 ## Migration strategy
 
-1. **Current / document only:** treat this map as baseline. No scanner behavior or model changes in this task.
+1. **Current / in-place contract:** `scan.file` now establishes exact-file and in-memory-content semantics without changing `scan.start` or redirecting callers. See [file-scan-contract.md](file-scan-contract.md).
 2. **Near-term / in-place:** inventory duplicate `src/security` vs Core code paths and call sites; identify the active implementation per feature. Add protocol payload validation and typed method/event mapping at the existing IPC seam before exposing more clients. Agree canonical finding/report/configuration contracts and add compatibility/version policy.
 3. **Near-term / adapter cleanup:** make extension host resolve workspace/config/trust/credentials and pass explicit portable options; keep VS Code command and webview contracts in adapters. Route one feature at a time through Core only where this does not change behavior; remove duplication only after usage and tests confirm the Core path is authoritative.
 4. **Future / client proof:** exercise the same Core request semantics through a small CLI/CI adapter and later Desktop shell, while still in this repository if desired. Verify headless filesystem/process/credential adapters and packaging before deciding on a package split.

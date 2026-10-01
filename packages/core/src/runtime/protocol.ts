@@ -11,6 +11,7 @@ import { CorrelationResult } from '../correlation/correlationEngine';
 import { SecurityGraph } from '../correlation/relationshipGraph';
 import { ScannerResult } from '../shared/scanner';
 import { AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
+import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
 
 export const CORE_PROTOCOL_VERSION = 1;
 
@@ -47,6 +48,7 @@ export type CoreMethodParams = {
 	'rag.status': CoreProjectDetectRequest;
 	'rag.query': CoreRagQueryRequest;
 	'scan.start': CoreScanStartRequest;
+	'scan.file': CoreFileScanRequest;
 	'scan.cancel': { scanId?: string };
 	'scan.status': { scanId?: string };
 	'ai.providers': CoreEmptyParams;
@@ -76,6 +78,7 @@ export interface CoreMethodResults {
 	'rag.status': CoreRagStatusResult;
 	'rag.query': CoreRagQueryResult;
 	'scan.start': CoreScanStartResult;
+	'scan.file': CoreFileScanResult;
 	'scan.cancel': { cancelled: boolean };
 	'scan.status': CoreScanStatusResult;
 	'ai.providers': CoreAiProvidersResult;
