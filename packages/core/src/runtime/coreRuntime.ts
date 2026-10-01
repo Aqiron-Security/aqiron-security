@@ -281,6 +281,7 @@ export class CoreRuntime {
 			environment: { platform: process.platform, arch: process.arch, os: process.platform },
 		} as const;
 		const result = await this.pipeline.run({
+			scanId,
 			workspaceRoot: request.workspaceRoot,
 			targetPath: request.targetPath,
 			mode: request.mode,
@@ -293,7 +294,7 @@ export class CoreRuntime {
 			reportGenerator: this.reportGenerator,
 		});
 		const state: ScanState = { scanId, workspaceRoot: request.workspaceRoot, targetPath: request.targetPath ?? request.workspaceRoot, mode: request.mode ?? 'deep', stage: 'Idle', stageProgress: 100, scanners: [], findingsCount: result.findings.length, riskScore: result.findings.length ? Math.min(100, result.findings.length * 15) : 0, cancelled: false, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), reportStatus: 'completed', finalState: 'completed' };
-		const response: CoreScanStartResult = { scanId, state, findings: result.findings, report: result.report, filesScanned: result.filesScanned, durationMs: result.durationMs, toolResults: result.toolResults, correlation: result.correlation, graph: result.graph, telemetry: result.telemetry };
+		const response: CoreScanStartResult = { scanId: result.scanId, state, findings: result.findings, report: result.report, filesScanned: result.filesScanned, durationMs: result.durationMs, toolResults: result.toolResults, correlation: result.correlation, graph: result.graph, telemetry: result.telemetry };
 		this.scans.set(scanId, { state, result: response });
 		return response;
 	}

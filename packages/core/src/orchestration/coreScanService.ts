@@ -14,7 +14,7 @@ export class CoreScanService {
 
 	async run(request: CoreScanRequest): Promise<CoreScanResult> {
 		const startedAt = Date.now();
-		const scanId = `scan-${startedAt}`;
+		const scanId = request.scanId;
 		const telemetry = new TelemetryEngine(scanId);
 		const scanState = createScanState({
 			scanId,
@@ -22,9 +22,13 @@ export class CoreScanService {
 			targetPath: request.targetPath ?? request.workspaceRoot,
 			mode: request.mode ?? 'deep',
 		});
+		const emitEvent = (event: Parameters<PipelineEmitter['emit']>[0]) => {
+			request.emitter.emit(withScanIdentity(event, scanId));
+		};
 		const emit = (event: Parameters<PipelineEmitter['emit']>[0]) => {
-			request.emitter.emit(event);
-			telemetry.record(event as Parameters<TelemetryEngine['record']>[0]);
+			const correlatedEvent = withScanIdentity(event, scanId);
+			request.emitter.emit(correlatedEvent);
+			telemetry.record(correlatedEvent as Parameters<TelemetryEngine['record']>[0]);
 		};
 		try {
 			throwIfCancelled(request.cancellationToken);
@@ -45,7 +49,7 @@ export class CoreScanService {
 			emit({ type: 'stage', stage: { name: 'Scanner Execution', status: 'running', progress: 20, startedAt: new Date().toISOString() } });
 
 			const scannerContext = request.scannerContext;
-			const scannerResults = await this.runScanners(request, scannerContext);
+			const scannerResults = await this.runScanners(request, scannerContext, emitEvent);
 			throwIfCancelled(request.cancellationToken);
 			emit({ type: 'stage', stage: { name: 'Scanner Execution', status: 'completed', progress: 100, startedAt: new Date().toISOString() } });
 			const scannerFindings = scannerResults.flatMap((result) => result.findings);
@@ -53,7 +57,7 @@ export class CoreScanService {
 			emit({ type: 'findings.updated', scanId, findingsCount: state.findingsCount, riskScore: state.riskScore, timestamps: [state.updatedAt] });
 
 			const baselineFindings = [...nativeFindings, ...scannerFindings];
-			const aiFindings = await this.runAiAnalysis(request, baselineFindings);
+			const aiFindings = await this.runAiAnalysis(request, baselineFindings, emitEvent);
 			throwIfCancelled(request.cancellationToken);
 			const allFindings = [...baselineFindings, ...aiFindings];
 			state = updateFindingState(state, allFindings.length, aggregateRisk(allFindings));
@@ -77,6 +81,7 @@ export class CoreScanService {
 			emit({ type: 'complete', durationMs: Date.now() - startedAt, findingsCount: correlation.findings.length });
 
 			return {
+				scanId,
 				workspaceRoot: request.workspaceRoot,
 				targetPath: request.targetPath ?? request.workspaceRoot,
 				filesScanned: native.filesScanned || scannerResults.reduce((total, result) => total + (result.filesScanned ?? 0), 0),
@@ -105,48 +110,48 @@ export class CoreScanService {
 		}
 	}
 
-	private async runScanners(request: CoreScanRequest, scannerContext: CoreScanRequest['scannerContext']): Promise<import('../scanners').ScannerResult[]> {
+	private async runScanners(request: CoreScanRequest, scannerContext: CoreScanRequest['scannerContext'], emitEvent: PipelineEmitter['emit']): Promise<import('../scanners').ScannerResult[]> {
 		const selection = { mode: request.mode ?? 'deep' };
 		const results = await this.queue.run(() => request.scannerManager.run(scannerContext, selection, (event) => {
 			switch (event.type) {
 				case 'start':
-					request.emitter.emit({ type: 'scanner.started', scanId: `scan-${Date.now()}`, scanner: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'running', startedAt: event.timestamp } });
-					request.emitter.emit({ type: 'tool', tool: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'running', startedAt: event.timestamp } });
+					emitEvent({ type: 'scanner.started', scanId: request.scanId, scanner: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'running', startedAt: event.timestamp } });
+					emitEvent({ type: 'tool', tool: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'running', startedAt: event.timestamp } });
 					break;
 				case 'log':
-					request.emitter.emit({ type: 'scanner.output', scanId: `scan-${Date.now()}`, scannerId: event.scannerId, message: event.message ?? '', timestamp: event.timestamp });
-					request.emitter.emit({ type: 'log', tool: event.scannerId, message: event.message ?? '', timestamp: event.timestamp });
+					emitEvent({ type: 'scanner.output', scanId: request.scanId, scannerId: event.scannerId, message: event.message ?? '', timestamp: event.timestamp });
+					emitEvent({ type: 'log', tool: event.scannerId, message: event.message ?? '', timestamp: event.timestamp });
 					break;
 				case 'finding':
-					request.emitter.emit({ type: 'finding', finding: event.finding! });
+					emitEvent({ type: 'finding', finding: event.finding! });
 					break;
 				case 'complete':
-					request.emitter.emit({ type: 'scanner.completed', scanId: `scan-${Date.now()}`, scanner: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'completed', completedAt: event.timestamp, durationMs: event.result?.durationMs, findingsCount: event.result?.findings.length } });
-					request.emitter.emit({ type: 'tool', tool: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'completed', completedAt: event.timestamp, durationMs: event.result?.durationMs, findingsCount: event.result?.findings.length } });
+					emitEvent({ type: 'scanner.completed', scanId: request.scanId, scanner: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'completed', completedAt: event.timestamp, durationMs: event.result?.durationMs, findingsCount: event.result?.findings.length } });
+					emitEvent({ type: 'tool', tool: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'completed', completedAt: event.timestamp, durationMs: event.result?.durationMs, findingsCount: event.result?.findings.length } });
 					break;
 				case 'unavailable':
-					request.emitter.emit({ type: 'tool', tool: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'unavailable', completedAt: event.timestamp, message: event.message } });
+					emitEvent({ type: 'tool', tool: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'unavailable', completedAt: event.timestamp, message: event.message } });
 					break;
 				case 'error':
-					request.emitter.emit({ type: 'tool', tool: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'failed', completedAt: event.timestamp, message: event.message } });
+					emitEvent({ type: 'tool', tool: { id: event.scannerId, label: event.scannerId, command: event.scannerId, status: 'failed', completedAt: event.timestamp, message: event.message } });
 					break;
 			}
 		}));
 		return results.results;
 	}
 
-	private async runAiAnalysis(request: CoreScanRequest, baselineFindings: readonly UnifiedFinding[]): Promise<UnifiedFinding[]> {
+	private async runAiAnalysis(request: CoreScanRequest, baselineFindings: readonly UnifiedFinding[], emitEvent: PipelineEmitter['emit']): Promise<UnifiedFinding[]> {
 		if (!request.aiAnalysis) {
 			return [];
 		}
-			request.emitter.emit({ type: 'ai.analysis.started', scanId: `scan-${Date.now()}`, workspaceRoot: request.workspaceRoot });
-		const result = await request.aiAnalysis.analyze(request.workspaceRoot, baselineFindings, request.emitter, request.cancellationToken);
-			for (const finding of result.findings) {
-				request.emitter.emit({ type: 'finding', finding });
-			}
-			request.emitter.emit({ type: 'ai.analysis.completed', scanId: `scan-${Date.now()}`, findingsCount: result.findings.length, durationMs: result.durationMs });
-			return result.findings;
+		emitEvent({ type: 'ai.analysis.started', scanId: request.scanId, workspaceRoot: request.workspaceRoot });
+		const result = await request.aiAnalysis.analyze(request.workspaceRoot, baselineFindings, { emit: emitEvent }, request.cancellationToken);
+		for (const finding of result.findings) {
+			emitEvent({ type: 'finding', finding });
 		}
+		emitEvent({ type: 'ai.analysis.completed', scanId: request.scanId, findingsCount: result.findings.length, durationMs: result.durationMs });
+		return result.findings;
+	}
 	}
 
 function aggregateRisk(findings: readonly UnifiedFinding[]): number {
@@ -155,6 +160,16 @@ function aggregateRisk(findings: readonly UnifiedFinding[]): number {
 	}
 	const total = findings.reduce((sum, finding) => sum + finding.riskScore, 0);
 	return Math.round(total / findings.length);
+}
+
+function withScanIdentity(event: Parameters<PipelineEmitter['emit']>[0], scanId: string): Parameters<PipelineEmitter['emit']>[0] {
+	if (event.type === 'scan.started' || event.type === 'scan.completed' || event.type === 'scan.failed' || event.type === 'scan.cancelled') {
+		return { ...event, scan: { ...event.scan, scanId } };
+	}
+	if ('scanId' in event) {
+		return { ...event, scanId };
+	}
+	return event;
 }
 
 function throwIfCancelled(token: CoreScanRequest['cancellationToken']): void {

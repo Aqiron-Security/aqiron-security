@@ -31,6 +31,7 @@ export interface AIAnalysisAdapter {
 }
 
 export interface CoreScanRequest {
+	scanId: string;
 	workspaceRoot: string;
 	targetPath?: string;
 	mode?: ScannerMode;
@@ -46,6 +47,7 @@ export interface CoreScanRequest {
 }
 
 export interface CoreScanResult {
+	scanId: string;
 	workspaceRoot: string;
 	targetPath: string;
 	filesScanned: number;
