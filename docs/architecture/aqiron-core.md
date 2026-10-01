@@ -130,7 +130,7 @@ sequenceDiagram
   A-->>C: present results in client-native UI
 ```
 
-**Current caveat:** the runtime emits scanner/pipeline progress, but some events are presentation-shaped (`tool`, `log`, stages) and scan ids are generated inconsistently within `CoreScanService` scanner callback events. Near-term event contract work should retain scanner identity and a stable scan id while not changing scanner behavior.
+**Current caveat:** the runtime emits scanner/pipeline progress, but some events are presentation-shaped (`tool`, `log`, stages) and scan ids inside `CoreScanService` payloads can differ from the outer IPC request id and final scan result id. The VS Code scan adapter now filters by the outer request id; it does not normalize the inner payload ids. See the detailed scan call graph and migration constraints in [core-implementation-inventory.md](core-implementation-inventory.md).
 
 ## Future client boundaries
 

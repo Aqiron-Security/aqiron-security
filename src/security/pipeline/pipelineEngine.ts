@@ -35,13 +35,11 @@ export class SecurityPipelineEngine {
 
 	async scanWorkspace(workspaceFolder: vscode.WorkspaceFolder, options: PipelineScanOptions = {}): Promise<OrchestratedScanResult> {
 		const client = getCoreClient();
-		const listener = (event: { event: string; payload?: unknown }) => {
-			if (event.payload && typeof event.payload === 'object' && 'type' in event.payload) {
-				this.events.emit(event.payload as never);
-			}
+		const requestId = `scan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		const listener = (event: { event: string; requestId?: string; payload?: unknown }) => {
+			forwardCoreScanEvent(event, requestId, this.events);
 		};
 		client.on('event', listener);
-		const requestId = `scan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 		const cancellation = options.cancellationToken?.onCancellationRequested?.(() => {
 			void client.cancelRequest(requestId).catch(() => undefined);
 		});
@@ -71,6 +69,15 @@ export class SecurityPipelineEngine {
 			cancellation?.dispose();
 			client.removeListener('event', listener);
 		}
+	}
+}
+
+export function forwardCoreScanEvent(event: { requestId?: string; payload?: unknown }, requestId: string, events: PipelineEventBus): void {
+	if (event.requestId !== requestId) {
+		return;
+	}
+	if (event.payload && typeof event.payload === 'object' && 'type' in event.payload) {
+		events.emit(event.payload as never);
 	}
 }
 
