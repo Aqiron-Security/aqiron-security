@@ -53,7 +53,7 @@ That does not make every current public-looking API ready for a CLI/Desktop clie
 - Core protocol uses filesystem paths and Node runtime metadata. These are environment-neutral in concept but currently assume a local filesystem/workspace and Node transport.
 - Core configuration is not yet a coherent cross-client contract: runtime's `projectConfiguration` reads hard-coded JSON paths/keys, while extension configuration is declared in root `package.json` and also read through VS Code. Scanner configuration ports are neutral, but their current provider is Core's JSON lookup.
 - There are parallel implementations in `src/security`, `src/ai`, `src/rag`, and `packages/core/src`. For example legacy pipeline/orchestrator, parsers/scanners, finding/report/RAG/analysis services coexist with Core equivalents. The extension imports legacy report-generation types and has its own report storage/generation. Do not assume a feature shown in the UI is implemented by the Core runtime.
-- Protocol version is explicit, but request `method` and params/results are partly string/unknown at the envelope level. Runtime casts params rather than validating a fully discriminated schema. This is a correctness and compatibility seam before adding clients.
+- Protocol version is explicit. Phase 1 now maps each current method to params and results at compile time and validates request envelopes and required parameter shapes before dispatch. The JSON-line wire shape and method names remain unchanged. Result payloads and event payloads still cross JSON as runtime values, and nested domain objects are not fully schema-validated; see [core-implementation-inventory.md](core-implementation-inventory.md).
 
 ## Current operations and IPC boundary
 
@@ -73,7 +73,7 @@ The actual runtime dispatch in `CoreRuntime.handle` is the authoritative method 
 
 The webview contract is currently `{ command: string; payload?: unknown }`. Provider inbound cases are at `aqironWebviewProvider.ts:356-524`; outbound `postMessage` updates send a large UI state projection. A future client should not implement this contract.
 
-The process manager owns newline framing, pending request map, error decoding, timeouts, cancellation messages, handshake and restart policy. Core owns method dispatch and security work. Keep domain event payloads transport-independent; framing, process lifecycle and reconnect policy belong to each host transport adapter.
+The process manager owns newline framing, pending request map, error decoding, timeouts, cancellation messages, handshake and restart policy. Its request method now constrains method/params and derives the response type from the method. Core owns method dispatch and security work, with structural validation before handlers. Keep domain event payloads transport-independent; framing, process lifecycle and reconnect policy belong to each host transport adapter. Event payloads remain loosely typed at the outer transport envelope today.
 
 ## Finding, report and configuration contracts
 

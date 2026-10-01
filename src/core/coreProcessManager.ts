@@ -1,7 +1,7 @@
 import * as childProcess from 'child_process';
 import * as path from 'path';
 import { EventEmitter } from 'events';
-import { CORE_PROTOCOL_VERSION, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreMessage, CoreRequestMessage, CoreResponseMessage } from '../../packages/core/src/runtime';
+import { CORE_PROTOCOL_VERSION, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreMessage, CoreMethod, CoreMethodParams, CoreRequestFor, CoreResultFor, CoreResponseMessage } from '../../packages/core/src/runtime';
 
 export interface CoreProcessOptions {
 	extensionVersion: string;
@@ -93,7 +93,7 @@ export class CoreProcessManager extends EventEmitter {
 			if (response.status !== 'compatible') {
 				throw Object.assign(new Error(response.reason ?? 'Core handshake failed.'), { code: 'CORE_HANDSHAKE_FAILED' });
 			}
-			await this.request('core.health');
+			await this.request('core.health', undefined);
 			this.state = 'ready';
 			this.restartAttempts = 0;
 			this.emit('state', this.state);
@@ -127,12 +127,12 @@ export class CoreProcessManager extends EventEmitter {
 		this.emit('state', this.state);
 	}
 
-	async request<T = unknown>(method: string, params?: unknown, timeoutMs = this.options.timeoutMs ?? 120_000, requestId = createId()): Promise<T> {
+	async request<K extends CoreMethod>(method: K, params: CoreMethodParams[K], timeoutMs = this.options.timeoutMs ?? 120_000, requestId = createId()): Promise<CoreResultFor<K>> {
 		await this.ensureStarted();
 		const id = requestId;
-		const message: CoreRequestMessage = { id, type: 'request', method, params };
+		const message = { id, type: 'request', method, params } as CoreRequestFor<K>;
 		const payload = `${JSON.stringify(message)}\n`;
-		return await new Promise<T>((resolve, reject) => {
+		return await new Promise<CoreResultFor<K>>((resolve, reject) => {
 			const timeout = timeoutMs ? setTimeout(() => {
 				this.pending.delete(id);
 				if (method !== 'core.cancel' && method !== 'core.shutdown') {
@@ -146,7 +146,7 @@ export class CoreProcessManager extends EventEmitter {
 					if (timeout) {
 						clearTimeout(timeout);
 					}
-					resolve(value as T);
+					resolve(value as CoreResultFor<K>);
 				},
 				reject: (error) => {
 					if (timeout) {
@@ -168,7 +168,7 @@ export class CoreProcessManager extends EventEmitter {
 		if (!this.child || !this.started) {
 			return;
 		}
-		const message: CoreRequestMessage = {
+		const message: CoreRequestFor<'core.cancel'> = {
 			id: `cancel-${requestId}-${Date.now().toString(36)}`,
 			type: 'request',
 			method: 'core.cancel',
@@ -182,7 +182,7 @@ export class CoreProcessManager extends EventEmitter {
 	}
 
 	async cancel(requestId: string): Promise<{ cancelled: boolean; requestId?: string }> {
-		return await this.request<{ cancelled: boolean; requestId?: string }>('core.cancel', { requestId });
+		return await this.request('core.cancel', { requestId });
 	}
 
 	onCoreEvent(listener: (event: CoreProcessEvent) => void): void {
@@ -190,7 +190,7 @@ export class CoreProcessManager extends EventEmitter {
 	}
 
 	private async handshake(): Promise<CoreHandshakeResponse> {
-		return await this.request<CoreHandshakeResponse>('core.handshake', {
+		return await this.request('core.handshake', {
 			extensionVersion: this.options.extensionVersion,
 			protocolVersion: this.protocolVersion,
 			platform: process.platform,

@@ -15,7 +15,7 @@ class FakeCoreChild extends EventEmitter {
 	readonly stderr = createStream();
 	readonly stdin = { write: (payload: string): boolean => {
 			const request = JSON.parse(payload) as { id: string; method: string };
-			if (request.method === 'slow') {
+			if (request.method === 'core.info') {
 				return true;
 			}
 			const result = request.method === 'core.handshake'
@@ -84,8 +84,8 @@ suite('Core process manager', () => {
 		const manager = new CoreProcessManager({ extensionVersion: 'test', restartOnCrash: false });
 		try {
 			await manager.start();
-			const result = await manager.request<{ ok: boolean }>('example');
-			assert.deepStrictEqual(result, { ok: true });
+			const result = await manager.request('core.health', undefined);
+			assert.deepStrictEqual(result, { ok: true, ready: true });
 		} finally {
 			restore();
 			await manager.stop();
@@ -132,7 +132,7 @@ suite('Core process manager', () => {
 		const manager = new CoreProcessManager({ extensionVersion: 'test', restartOnCrash: true });
 		try {
 			await manager.start();
-			const pending = manager.request('slow', undefined, 0).then(() => undefined, (error: { code?: string }) => error);
+			const pending = manager.request('core.info', undefined, 0).then(() => undefined, (error: { code?: string }) => error);
 			await Promise.resolve();
 			children[0].crash();
 			const error = await pending;

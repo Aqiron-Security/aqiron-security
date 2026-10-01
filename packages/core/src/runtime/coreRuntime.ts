@@ -4,7 +4,7 @@ import { AIVulnerabilityAnalysis, AIAnalysisResult } from '../ai/analysis/aiVuln
 import { AIReviewService } from '../ai/analysis/aiReview';
 import { createNetworkTransport } from '../ai/utils/request';
 import { createNodeFileSystem, createNodeLogger, createNodeNetworkClient, createNodeProcessRunner, NodeCredentialStore } from './nodeAdapters';
-import { CORE_PROTOCOL_VERSION, CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreMessage, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreRequestMessage, CoreResponseMessage, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreRuntimeServicesState } from './protocol';
+import { CORE_PROTOCOL_VERSION, CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreMessage, CoreMethod, CoreMethodResults, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreRequestMessage, CoreResponseMessage, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreRuntimeServicesState, CoreReportGenerateRequest } from './protocol';
 import { ProjectDetectorOptions, detectProjectProfile } from '../project/projectDetector';
 import { SecurityContextBuilder } from '../context';
 import { RagIndexService, RagRetrievalService } from '../rag';
@@ -79,11 +79,16 @@ export class CoreRuntime {
 		this.scannerManager.register(new TrivyScanner());
 	}
 
-	async handle(message: CoreRequestMessage, emit: (event: CoreEventMessage) => void): Promise<CoreResponseMessage> {
+	async handle(input: unknown, emit: (event: CoreEventMessage) => void): Promise<CoreResponseMessage> {
+		const requestId = isRecord(input) && typeof input.id === 'string' ? input.id : 'unknown';
+		if (!validateRequest(input)) {
+			return this.fail(requestId, 'CORE_INVALID_REQUEST', 'Malformed Core request or params.');
+		}
+		const message = input;
 		const startedAt = Date.now();
 		this.logger.debug('request.started', { requestId: message.id, operation: message.method });
 		if (message.method === 'core.cancel') {
-			return this.ok(message.id, this.cancelRequest(message.params as { requestId?: string }));
+			return this.ok(message.id, 'core.cancel', this.cancelRequest(message.params));
 		}
 		if (this.activeRequests.has(message.id)) {
 			return this.fail(message.id, 'CORE_INVALID_REQUEST', 'A request with this id is already active.');
@@ -94,56 +99,56 @@ export class CoreRuntime {
 		try {
 			switch (message.method) {
 				case 'core.handshake':
-					return this.ok(message.id, await this.handshake(message.params as CoreHandshakeRequest));
+					return this.ok(message.id, 'core.handshake', await this.handshake(message.params));
 				case 'core.health':
-					return this.ok(message.id, this.health());
+					return this.ok(message.id, 'core.health', this.health());
 				case 'core.info':
-					return this.ok(message.id, this.info());
+					return this.ok(message.id, 'core.info', this.info());
 				case 'core.shutdown':
-					return this.ok(message.id, await this.shutdown());
+					return this.ok(message.id, 'core.shutdown', await this.shutdown());
 				case 'project.detect':
-					return this.ok(message.id, await this.detectProject(message.params as CoreProjectDetectRequest));
+					return this.ok(message.id, 'project.detect', await this.detectProject(message.params));
 				case 'project.profile':
-					return this.ok(message.id, await this.profileProject(message.params as CoreProjectDetectRequest));
+					return this.ok(message.id, 'project.profile', await this.profileProject(message.params));
 				case 'rag.index':
-					return this.ok(message.id, await this.indexRag(message.params as CoreRagIndexRequest, source.token));
+					return this.ok(message.id, 'rag.index', await this.indexRag(message.params, source.token));
 				case 'rag.status':
-					return this.ok(message.id, await this.ragStatus(message.params as CoreProjectDetectRequest));
+					return this.ok(message.id, 'rag.status', await this.ragStatus(message.params));
 				case 'rag.query':
-					return this.ok(message.id, await this.ragQuery(message.params as CoreRagQueryRequest));
+					return this.ok(message.id, 'rag.query', await this.ragQuery(message.params));
 				case 'scan.start':
-					return this.ok(message.id, await this.startScan(message.params as CoreScanStartRequest, emit, source.token));
+					return this.ok(message.id, 'scan.start', await this.startScan(message.params, emit, source.token));
 				case 'scan.cancel':
-					return this.ok(message.id, this.cancelScan((message.params as { scanId?: string }).scanId));
+					return this.ok(message.id, 'scan.cancel', this.cancelScan(message.params.scanId));
 				case 'scan.status':
-					return this.ok(message.id, this.scanStatus((message.params as { scanId?: string }).scanId));
+					return this.ok(message.id, 'scan.status', this.scanStatus(message.params.scanId));
 				case 'ai.providers':
-					return this.ok(message.id, this.aiProviders());
+					return this.ok(message.id, 'ai.providers', this.aiProviders());
 				case 'ai.models':
-					return this.ok(message.id, await this.aiModels(message.params as CoreAiModelsRequest));
+					return this.ok(message.id, 'ai.models', await this.aiModels(message.params));
 				case 'ai.cancel':
-					this.aiService.cancel(String((message.params as { sessionId?: string })?.sessionId ?? ''));
-					return this.ok(message.id, { cancelled: true });
+					this.aiService.cancel(message.params.sessionId ?? '');
+					return this.ok(message.id, 'ai.cancel', { cancelled: true });
 				case 'ai.chat':
-					active.onCancel = () => this.aiService.cancel((message.params as CoreAiChatRequest).sessionId);
-					return this.ok(message.id, await this.aiChat(message.params as CoreAiChatRequest, emit, source.token));
+					active.onCancel = () => this.aiService.cancel(message.params.sessionId);
+					return this.ok(message.id, 'ai.chat', await this.aiChat(message.params, emit, source.token));
 				case 'ai.review':
-					return this.ok(message.id, await this.aiReviewFindings(message.params as CoreAiReviewRequest, emit));
+					return this.ok(message.id, 'ai.review', await this.aiReviewFindings(message.params, emit));
 				case 'ai.vulnerabilityAnalysis':
-					active.onCancel = () => this.aiService.cancel((message.params as CoreAiVulnerabilityAnalysisRequest).sessionId);
-					return this.ok(message.id, await this.aiVulnerabilityAnalysis(message.params as CoreAiVulnerabilityAnalysisRequest, emit, source.token));
+					active.onCancel = () => this.aiService.cancel(message.params.sessionId);
+					return this.ok(message.id, 'ai.vulnerabilityAnalysis', await this.aiVulnerabilityAnalysis(message.params, emit, source.token));
 				case 'credentials.status':
-					return this.ok(message.id, await this.credentialsStatus((message.params as { key: string }).key));
+					return this.ok(message.id, 'credentials.status', await this.credentialsStatus(message.params.key));
 				case 'credentials.set':
-					return this.ok(message.id, await this.credentialsSet(message.params as CoreCredentialsSetRequest));
+					return this.ok(message.id, 'credentials.set', await this.credentialsSet(message.params));
 				case 'credentials.delete':
-					return this.ok(message.id, await this.credentialsDelete(message.params as CoreCredentialsDeleteRequest));
+					return this.ok(message.id, 'credentials.delete', await this.credentialsDelete(message.params));
 				case 'credentials.exists':
-					return this.ok(message.id, await this.credentialsExists((message.params as { key: string }).key));
+					return this.ok(message.id, 'credentials.exists', await this.credentialsExists(message.params.key));
 				case 'report.generate':
-					return this.ok(message.id, await this.reportGenerate(message.params as { scanId?: string; mode?: 'quick' | 'deep' | 'analysis' | 'custom'; findings?: UnifiedFinding[]; correlation?: CorrelationResult; graph?: SecurityGraph; telemetry?: unknown }));
+					return this.ok(message.id, 'report.generate', await this.reportGenerate(message.params));
 				default:
-					return this.fail(message.id, 'INVALID_REQUEST', `Unknown method: ${message.method}`);
+					return this.fail('unknown', 'INVALID_REQUEST', 'Unknown Core method.');
 			}
 		} catch (error) {
 			const code = source.token.isCancellationRequested ? 'CORE_REQUEST_CANCELLED' : this.mapErrorCode(error);
@@ -422,7 +427,7 @@ private async credentialsStatus(key: string): Promise<CoreCredentialsStatusResul
 		return /(^|\/)(node_modules|dist|build|coverage|\.git|\.dart_tool|out|target|bin|obj)(\/|$)/i.test(relative);
 	}
 
-	private ok<T>(id: string, result: T): CoreResponseMessage {
+	private ok<K extends CoreMethod>(id: string, _method: K, result: CoreMethodResults[K]): CoreResponseMessage {
 		return { id, type: 'response', success: true, result };
 	}
 
@@ -462,16 +467,16 @@ export async function runCoreRuntime(input: AsyncIterable<string>, output: (mess
 		if (!trimmed) {
 			continue;
 		}
-		let parsed: CoreRequestMessage;
+		let parsed: unknown;
 		try {
-			parsed = JSON.parse(trimmed) as CoreRequestMessage;
+			parsed = JSON.parse(trimmed) as unknown;
 		} catch (error) {
 			output({ type: 'response', id: 'unknown', success: false, error: { code: 'CORE_PROTOCOL_ERROR', message: 'Malformed JSON request.' } });
 			continue;
 		}
-		const validationError = validateRequest(parsed);
-		if (validationError) {
-			output({ type: 'response', id: typeof parsed.id === 'string' ? parsed.id : 'unknown', success: false, error: validationError });
+		if (!validateRequest(parsed)) {
+			const requestId = isRecord(parsed) && typeof parsed.id === 'string' ? parsed.id : 'unknown';
+			output({ type: 'response', id: requestId, success: false, error: { code: 'CORE_INVALID_REQUEST', message: 'Invalid request envelope, method, or params.' } });
 			continue;
 		}
 		const task = runtime.handle(parsed, (event) => output(event)).then((response) => output(response)).catch((error) => {
@@ -486,7 +491,7 @@ export async function runCoreRuntime(input: AsyncIterable<string>, output: (mess
 	await Promise.all(active);
 }
 
-const CORE_METHODS = new Set([
+const CORE_METHODS = new Set<string>([
 	'core.handshake', 'core.health', 'core.info', 'core.shutdown', 'core.cancel',
 	'project.detect', 'project.profile', 'rag.index', 'rag.status', 'rag.query',
 	'scan.start', 'scan.cancel', 'scan.status', 'ai.providers', 'ai.models', 'ai.chat',
@@ -494,19 +499,42 @@ const CORE_METHODS = new Set([
 	'credentials.status', 'credentials.set', 'credentials.delete', 'credentials.exists',
 ]);
 
-function validateRequest(value: unknown): { code: string; message: string } | undefined {
-	if (!value || typeof value !== 'object' || Array.isArray(value)) {
-		return { code: 'CORE_INVALID_REQUEST', message: 'Request must be a JSON object.' };
+function validateRequest(value: unknown): value is CoreRequestMessage {
+	if (!isRecord(value) || value.type !== 'request' || typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(value.id)) {
+		return false;
 	}
-	const request = value as Record<string, unknown>;
-	if (request.type !== 'request' || typeof request.id !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(request.id)) {
-		return { code: 'CORE_INVALID_REQUEST', message: 'Invalid request envelope or request id.' };
+	if (typeof value.method !== 'string' || !CORE_METHODS.has(value.method)) {
+		return false;
 	}
-	if (typeof request.method !== 'string' || !CORE_METHODS.has(request.method)) {
-		return { code: 'CORE_INVALID_REQUEST', message: 'Unsupported Core method.' };
+	const params = value.params;
+	if (params !== undefined && !isRecord(params)) {
+		return false;
 	}
-	if (request.params !== undefined && (!request.params || typeof request.params !== 'object' || Array.isArray(request.params))) {
-		return { code: 'CORE_INVALID_REQUEST', message: 'Request params must be a JSON object.' };
+	const input = (params ?? {}) as Record<string, unknown>;
+	const string = (key: string): boolean => typeof input[key] === 'string' && (input[key] as string).length > 0;
+	const optionalString = (key: string): boolean => input[key] === undefined || typeof input[key] === 'string';
+	switch (value.method) {
+		case 'core.health': case 'core.info': case 'core.shutdown': case 'ai.providers':
+			return params === undefined || Object.keys(input).length === 0;
+		case 'core.handshake': return string('extensionVersion') && typeof input.protocolVersion === 'number' && string('platform') && string('architecture');
+		case 'core.cancel': return optionalString('requestId');
+		case 'project.detect': case 'project.profile': case 'rag.status': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('currentFile');
+		case 'rag.index': return string('workspaceRoot') && (input.withAi === undefined || typeof input.withAi === 'boolean');
+		case 'rag.query': return string('workspaceRoot') && string('query') && (input.limit === undefined || typeof input.limit === 'number');
+		case 'scan.start': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('requestId') && optionalString('targetPath') && optionalString('currentFile') && (input.mode === undefined || ['quick', 'deep', 'analysis'].includes(String(input.mode)));
+		case 'scan.cancel': case 'scan.status': return optionalString('scanId');
+		case 'ai.models': return optionalString('providerId');
+		case 'ai.cancel': return optionalString('sessionId');
+		case 'ai.chat': return string('sessionId') && typeof input.text === 'string' && Array.isArray(input.history) && string('model') && typeof input.intelligence === 'string' && isRecord(input.context);
+		case 'ai.review': return string('sessionId') && Array.isArray(input.findings);
+		case 'ai.vulnerabilityAnalysis': return string('sessionId') && string('workspaceRoot') && Array.isArray(input.baselineFindings);
+		case 'credentials.status': case 'credentials.exists': case 'credentials.delete': return string('key');
+		case 'credentials.set': return string('key') && typeof input.value === 'string';
+		case 'report.generate': return optionalString('workspaceRoot') && optionalString('scanId') && (input.mode === undefined || ['quick', 'deep', 'analysis', 'custom'].includes(String(input.mode))) && (input.findings === undefined || Array.isArray(input.findings));
+		default: return false;
 	}
-	return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
