@@ -7,7 +7,7 @@ import { RagIndexData, RagSearchResult } from '../../packages/core/src/shared/ra
 import { ScanState, PipelineEvent } from '../../packages/core/src/pipeline/events';
 import { SecurityReportContent } from '../../packages/core/src/reports';
 import { CoreProcessEvent, CoreProcessManager } from './coreProcessManager';
-import { CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult } from '../../packages/core/src/runtime';
+import { CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreReportGenerateRequest } from '../../packages/core/src/runtime';
 
 export interface CoreClientOptions {
 	extensionVersion: string;
@@ -43,37 +43,37 @@ export class CoreClient extends EventEmitter {
 
 	async health(): Promise<CoreHealthResult> {
 		await this.start();
-		return await this.manager.request<CoreHealthResult>('core.health');
+		return await this.manager.request('core.health', undefined);
 	}
 
 	async info(): Promise<CoreInfoResult> {
 		await this.start();
-		return await this.manager.request<CoreInfoResult>('core.info');
+		return await this.manager.request('core.info', undefined);
 	}
 
 	async detectProject(request: CoreProjectDetectRequest): Promise<ProjectProfile> {
 		await this.start();
-		return await this.manager.request<ProjectProfile>('project.detect', request);
+		return await this.manager.request('project.detect', request);
 	}
 
 	async profileProject(request: CoreProjectDetectRequest): Promise<CoreProjectProfileResult> {
 		await this.start();
-		return await this.manager.request<CoreProjectProfileResult>('project.profile', request);
+		return await this.manager.request('project.profile', request);
 	}
 
 	async indexRag(request: CoreRagIndexRequest): Promise<CoreRagIndexResult> {
 		await this.start();
-		return await this.manager.request<CoreRagIndexResult>('rag.index', request);
+		return await this.manager.request('rag.index', request);
 	}
 
 	async ragStatus(workspaceRoot: string): Promise<CoreRagStatusResult> {
 		await this.start();
-		return await this.manager.request<CoreRagStatusResult>('rag.status', { workspaceRoot, trusted: true });
+		return await this.manager.request('rag.status', { workspaceRoot, trusted: true });
 	}
 
 	async queryRag(request: CoreRagQueryRequest): Promise<CoreRagQueryResult> {
 		await this.start();
-		return await this.manager.request<CoreRagQueryResult>('rag.query', request);
+		return await this.manager.request('rag.query', request);
 	}
 
 	async startScan(request: CoreScanStartRequest): Promise<CoreScanStartResult> {
@@ -81,12 +81,12 @@ export class CoreClient extends EventEmitter {
 		const requestId = request.requestId ?? createId();
 		// A deep scan can run several bounded scanner operations sequentially.
 		// The individual scanner timeouts remain strict; this covers the aggregate operation.
-		return await this.manager.request<CoreScanStartResult>('scan.start', { ...request, requestId }, 10 * 60_000, requestId);
+		return await this.manager.request('scan.start', { ...request, requestId }, 10 * 60_000, requestId);
 	}
 
 	async cancelScan(scanId: string): Promise<{ cancelled: boolean }> {
 		await this.start();
-		return await this.manager.request<{ cancelled: boolean }>('core.cancel', { requestId: scanId });
+		return await this.manager.request('core.cancel', { requestId: scanId });
 	}
 
 	async cancelRequest(requestId: string): Promise<{ cancelled: boolean; requestId?: string }> {
@@ -96,28 +96,28 @@ export class CoreClient extends EventEmitter {
 
 	async scanStatus(scanId: string): Promise<CoreScanStatusResult> {
 		await this.start();
-		return await this.manager.request<CoreScanStatusResult>('scan.status', { scanId });
+		return await this.manager.request('scan.status', { scanId });
 	}
 
 	async providers(): Promise<CoreAiProvidersResult> {
 		await this.start();
-		return await this.manager.request<CoreAiProvidersResult>('ai.providers');
+		return await this.manager.request('ai.providers', undefined);
 	}
 
 	async models(providerId?: string): Promise<CoreAiModelsResult> {
 		await this.start();
-		return await this.manager.request<CoreAiModelsResult>('ai.models', { providerId } satisfies CoreAiModelsRequest);
+		return await this.manager.request('ai.models', { providerId } satisfies CoreAiModelsRequest);
 	}
 
 	async *chat(request: CoreAiChatRequest): AsyncGenerator<StreamChunk> {
 		const pending = this.createEventStream(`ai.completed`, request.sessionId);
-		const task = this.manager.request<{ text: string }>('ai.chat', request, undefined, `ai-chat-${request.sessionId}`);
+		const task = this.manager.request('ai.chat', request, undefined, `ai-chat-${request.sessionId}`);
 		yield* pending.stream(task);
 	}
 
 	async *review(request: CoreAiReviewRequest): AsyncGenerator<StreamChunk> {
 		const pending = this.createEventStream('ai.completed', request.sessionId);
-		const task = this.manager.request<{ text: string }>('ai.review', request, undefined, `ai-review-${request.sessionId}`);
+		const task = this.manager.request('ai.review', request, undefined, `ai-review-${request.sessionId}`);
 		yield* pending.stream(task);
 	}
 
@@ -126,29 +126,29 @@ export class CoreClient extends EventEmitter {
 		return await this.manager.request('ai.vulnerabilityAnalysis', request);
 	}
 
-	async reportGenerate(request: { workspaceRoot?: string; scanId?: string; findings?: UnifiedFinding[]; correlation?: unknown; graph?: unknown; telemetry?: unknown }): Promise<SecurityReportContent> {
+	async reportGenerate(request: CoreReportGenerateRequest): Promise<SecurityReportContent> {
 		await this.start();
-		return await this.manager.request<SecurityReportContent>('report.generate', request);
+		return await this.manager.request('report.generate', request);
 	}
 
 	async credentialsStatus(key: string): Promise<CoreCredentialsStatusResult> {
 		await this.start();
-		return await this.manager.request<CoreCredentialsStatusResult>('credentials.status', { key });
+		return await this.manager.request('credentials.status', { key });
 	}
 
 	async credentialsSet(request: CoreCredentialsSetRequest): Promise<CoreCredentialsStatusResult> {
 		await this.start();
-		return await this.manager.request<CoreCredentialsStatusResult>('credentials.set', request);
+		return await this.manager.request('credentials.set', request);
 	}
 
 	async credentialsDelete(request: CoreCredentialsDeleteRequest): Promise<CoreCredentialsStatusResult> {
 		await this.start();
-		return await this.manager.request<CoreCredentialsStatusResult>('credentials.delete', request);
+		return await this.manager.request('credentials.delete', request);
 	}
 
 	async credentialsExists(key: string): Promise<{ exists: boolean }> {
 		await this.start();
-		return await this.manager.request<{ exists: boolean }>('credentials.exists', { key });
+		return await this.manager.request('credentials.exists', { key });
 	}
 
 	private createEventStream(eventName: string, requestId: string): { stream(task: Promise<unknown>): AsyncGenerator<StreamChunk> } {

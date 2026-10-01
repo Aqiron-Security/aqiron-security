@@ -10,6 +10,7 @@ import { RagRetrievalResult } from '../rag/ragRetrievalService';
 import { CorrelationResult } from '../correlation/correlationEngine';
 import { SecurityGraph } from '../correlation/relationshipGraph';
 import { ScannerResult } from '../shared/scanner';
+import { AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
 
 export const CORE_PROTOCOL_VERSION = 1;
 
@@ -32,12 +33,75 @@ export interface CoreHandshakeResponse {
 	reason?: string;
 }
 
-export interface CoreRequestMessage {
+export type CoreEmptyParams = Record<string, never> | undefined;
+
+export type CoreMethodParams = {
+	'core.handshake': CoreHandshakeRequest;
+	'core.health': CoreEmptyParams;
+	'core.info': CoreEmptyParams;
+	'core.shutdown': CoreEmptyParams;
+	'core.cancel': { requestId?: string };
+	'project.detect': CoreProjectDetectRequest;
+	'project.profile': CoreProjectProfileRequest;
+	'rag.index': CoreRagIndexRequest;
+	'rag.status': CoreProjectDetectRequest;
+	'rag.query': CoreRagQueryRequest;
+	'scan.start': CoreScanStartRequest;
+	'scan.cancel': { scanId?: string };
+	'scan.status': { scanId?: string };
+	'ai.providers': CoreEmptyParams;
+	'ai.models': CoreAiModelsRequest;
+	'ai.cancel': { sessionId?: string };
+	'ai.chat': CoreAiChatRequest;
+	'ai.review': CoreAiReviewRequest;
+	'ai.vulnerabilityAnalysis': CoreAiVulnerabilityAnalysisRequest;
+	'credentials.status': { key: string };
+	'credentials.set': CoreCredentialsSetRequest;
+	'credentials.delete': CoreCredentialsDeleteRequest;
+	'credentials.exists': { key: string };
+	'report.generate': CoreReportGenerateRequest;
+};
+
+export type CoreMethod = keyof CoreMethodParams;
+
+export interface CoreMethodResults {
+	'core.handshake': CoreHandshakeResponse;
+	'core.health': CoreHealthResult;
+	'core.info': CoreInfoResult;
+	'core.shutdown': { ok: true };
+	'core.cancel': { cancelled: boolean; requestId?: string };
+	'project.detect': ProjectProfile;
+	'project.profile': CoreProjectProfileResult;
+	'rag.index': CoreRagIndexResult;
+	'rag.status': CoreRagStatusResult;
+	'rag.query': CoreRagQueryResult;
+	'scan.start': CoreScanStartResult;
+	'scan.cancel': { cancelled: boolean };
+	'scan.status': CoreScanStatusResult;
+	'ai.providers': CoreAiProvidersResult;
+	'ai.models': CoreAiModelsResult;
+	'ai.cancel': { cancelled: true };
+	'ai.chat': { text: string };
+	'ai.review': { text: string };
+	'ai.vulnerabilityAnalysis': AIAnalysisResult;
+	'credentials.status': CoreCredentialsStatusResult;
+	'credentials.set': CoreCredentialsStatusResult;
+	'credentials.delete': CoreCredentialsStatusResult;
+	'credentials.exists': { exists: boolean };
+	'report.generate': SecurityReportContent;
+}
+
+export type CoreRequestMessage = {
+	[K in CoreMethod]: {
 	id: string;
 	type: 'request';
-	method: string;
-	params?: unknown;
-}
+		method: K;
+	params: CoreMethodParams[K];
+	}
+}[CoreMethod];
+
+export type CoreRequestFor<K extends CoreMethod> = Extract<CoreRequestMessage, { method: K }>;
+export type CoreResultFor<K extends CoreMethod> = CoreMethodResults[K];
 
 export interface CoreCancelRequest {
 	requestId: string;
@@ -190,6 +254,16 @@ export interface CoreCredentialsSetRequest {
 
 export interface CoreCredentialsDeleteRequest {
 	key: string;
+}
+
+export interface CoreReportGenerateRequest {
+	workspaceRoot?: string;
+	scanId?: string;
+	mode?: 'quick' | 'deep' | 'analysis' | 'custom';
+	findings?: UnifiedFinding[];
+	correlation?: CorrelationResult;
+	graph?: SecurityGraph;
+	telemetry?: unknown;
 }
 
 export interface CoreRuntimeServicesState {
