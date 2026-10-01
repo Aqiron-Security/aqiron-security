@@ -1801,9 +1801,12 @@ function createDefaultAiState(): AiWebviewState {
 
 function serializeIssue(issue: AqironIssue): SerializableIssue {
 	const relativeFile = vscode.workspace.asRelativePath(issue.file);
-	const range = issue.range as unknown as { startLine?: number; startColumn?: number; start?: { line?: number; character?: number } } | undefined;
+	const range = issue.range as unknown as { startLine?: number; startColumn?: number; endColumn?: number; start?: { line?: number; character?: number } } | undefined;
 	const line = range?.startLine ?? range?.start?.line ?? 0;
 	const column = range?.startColumn ?? range?.start?.character ?? 0;
+	const lineText = isSecretRule(issue.ruleId)
+		? redactSecretLineText(issue.lineText, range?.startColumn ?? range?.start?.character, range?.endColumn)
+		: issue.lineText.trim();
 	return {
 		id: issue.id,
 		title: issue.title,
@@ -1814,7 +1817,7 @@ function serializeIssue(issue: AqironIssue): SerializableIssue {
 		relativeFile,
 		line: line + 1,
 		column: column + 1,
-		lineText: issue.lineText.trim(),
+		lineText,
 		tool: issue.sourceTool && issue.sourceTool !== 'Aqiron' ? issue.sourceTool : getSourceTool(issue.ruleId),
 		cwe: issue.cwe?.[0] ?? getCwe(issue.ruleId),
 		owasp: issue.owasp?.[0] ?? getOwasp(issue.ruleId),
@@ -1823,6 +1826,14 @@ function serializeIssue(issue: AqironIssue): SerializableIssue {
 		riskScore: issue.riskScore ?? getRiskScore(issue.severity),
 		rawEvidence: redactWebviewEvidence(issue.rawEvidence),
 	};
+}
+
+function redactSecretLineText(lineText: string, startColumn: number | undefined, endColumn: number | undefined): string {
+	if (startColumn === undefined || endColumn === undefined || startColumn < 0 || endColumn <= startColumn || endColumn > lineText.length) {
+		return '[REDACTED]';
+	}
+	const redacted = `${lineText.slice(0, startColumn)}[REDACTED]${lineText.slice(endColumn)}`;
+	return String(redactWebviewEvidence(redacted)).trim();
 }
 
 function isAiProviderId(value: unknown): value is AIProviderId {
