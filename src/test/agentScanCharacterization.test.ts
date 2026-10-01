@@ -97,6 +97,28 @@ suite('AI agent scan characterization', () => {
 			assert.match(result.content, /Found 7 potential secret findings/);
 		});
 	});
+
+	test('serialized Agent state redacts each secret source span and preserves non-secret context', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const firstSecret = 'sk-live-secret-value-123';
+			const secondSecret = 'password-value-456';
+			const issues = [
+				makeLineIssue(path.join(fixtureRoot, 'one.ts'), 'critical.api-key', `const OPENAI_API_KEY = "${firstSecret}";`, firstSecret),
+				makeLineIssue(path.join(fixtureRoot, 'two.ts'), 'critical.password', `const password = "${secondSecret}";`, secondSecret),
+				makeLineIssue(path.join(fixtureRoot, 'safe.ts'), 'high.eval', 'eval(userInput);', 'eval(userInput)'),
+			];
+			const serialized = JSON.stringify(serializeAgentState(issues));
+			assert.ok(!serialized.includes(firstSecret), 'first secret must not appear in serialized Agent state');
+			assert.ok(!serialized.includes(secondSecret), 'second secret must not appear in serialized Agent state');
+			const state = JSON.parse(serialized) as { issues: Array<{ ruleId: string; lineText: string; file: string; line: number }> };
+			assert.deepEqual(state.issues.map(issue => issue.ruleId), issues.map(issue => issue.ruleId));
+			assert.equal(state.issues[0].lineText, 'const OPENAI_API_KEY = "[REDACTED]";');
+			assert.equal(state.issues[1].lineText, 'const password = "[REDACTED]";');
+			assert.equal(state.issues[2].lineText, 'eval(userInput);');
+			assert.equal(state.issues[0].file, issues[0].file);
+			assert.equal(state.issues[0].line, 1);
+		});
+	});
 });
 
 function harness(
@@ -129,6 +151,39 @@ function makeIssue(file: string, ruleId: string): AqironIssue {
 		range: { file, startLine: 0, startColumn: 0, endLine: 0, endColumn: 5 },
 		lineText: `source line for ${ruleId}`,
 	};
+}
+
+function makeLineIssue(file: string, ruleId: string, lineText: string, match: string): AqironIssue {
+	const startColumn = lineText.indexOf(match);
+	return {
+		...makeIssue(file, ruleId),
+		range: { file, startLine: 0, startColumn, endLine: 0, endColumn: startColumn + match.length },
+		lineText,
+	};
+}
+
+function serializeAgentState(issues: AqironIssue[]): unknown {
+	const provider = Object.create(AqironWebviewProvider.prototype) as {
+		context: { workspaceState: { get<T>(key: string, fallback?: T): T | undefined }; extensionUri: vscode.Uri };
+		state: Record<string, unknown>;
+		section: string;
+		getMemory(): { previousScans: unknown[] };
+		serializeState(sectionOverride?: string, webview?: vscode.Webview): unknown;
+	};
+	provider.context = {
+		workspaceState: { get: (_key, fallback) => fallback },
+		extensionUri: vscode.Uri.file(path.dirname(issues[0]?.file ?? __filename)),
+	};
+	provider.state = {
+		issues,
+		workspace: { apis: [] },
+		branches: [], stats: {}, rag: { suggestionsGenerated: false, suggestions: [] },
+		threatSnapshots: [], zoom: {}, memory: { previousScans: [] }, chatSessions: [], tokenUsage: {},
+		ai: {}, mobsf: {}, customRules: [], pipeline: { stages: [], tools: [], logs: [] },
+	};
+	provider.section = 'aiAgent';
+	provider.getMemory = () => ({ previousScans: [] });
+	return provider.serializeState('aiAgent');
 }
 
 async function withFlutterFixture(run: (root: string) => Promise<void>): Promise<void> {
