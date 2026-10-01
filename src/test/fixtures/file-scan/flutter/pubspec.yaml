@@ -1,0 +1,6 @@
+name: file_scan_characterization
+description: Fixture workspace for legacy file scan behavior.
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+flutter:
+
