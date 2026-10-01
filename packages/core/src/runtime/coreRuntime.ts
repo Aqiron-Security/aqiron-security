@@ -118,6 +118,8 @@ export class CoreRuntime {
 					return this.ok(message.id, 'rag.query', await this.ragQuery(message.params));
 				case 'scan.start':
 					return this.ok(message.id, 'scan.start', await this.startScan(message.params, emit, source.token));
+				case 'scan.file':
+					return this.ok(message.id, 'scan.file', await this.scanFile(message.id, message.params, emit, source.token));
 				case 'scan.cancel':
 					return this.ok(message.id, 'scan.cancel', this.cancelScan(message.params.scanId));
 				case 'scan.status':
@@ -297,6 +299,13 @@ export class CoreRuntime {
 		const response: CoreScanStartResult = { scanId: result.scanId, state, findings: result.findings, report: result.report, filesScanned: result.filesScanned, durationMs: result.durationMs, toolResults: result.toolResults, correlation: result.correlation, graph: result.graph, telemetry: result.telemetry };
 		this.scans.set(scanId, { state, result: response });
 		return response;
+	}
+
+	private async scanFile(scanId: string, request: import('../shared/fileScan').CoreFileScanRequest, emit: (event: CoreEventMessage) => void, cancellationToken?: CancellationTokenLike): Promise<import('../shared/fileScan').CoreFileScanResult> {
+		emit({ type: 'event', event: 'scan.file.started', requestId: scanId, payload: { scanId, filePath: request.filePath } });
+		const result = await this.nativeScanner.scanFileContent(request.filePath, request.content, scanId, request.policy, cancellationToken);
+		emit({ type: 'event', event: 'scan.file.completed', requestId: scanId, payload: { scanId, filePath: request.filePath, state: result.state, findingCount: result.findingCount, filesScanned: result.filesScanned } });
+		return result;
 	}
 
 	private cancelScan(scanId?: string): { cancelled: boolean } {
@@ -495,7 +504,7 @@ export async function runCoreRuntime(input: AsyncIterable<string>, output: (mess
 const CORE_METHODS = new Set<string>([
 	'core.handshake', 'core.health', 'core.info', 'core.shutdown', 'core.cancel',
 	'project.detect', 'project.profile', 'rag.index', 'rag.status', 'rag.query',
-	'scan.start', 'scan.cancel', 'scan.status', 'ai.providers', 'ai.models', 'ai.chat',
+	'scan.start', 'scan.file', 'scan.cancel', 'scan.status', 'ai.providers', 'ai.models', 'ai.chat',
 	'ai.cancel', 'ai.review', 'ai.vulnerabilityAnalysis', 'report.generate',
 	'credentials.status', 'credentials.set', 'credentials.delete', 'credentials.exists',
 ]);
@@ -523,6 +532,7 @@ function validateRequest(value: unknown): value is CoreRequestMessage {
 		case 'rag.index': return string('workspaceRoot') && (input.withAi === undefined || typeof input.withAi === 'boolean');
 		case 'rag.query': return string('workspaceRoot') && string('query') && (input.limit === undefined || typeof input.limit === 'number');
 		case 'scan.start': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('requestId') && optionalString('targetPath') && optionalString('currentFile') && (input.mode === undefined || ['quick', 'deep', 'analysis'].includes(String(input.mode)));
+		case 'scan.file': return validateFileScanRequest(input);
 		case 'scan.cancel': case 'scan.status': return optionalString('scanId');
 		case 'ai.models': return optionalString('providerId');
 		case 'ai.cancel': return optionalString('sessionId');
@@ -538,4 +548,18 @@ function validateRequest(value: unknown): value is CoreRequestMessage {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validateFileScanRequest(input: Record<string, unknown>): boolean {
+	if (typeof input.filePath !== 'string' || input.filePath.trim().length === 0 || typeof input.content !== 'string' || !isRecord(input.policy)) {return false;}
+	const policy = input.policy;
+	if (!Array.isArray(policy.supportedExtensions) || !policy.supportedExtensions.every((value) => typeof value === 'string' && value.length > 0)) {return false;}
+	if (!Array.isArray(policy.excludedPaths) || !policy.excludedPaths.every((value) => typeof value === 'string')) {return false;}
+	if (!(policy.maxFileSizeBytes === null || (typeof policy.maxFileSizeBytes === 'number' && Number.isSafeInteger(policy.maxFileSizeBytes) && policy.maxFileSizeBytes >= 0))) {return false;}
+	if (!['skipGeneratedFiles', 'skipMinifiedFiles', 'skipCompiledFiles', 'eligible'].every((key) => typeof policy[key] === 'boolean')) {return false;}
+	return Array.isArray(policy.customRules) && policy.customRules.every((rule) => isRecord(rule)
+		&& typeof rule.id === 'string' && rule.id.length > 0
+		&& typeof rule.title === 'string' && typeof rule.message === 'string' && typeof rule.pattern === 'string'
+		&& ['Critical', 'High', 'Medium', 'Low'].includes(String(rule.severity))
+		&& (rule.extensions === undefined || (Array.isArray(rule.extensions) && rule.extensions.every((value) => typeof value === 'string'))));
 }
