@@ -51,10 +51,13 @@ jobs:
 aqiron scan <path> --trust-local-workspace
 aqiron scan <path> --format json --output result.json --trust-local-workspace
 aqiron scan <path> --format sarif --output result.sarif --trust-local-workspace
+aqiron scan . --format pdf --output report.pdf --trust-local-workspace
 aqiron scan <path> --fail-on high --trust-local-workspace
 ```
 
-During repository development, invoke these as `node dist/aqiron-cli.js ...` or `npm run cli -- ...`. `--format` accepts only `text` (default), `json`, or `sarif`. Results go to stdout unless `--output <path>` is supplied. Output files are created exclusively; an existing file is never overwritten. If writing a newly-created artifact fails, the CLI attempts to remove the incomplete file. `--output` may also be used with text format. Machine-readable output never includes progress events or text banners on stdout; diagnostics and threshold violations go to stderr.
+During repository development, invoke these as `node dist/aqiron-cli.js ...` or `npm run cli -- ...`. `--format` accepts `text` (default), `json`, `sarif`, or `pdf`. Results go to stdout unless `--output <path>` is supplied. Output files are created exclusively; an existing file is never overwritten. If writing a newly-created artifact fails, the CLI attempts to remove the incomplete file. `--output` may also be used with text format. Machine-readable output never includes progress events or text banners on stdout; diagnostics and threshold violations go to stderr.
+
+PDF requires `--output <path>` because it is a binary artifact. The CLI creates the file exclusively and writes the Core response using binary encoding; it never writes PDF bytes to stdout. Existing files are preserved. If PDF generation fails, no output file is created; if writing fails after creation, cleanup attempts to remove the partial artifact. `--fail-on` is evaluated after the requested report artifact is written, so CI can retain a PDF when the scan violates its threshold.
 
 The JSON document has this stable top-level shape:
 
@@ -88,6 +91,16 @@ CLI adapter → packages/core/src/client/CoreClient → CoreClientTransport / Co
 ```
 
 The host-neutral client is shared with the VS Code adapter and imports protocol/domain types from Core. The CLI adapter supplies `clientVersion`, the bundled runtime path, and `restartOnCrash: false`; it owns process signals, CLI formatting, output files and exit codes. The VS Code adapter supplies the extension version, packaged runtime path, and `restartOnCrash: true`; it owns extension-host lifecycle and UI integration. The shared modules import no VS Code APIs and do not implement scanning, parsing, normalization, correlation, or report presentation.
+
+## Core PDF generation path
+
+The active VS Code workspace scan requests `scan.start`. Core's `CoreScanService` passes the correlated findings, graph and telemetry to `ReportGenerator`; that generator builds a `SecurityReportModel`, then creates PDF, JSON and SARIF via Core's existing exporters. `scan.start` returns the generated `SecurityReportContent`, and the VS Code pipeline writes its PDF string with binary encoding into the workspace report bundle. The VS Code Reports screen presents that artifact path. The VS Code path does not invoke a separate renderer.
+
+The typed `report.generate` IPC request is `CoreReportGenerateRequest`: optional `workspaceRoot`, `scanId`, `mode`, `findings`, `correlation`, `graph`, and `telemetry`. Its response is `SecurityReportContent` with `{ model, text, sarif, pdf }`. CoreRuntime delegates that method to the same `ReportGenerator` used by `scan.start`, passing `mode` and `scanId` as PDF context. This method supports explicit report regeneration. The CLI does not call it after scanning: `scan.start` already returns the generated `SecurityReportContent`, so PDF mode writes `result.report.pdf` in binary mode. That avoids running `ReportGenerator` and `createPdfReport` a second time for the same scan. Both VS Code and CLI consume the report created by the existing `scan.start` path.
+
+The PDF renderer is a programmatic Core layout, not a CLI or webview template. It uses Core's page layout, built-in Helvetica font resources, severity colors, report sections, and the optional Aqiron PDF logo loaded from the workspace/package assets. It renders the same `SecurityReportModel` and applies Core's evidence redaction before writing evidence into PDF content. The CLI does not transform findings or implement report presentation. The same report UI/content model is used; generated-at metadata means the files are not promised to be byte-identical.
+
+Core PDF structure, report sections, logo embedding, and redaction are covered by `src/test/reportExporters.test.ts`. CLI tests cover writing PDF bytes returned by `scan.start`; the end-to-end CLI test exercises that same real Core scan path and validates the generated PDF.
 
 ## Host roadmap
 

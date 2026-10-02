@@ -22,11 +22,11 @@ export interface CliOptions {
 	registerSignalHandlers?: (handlers: { onInterrupt: () => void; onTerminate: () => void }) => () => void;
 }
 
-type Format = 'text' | 'json' | 'sarif';
+type Format = 'text' | 'json' | 'sarif' | 'pdf';
 type Severity = 'critical' | 'high' | 'medium' | 'low';
 interface ScanArgs { workspace: string; format: Format; output?: string; failOn?: Severity; }
 
-const usage = 'Usage: aqiron scan <path> --trust-local-workspace [--format text|json|sarif] [--output <path>] [--fail-on critical|high|medium|low]\n';
+const usage = 'Usage: aqiron scan <path> --trust-local-workspace [--format text|json|sarif|pdf] [--output <path>] [--fail-on critical|high|medium|low]\n';
 const severityRank: Record<Severity, number> = { critical: 4, high: 3, medium: 2, low: 1 };
 
 export async function runCli(args: readonly string[], options: CliOptions = {}): Promise<number> {
@@ -69,7 +69,7 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
 		const result = await client.startScan({ requestId, workspaceRoot, trusted: true, mode: 'deep' });
 		if (cancelled) { stderr.write('Scan cancelled.\n'); return 1; }
 		const output = renderResult(parsed.format, result);
-		try { writeResult(parsed, output, stdout); }
+		try { writeResult(parsed, output, stdout, parsed.format === 'pdf' ? 'binary' : 'utf8'); }
 		catch { stderr.write('Output failed: could not write the requested output file. It may already exist or its directory may be unavailable.\n'); return 1; }
 		if (parsed.failOn && hasThresholdViolation(result, parsed.failOn)) {
 			const violating = result.findings.filter((finding) => severityRank[String(finding.severity).toLowerCase() as Severity] >= severityRank[parsed.failOn!]);
@@ -108,7 +108,7 @@ function parseArgs(args: readonly string[]): ScanArgs {
 			const value = args[++i];
 			if (!value || value.startsWith('--')) { throw new Error(`Missing value for ${flag}.`); }
 			if (flag === '--format') {
-				if (!['text', 'json', 'sarif'].includes(value)) { throw new Error('Invalid format. Choose text, json, or sarif.'); }
+				if (!['text', 'json', 'sarif', 'pdf'].includes(value)) { throw new Error('Invalid format. Choose text, json, sarif, or pdf.'); }
 				parsed.format = value as Format;
 			} else if (flag === '--output') { parsed.output = value; }
 			else {
@@ -119,10 +119,12 @@ function parseArgs(args: readonly string[]): ScanArgs {
 		}
 		throw new Error('Unknown CLI option.');
 	}
+	if (parsed.format === 'pdf' && !parsed.output) { throw new Error('PDF output requires --output <path>.'); }
 	return parsed;
 }
 
 function renderResult(format: Format, result: CoreScanStartResult): string {
+	if (format === 'pdf') { return result.report.pdf; }
 	if (format === 'sarif') { return `${JSON.stringify(result.report.sarif, null, 2)}\n`; }
 	if (format === 'json') {
 		return `${JSON.stringify({ schemaVersion: 1, scan: { scanId: result.scanId, mode: result.state.mode, filesScanned: result.filesScanned ?? null, durationMs: result.durationMs ?? null }, report: createJsonReport(result.report.model as SecurityReportModel) }, null, 2)}\n`;
@@ -131,7 +133,7 @@ function renderResult(format: Format, result: CoreScanStartResult): string {
 	return `\nFindings: ${result.findings.length}\nCritical: ${counts.Critical}\nHigh:     ${counts.High}\nMedium:   ${counts.Medium}\nLow:      ${counts.Low}\nDuration: ${((result.durationMs ?? 0) / 1000).toFixed(1)}s\n`;
 }
 
-function writeResult(args: ScanArgs, content: string, stdout: CliOutput): void {
+function writeResult(args: ScanArgs, content: string, stdout: CliOutput, encoding: BufferEncoding): void {
 	if (!args.output) { stdout.write(content); return; }
 	const file = path.resolve(args.output);
 	let descriptor: number | undefined;
@@ -139,7 +141,7 @@ function writeResult(args: ScanArgs, content: string, stdout: CliOutput): void {
 	try {
 		descriptor = fs.openSync(file, 'wx');
 		created = true;
-		fs.writeFileSync(descriptor, content, 'utf8');
+		fs.writeFileSync(descriptor, content, encoding);
 		fs.closeSync(descriptor);
 		descriptor = undefined;
 	} catch (error) {

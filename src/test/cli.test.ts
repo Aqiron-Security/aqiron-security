@@ -86,6 +86,68 @@ suite('Aqiron CLI', () => {
 		}
 	});
 
+	test('requires output for PDF and preserves trust validation', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		const fake = new FakeCoreClient();
+		try {
+			const missingOutput = captureOutput();
+			assert.equal(await runCli(['scan', workspace, '--format', 'pdf', '--trust-local-workspace'], { stderr: missingOutput, createClient: () => fake }), 2);
+			assert.match(missingOutput.text, /PDF output requires --output/);
+			assert.equal(fake.startCalls, 0);
+			const missingTrust = captureOutput();
+			assert.equal(await runCli(['scan', workspace, '--format', 'pdf', '--output', 'report.pdf'], { stderr: missingTrust, createClient: () => fake }), 2);
+			assert.match(missingTrust.text, /Workspace trust is required/);
+			assert.equal(fake.startCalls, 0);
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
+
+	test('writes the PDF returned by scan.start to an exclusive output file without stdout output', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-output-'));
+		const outputPath = path.join(outputDir, 'report.pdf');
+		const fake = new FakeCoreClient();
+		const stdout = captureOutput();
+		const expectedPdf = Buffer.concat([Buffer.from('%PDF-1.4\nAqiron report '), Buffer.from([0xe9])]);
+		try {
+			assert.equal(await runCli(['scan', workspace, '--format', 'pdf', '--output', outputPath, '--trust-local-workspace'], { stdout, stderr: captureOutput(), createClient: () => fake }), 0);
+			assert.equal(stdout.text, '');
+			assert.equal(fake.startCalls, 1);
+			assert.ok(fs.readFileSync(outputPath).equals(expectedPdf));
+			assert.equal(await runCli(['scan', workspace, '--format', 'pdf', '--output', outputPath, '--trust-local-workspace'], { stderr: captureOutput(), createClient: () => new FakeCoreClient() }), 1);
+			assert.ok(fs.readFileSync(outputPath).equals(expectedPdf));
+		} finally {
+			fs.rmSync(workspace, { recursive: true, force: true });
+			fs.rmSync(outputDir, { recursive: true, force: true });
+		}
+	});
+
+	test('reports scan failure during PDF mode without exposing errors or creating an artifact', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		const outputPath = path.join(workspace, 'report.pdf');
+		const stdout = captureOutput();
+		const stderr = captureOutput();
+		const fake = new FakeCoreClient();
+		fake.onStart = async () => { throw new Error('rawEvidence=sk-private-value'); };
+		try {
+			assert.equal(await runCli(['scan', workspace, '--format', 'pdf', '--output', outputPath, '--trust-local-workspace'], { stdout, stderr, createClient: () => fake }), 1);
+			assert.equal(stdout.text, '');
+			assert.match(stderr.text, /Core scan failed/);
+			assert.doesNotMatch(stderr.text, /sk-private-value/);
+			assert.equal(fs.existsSync(outputPath), false);
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
+
+	test('PDF output still honors fail-on severity after writing the report', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		const outputPath = path.join(workspace, 'report.pdf');
+		const stderr = captureOutput();
+		try {
+			assert.equal(await runCli(['scan', workspace, '--format', 'pdf', '--output', outputPath, '--fail-on', 'high', '--trust-local-workspace'], { stderr, createClient: () => new FakeCoreClient() }), 1);
+			assert.match(stderr.text, /Policy violation/);
+			assert.ok(fs.readFileSync(outputPath).subarray(0, 8).equals(Buffer.from('%PDF-1.4')));
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
+
 	test('reports output directory failures without dumping filesystem details', async () => {
 		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
 		const output = captureOutput();
@@ -97,6 +159,27 @@ suite('Aqiron CLI', () => {
 			assert.match(stderr.text, /Output failed/);
 			assert.doesNotMatch(stderr.text, /missing-parent/);
 		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
+
+	test('removes a newly-created partial PDF when writing fails', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		const outputPath = path.join(workspace, 'partial.pdf');
+		const fsRuntime = require('node:fs') as { writeFileSync: (fd: number, data: string, encoding: BufferEncoding) => void };
+		const originalWriteFileSync = fsRuntime.writeFileSync;
+		const stderr = captureOutput();
+		fsRuntime.writeFileSync = (fd, data, encoding) => {
+			if (typeof fd === 'number') { throw new Error('rawEvidence=private'); }
+			originalWriteFileSync(fd, data, encoding);
+		};
+		try {
+			assert.equal(await runCli(['scan', workspace, '--format', 'pdf', '--output', outputPath, '--trust-local-workspace'], { stderr, createClient: () => new FakeCoreClient() }), 1);
+			assert.match(stderr.text, /Output failed/);
+			assert.doesNotMatch(stderr.text, /private/);
+			assert.equal(fs.existsSync(outputPath), false);
+		} finally {
+			fsRuntime.writeFileSync = originalWriteFileSync;
+			fs.rmSync(workspace, { recursive: true, force: true });
+		}
 	});
 
 	for (const [threshold, expected] of [['critical', false], ['high', true], ['medium', true], ['low', true]] as const) {
@@ -227,6 +310,29 @@ suite('Aqiron CLI', () => {
 		assert.match(result.stdout, /Critical:\s+\d+/);
 		assert.doesNotMatch(result.stdout + result.stderr, /sk-test-secret-value-123456/);
 	});
+
+	test('built CLI writes the Core PDF report returned through scan.start', function () {
+		this.timeout(45_000);
+		const cliPath = path.resolve(__dirname, '../../../dist/aqiron-cli.js');
+		if (!fs.existsSync(cliPath)) { this.skip(); return; }
+		const fixture = path.resolve(__dirname, '../../../src/test/fixtures/file-scan/flutter');
+		const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-pdf-'));
+		const outputPath = path.join(outputDir, 'report.pdf');
+		try {
+			const result = childProcess.spawnSync(process.execPath, [cliPath, 'scan', fixture, '--format', 'pdf', '--output', outputPath, '--trust-local-workspace'], { encoding: 'utf8', timeout: 40_000, windowsHide: true });
+			assert.equal(result.error, undefined, result.error?.message);
+			assert.equal(result.status, 0, result.stderr);
+			assert.equal(result.stdout, '', 'PDF bytes are written only to the artifact');
+			const pdf = fs.readFileSync(outputPath).toString('latin1');
+			assert.ok(pdf.startsWith('%PDF-1.4'));
+			assert.ok(pdf.includes('/Type /Pages'));
+			assert.match(pdf, /\/Count \d+/);
+			assert.ok(pdf.includes('Security Assessment Report'));
+			assert.ok(pdf.includes('/Subtype /Image'), 'the Core branding asset is rendered');
+			assert.ok(pdf.includes('Executive Summary'));
+			assert.doesNotMatch(pdf, /sk-test-secret-value-123456/);
+		} finally { fs.rmSync(outputDir, { recursive: true, force: true }); }
+	});
 });
 
 class FakeCoreClient implements CliCoreClient {
@@ -260,11 +366,17 @@ class FakeCoreClient implements CliCoreClient {
 			{ severity: 'High', rawEvidence: { token: 'sk-test-secret-value-123456' } },
 			{ severity: 'Low', rawEvidence: { line: 'safe' } },
 		] as CoreScanStartResult['findings'];
+		const correlation = { findings, relationships: [], summary: { deduplicated: 0, boosted: 0, attackPaths: 0 } };
+		const graph = { nodes: [], edges: [] };
+		const telemetry = { scanId: request.requestId, tools: [], logs: [], findings: findings.length, failures: 0, timeouts: 0, cancelled: false };
 		return {
 			scanId: request.requestId,
 			state: { mode: 'deep' } as CoreScanStartResult['state'],
 			findings,
-			report: { sarif: { version: '2.1.0', $schema: 'https://json.schemastore.org/sarif-2.1.0.json', runs: [] }, model: { summary: { total: findings.length }, findings } } as unknown as CoreScanStartResult['report'],
+			correlation,
+			graph,
+			telemetry,
+			report: { sarif: { version: '2.1.0', $schema: 'https://json.schemastore.org/sarif-2.1.0.json', runs: [] }, model: { summary: { total: findings.length }, findings }, pdf: Buffer.concat([Buffer.from('%PDF-1.4\nAqiron report '), Buffer.from([0xe9])]).toString('binary') } as unknown as CoreScanStartResult['report'],
 			durationMs: 1250,
 		};
 	}
