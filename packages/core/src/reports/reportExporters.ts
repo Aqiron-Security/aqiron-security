@@ -4,7 +4,10 @@ import { SecurityReportContent, SecurityReportModel, SecurityReportPdfContext } 
 import { UnifiedFinding } from '../shared/finding';
 
 export function createJsonReport(model: SecurityReportModel): unknown {
-	return model;
+	return {
+		...model,
+		findings: model.findings.map((finding) => ({ ...finding, rawEvidence: redactEvidence(finding.rawEvidence) })),
+	};
 }
 
 export function createTextReport(content: SecurityReportContent): string {

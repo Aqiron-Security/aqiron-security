@@ -115,7 +115,10 @@ suite('Report exporters', () => {
 
 	test('keeps JSON and SARIF exporters independent of PDF presentation', () => {
 		const model = makeModel();
-		assert.deepEqual(createJsonReport(model), model);
+		const json = createJsonReport(model) as typeof model;
+		assert.deepEqual(json.summary, model.summary);
+		assert.equal(json.findings[0].rawEvidence && (json.findings[0].rawEvidence as { token?: string }).token, '[REDACTED]');
+		assert.ok(model.findings[0].rawEvidence && (model.findings[0].rawEvidence as { token?: string }).token === 'sk-test-12345678901234567890', 'JSON redaction does not mutate Core report state');
 		const sarif = createSarifReport(model.findings) as { runs: Array<{ results: unknown[] }> };
 		assert.equal(sarif.runs[0].results.length, model.findings.length);
 	});
