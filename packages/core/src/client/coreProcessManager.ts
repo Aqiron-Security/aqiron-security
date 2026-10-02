@@ -1,24 +1,29 @@
 import * as childProcess from 'child_process';
 import * as path from 'path';
 import { EventEmitter } from 'events';
-import { CORE_PROTOCOL_VERSION, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreMessage, CoreMethod, CoreMethodParams, CoreRequestFor, CoreResultFor, CoreResponseMessage } from '../../packages/core/src/runtime';
+import { CORE_PROTOCOL_VERSION, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreMessage, CoreMethod, CoreMethodParams, CoreRequestFor, CoreResultFor, CoreResponseMessage } from '../runtime';
 
 export interface CoreProcessOptions {
-	extensionVersion: string;
+	clientVersion: string;
+	runtimePath: string;
+	restartOnCrash: boolean;
 	protocolVersion?: number;
 	timeoutMs?: number;
-	restartOnCrash?: boolean;
 }
 
-export interface CoreProcessEvent {
-	event: string;
-	requestId?: string;
-	payload?: unknown;
+export interface CoreClientTransport {
+	start(): Promise<CoreHandshakeResponse>;
+	stop(): Promise<void>;
+	request<K extends CoreMethod>(method: K, params: CoreMethodParams[K], timeoutMs?: number, requestId?: string): Promise<CoreResultFor<K>>;
+	cancel(requestId: string): Promise<{ cancelled: boolean; requestId?: string }>;
+	onCoreEvent(listener: (event: CoreEventMessage) => void): () => void;
+	on(event: 'log', listener: (message: string) => void): this;
+	on(event: 'exit', listener: (event: { code: number | null; signal: NodeJS.Signals | null }) => void): this;
 }
 
 export type CoreProcessState = 'stopped' | 'starting' | 'ready' | 'unhealthy' | 'crashed' | 'restarting';
 
-export class CoreProcessManager extends EventEmitter {
+export class CoreProcessManager extends EventEmitter implements CoreClientTransport {
 	private child?: childProcess.ChildProcessWithoutNullStreams;
 	private buffer = '';
 	private readonly pending = new Map<string, PendingRequest>();
@@ -37,7 +42,7 @@ export class CoreProcessManager extends EventEmitter {
 
 	async start(): Promise<CoreHandshakeResponse> {
 		if (this.state === 'ready' && this.child) {
-			return { protocolVersion: this.protocolVersion, coreVersion: this.options.extensionVersion, status: 'compatible' };
+			return { protocolVersion: this.protocolVersion, coreVersion: this.options.clientVersion, status: 'compatible' };
 		}
 		if (this.startPromise) {
 			return await this.startPromise;
@@ -59,10 +64,10 @@ export class CoreProcessManager extends EventEmitter {
 		this.emit('state', this.state);
 		this.expectedShutdown = false;
 		this.buffer = '';
-		const runtimePath = path.join(__dirname, 'core-runtime.js');
+		const runtimePath = path.resolve(this.options.runtimePath);
 		this.child = childProcess.spawn(process.execPath, [runtimePath], {
 			cwd: path.dirname(runtimePath),
-			env: { ...process.env, AQIRON_CORE_VERSION: this.options.extensionVersion },
+			env: { ...process.env, AQIRON_CORE_VERSION: this.options.clientVersion },
 			stdio: ['pipe', 'pipe', 'pipe'],
 			windowsHide: true,
 		});
@@ -185,13 +190,14 @@ export class CoreProcessManager extends EventEmitter {
 		return await this.request('core.cancel', { requestId });
 	}
 
-	onCoreEvent(listener: (event: CoreProcessEvent) => void): void {
+	onCoreEvent(listener: (event: CoreEventMessage) => void): () => void {
 		this.on('core-event', listener);
+		return () => this.removeListener('core-event', listener);
 	}
 
 	private async handshake(): Promise<CoreHandshakeResponse> {
 		return await this.request('core.handshake', {
-			extensionVersion: this.options.extensionVersion,
+			extensionVersion: this.options.clientVersion,
 			protocolVersion: this.protocolVersion,
 			platform: process.platform,
 			architecture: process.arch,
@@ -244,7 +250,7 @@ export class CoreProcessManager extends EventEmitter {
 			return;
 		}
 		if (parsed.type === 'event') {
-			this.emit('core-event', { event: parsed.event, requestId: parsed.requestId, payload: parsed.payload } satisfies CoreProcessEvent);
+			this.emit('core-event', parsed);
 			return;
 		}
 		if (parsed.type === 'response') {

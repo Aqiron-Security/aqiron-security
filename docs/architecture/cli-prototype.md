@@ -11,7 +11,7 @@ npm run cli:build
 node dist/aqiron-cli.js scan <path> --trust-local-workspace
 ```
 
-The CLI bundle and `dist/core-runtime.js` must stay side by side because the existing Core process manager resolves that runtime relative to its own bundle. No npm package is published. The repository has no GitHub Actions workflow suitable for reliable CLI invocation yet, so a CI workflow is future work:
+The build emits `dist/aqiron-cli.js` and `dist/core-runtime.js` together. The CLI adapter explicitly supplies the runtime path to the shared Core client, so location is host configuration rather than a path assumption inside the transport. No npm package is published. The repository has no GitHub Actions workflow suitable for reliable CLI invocation yet, so a CI workflow is future work:
 
 ```text
 GitHub Actions → Aqiron CLI → Aqiron Core → SARIF
@@ -56,9 +56,15 @@ Ctrl+C (`SIGINT`) and `SIGTERM` where supported call Core's existing request can
 ## Communication boundary and limits
 
 ```text
-CLI → existing CoreClient/CoreProcessManager → line-delimited JSON IPC → Core runtime
+CLI adapter → packages/core/src/client/CoreClient → CoreClientTransport / CoreProcessManager → line-delimited JSON IPC → Core runtime
 ```
 
-The CLI imports the Node-only `src/core/CoreClient` seam and existing Core result types. `CoreClient` currently lives under the VS Code source tree but does not depend on VS Code APIs. The build-time inclusion is a temporary compatibility coupling; extracting a small host-neutral transport package can follow if other hosts need a separately consumable client. The CLI does not import scanners or implement scanning, parsing, normalization, correlation, or report generation.
+The host-neutral client is shared with the VS Code adapter and imports protocol/domain types from Core. The CLI adapter supplies `clientVersion`, the bundled runtime path, and `restartOnCrash: false`; it owns process signals, CLI formatting, output files and exit codes. The VS Code adapter supplies the extension version, packaged runtime path, and `restartOnCrash: true`; it owns extension-host lifecycle and UI integration. The shared modules import no VS Code APIs and do not implement scanning, parsing, normalization, correlation, or report presentation.
+
+## Host roadmap
+
+- **Current:** VS Code and CLI use the same host-neutral client/NDJSON transport. The client is source inside the existing private Core package.
+- **Near-term:** only if another consumer needs it, define a stable package subpath/version policy. A GitHub Actions workflow can invoke CLI and consume SARIF after CLI distribution is reliable.
+- **Future Desktop:** pass Desktop runtime location and lifecycle choices into the same client; keep windows, workspace interaction, permissions, dialogs and presentation in the Desktop adapter.
 
 This in-repository CLI has no release packaging, npm publication, configuration file, policy framework, CI annotations, or GitHub Actions integration. Continue using CLI flags and current Core defaults until a concrete need justifies those additions.

@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { CoreClient } from '../../../src/core/coreClient';
+import { CoreClient } from '../../core/src/client';
 import { CoreScanStartResult } from '../../core/src/runtime/protocol';
 import { createJsonReport } from '../../core/src/reports/reportExporters';
 import { SecurityReportModel } from '../../core/src/reports/reportModels';
@@ -41,7 +41,7 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
 		if (!fs.statSync(workspaceRoot).isDirectory()) { stderr.write('Invalid workspace: path must be a directory.\n'); return 2; }
 	} catch { stderr.write('Invalid workspace: directory does not exist or cannot be accessed.\n'); return 2; }
 
-	const client = options.createClient?.() ?? new CoreClient({ extensionVersion: '0.0.1', restartOnCrash: false });
+	const client = options.createClient?.() ?? new CoreClient({ clientVersion: '0.0.1', runtimePath: path.join(__dirname, 'core-runtime.js'), restartOnCrash: false });
 	const requestId = `cli-${process.pid}-${Date.now().toString(36)}`;
 	let cancelled = false;
 	const onEvent = (event: CliEvent) => { if (event.requestId === requestId && parsed.format === 'text') { writeProgress(event, stdout); } };

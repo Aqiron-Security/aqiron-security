@@ -12,7 +12,7 @@ import { AIService } from '../ai/services/aiService';
 import { RagWorkspaceService } from '../rag/ragWorkspaceService';
 import { CoreFileScanRequest, CoreFileScanResult, ResolvedFileScanPolicy } from '../../packages/core/src/shared/fileScan';
 import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
-import { CoreClient } from '../core/coreClient';
+import { CoreClient } from '../../packages/core/src/client';
 import { getResolvedCurrentFileRules } from '../scanner/rules';
 
 export class ScanController implements vscode.Disposable {

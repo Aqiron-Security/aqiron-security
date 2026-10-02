@@ -11,7 +11,7 @@ import { getIssueSkipReason, isFlutterWorkspace, resolveWorkspaceScanPolicy } fr
 import { getCounts } from '../views/aqironTreeProvider';
 import { RagWorkspaceService } from '../rag/ragWorkspaceService';
 import { ThreatHistoryService, ThreatSnapshot } from '../security/threatHistoryService';
-import { CoreClient } from '../core/coreClient';
+import { CoreClient } from '../../packages/core/src/client';
 import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
 
 export type AqironWebviewSection = 'agent' | 'scan' | 'threats' | 'reports' | 'settings' | 'aiAgent';

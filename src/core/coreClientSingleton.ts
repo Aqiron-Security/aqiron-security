@@ -1,4 +1,4 @@
-import { CoreClient } from './coreClient';
+import { CoreClient } from '../../packages/core/src/client';
 
 let sharedCoreClient: CoreClient | undefined;
 

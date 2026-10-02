@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as childProcess from 'child_process';
 import { EventEmitter } from 'events';
 import { createRequire } from 'module';
-import { CoreProcessManager } from '../core/coreProcessManager';
+import { CoreProcessManager } from '../../packages/core/src/client';
 
 const loadModule = createRequire(__filename);
 
@@ -13,8 +13,10 @@ interface TestStream extends EventEmitter {
 class FakeCoreChild extends EventEmitter {
 	readonly stdout = createStream();
 	readonly stderr = createStream();
+	readonly requests: Array<{ id: string; method: string; params?: unknown }> = [];
 	readonly stdin = { write: (payload: string): boolean => {
-			const request = JSON.parse(payload) as { id: string; method: string };
+			const request = JSON.parse(payload) as { id: string; method: string; params?: unknown };
+			this.requests.push(request);
 			if (request.method === 'core.info') {
 				return true;
 			}
@@ -81,7 +83,7 @@ suite('Core process manager', () => {
 	test('reconstructs a response split across stdout chunks in one process', async () => {
 		const child = new FakeCoreChild(true);
 		const restore = installSpawn(() => child);
-		const manager = new CoreProcessManager({ extensionVersion: 'test', restartOnCrash: false });
+const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'core-runtime.js', restartOnCrash: false });
 		try {
 			await manager.start();
 			const result = await manager.request('core.health', undefined);
@@ -99,7 +101,7 @@ suite('Core process manager', () => {
 			children.push(child);
 			return child;
 		});
-		const manager = new CoreProcessManager({ extensionVersion: 'test', restartOnCrash: false });
+		const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'core-runtime.js', restartOnCrash: false });
 		try {
 			await manager.start();
 			handleStdout(manager, '{"id":"old-request","type":"response"');
@@ -115,11 +117,28 @@ suite('Core process manager', () => {
 	});
 
 	test('logs malformed JSON without breaking subsequent messages', () => {
-		const manager = new CoreProcessManager({ extensionVersion: 'test', restartOnCrash: false });
+		const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'core-runtime.js', restartOnCrash: false });
 		const logs: string[] = [];
 		manager.on('log', (message: string) => logs.push(message));
 		handleStdout(manager, 'not-json\n');
 		assert.deepStrictEqual(logs, ['Malformed message from core: not-json']);
+	});
+
+	test('times out a typed request and sends cancellation with the same request ID', async () => {
+		const child = new FakeCoreChild();
+		const restore = installSpawn(() => child);
+		const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'core-runtime.js', restartOnCrash: false });
+		try {
+			await manager.start();
+			const error = await manager.request('core.info', undefined, 25, 'timeout-request-id').then(() => undefined, (reason: { code?: string }) => reason);
+			assert.strictEqual(error?.code, 'CORE_REQUEST_TIMEOUT');
+			const cancellation = child.requests.find(request => request.method === 'core.cancel');
+			assert.ok(cancellation);
+			assert.deepStrictEqual(cancellation?.params, { requestId: 'timeout-request-id' });
+		} finally {
+			restore();
+			await manager.stop();
+		}
 	});
 
 	test('rejects pending requests and automatically restarts after a crash', async () => {
@@ -129,7 +148,7 @@ suite('Core process manager', () => {
 			children.push(child);
 			return child;
 		});
-		const manager = new CoreProcessManager({ extensionVersion: 'test', restartOnCrash: true });
+		const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'core-runtime.js', restartOnCrash: true });
 		try {
 			await manager.start();
 			const pending = manager.request('core.info', undefined, 0).then(() => undefined, (error: { code?: string }) => error);

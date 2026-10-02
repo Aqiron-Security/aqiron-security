@@ -35,17 +35,19 @@ Wire envelope is currently newline-delimited JSON: request `{ id, type: "request
 
 **Event payload notes:** scan events carry `PipelineEvent`; pipeline events include scan state, stage/tool/scanner status, logs, findings, counts, correlation summary and completion/failure/cancellation. AI stream payloads are StreamChunk-like. Event names and payload are currently split between `CoreProgressEnvelope` (not the runtime envelope) and arbitrary string/unknown in `CoreEventMessage`.
 
-**Protocol inconsistencies / unsafe spots found:** `CoreRequestMessage.method` is string and params unknown; responses are untyped unknown. `CoreProcessManager.request<T>` lets callers choose any T/method pair. Runtime has unsafe params casts for nearly every method, including raw property extraction. The wire validator rejects non-object params globally, although no-params calls commonly omit params and shutdown sends {}. `scan.cancel` is dispatched but CoreClient.cancelScan sends `core.cancel`. `rag.status` reuses project request (including irrelevant trusted/currentFile). `rag.query.limit` is accepted but unused. AI provider id is cast from arbitrary string. AI chat context is cast to never, history role cast. report telemetry is cast to never; report fallback objects are asserted. `CoreScanStartRequest.mode` omits custom although downstream scanner/report accepts it. CoreScanStartResult telemetry is unknown. Runtime's `handle` response loses method/result correlation. Existing tests exercise process framing, timeout/restart, runtime handshake/health and credentials; they do not cover malformed method-specific params or event contract typing.
+**Current protocol typing and remaining caveats:** `CoreRequestMessage` is a discriminated union mapped from `CoreMethodParams`; `CoreRequestFor<M>` and `CoreResultFor<M>` pair each method with its params and result, and `CoreProcessManager.request<M>` preserves that pairing. The JSON response envelope still types its wire `result` as `unknown`, so the manager's method-specific result type is a compile-time contract rather than runtime schema validation. Core validates request envelopes and method-specific required parameter shapes before dispatch. Remaining caveats include unsafe casts for some runtime parameter extraction, `rag.status` reusing project request fields, `rag.query.limit` currently being unused, AI provider ID casting, report telemetry/fallback assertions, and result/event payload objects crossing JSON without complete nested validation. `scan.cancel` remains a protocol method while `CoreClient.cancelScan` intentionally calls the equivalent `core.cancel` request by request ID. Existing tests exercise process framing, timeout/restart, runtime handshake/health, credentials, event typing and scan identity.
 
 ## Call-site inventory
 
-The only direct Core protocol wrapper is `src/core/coreClient.ts`. It is used by:
+The host-neutral Core client facade lives in `packages/core/src/client/coreClient.ts`; its `CoreClientTransport` implementation and NDJSON process mechanics live in `packages/core/src/client/coreProcessManager.ts`. VS Code and CLI import this shared client. VS Code-specific callers reach it directly or through the host-owned singleton. Current call sites include:
 - `src/security/pipeline/pipelineEngine.ts`: scan start, cancellation.
 - `src/security/reports/reportGenerator.ts`: report generation.
 - `src/security/analysis/aiVulnerabilityAnalysisService.ts`: AI vulnerability analysis.
 - `src/ai/services/aiService.ts` and `src/ai/services/credentialService.ts`: provider/model/chat and credential methods.
-- CoreProcessManager itself: handshake, health, shutdown and cancellation.
-- CoreClient methods for project, RAG query/index/status, scan status, review, and scan.cancel exist; production call coverage is partial. Existing tests call manager with arbitrary fake methods and runtime with typed credential messages.
+- `src/extension.ts`, `src/commands/scanController.ts`, `src/webview/aqironWebviewProvider.ts`: extension activation/lifecycle, current-file scans and Core event subscription.
+- `packages/cli/src/cli.ts`: local scan, signal cancellation and CLI result handling.
+- `CoreProcessManager`: handshake, health, shutdown, typed request/response transport and cancellation.
+- CoreClient methods for project, RAG query/index/status, scan status, review and `scan.cancel` exist; production call coverage is partial. Existing tests call the manager with fake transports and runtime with typed credential messages.
 
 ## Overlap inventory
 

@@ -11,11 +11,15 @@ import { AqironWebviewProvider } from './webview/aqironWebviewProvider';
 import { ExecutiveSummaryGenerator } from './security/reports/reportGenerator';
 import { CorrelationResult } from './security/correlation/correlationEngine';
 import { UnifiedFinding } from './security/findings/finding';
-import { CoreClient } from './core/coreClient';
+import { CoreClient } from '../packages/core/src/client';
 import { setCoreClient } from './core/coreClientSingleton';
 
 export function activate(context: vscode.ExtensionContext): void {
-	const coreClient = new CoreClient({ extensionVersion: String(context.extension.packageJSON.version ?? '0.0.0') });
+	const coreClient = new CoreClient({
+		clientVersion: String(context.extension.packageJSON.version ?? '0.0.0'),
+		runtimePath: path.join(context.extensionPath, 'dist', 'core-runtime.js'),
+		restartOnCrash: true,
+	});
 	setCoreClient(coreClient);
 	const output = vscode.window.createOutputChannel('Aqiron Security');
 	const aiService = new AIService(context);
