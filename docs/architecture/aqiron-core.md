@@ -201,3 +201,9 @@ An investigation aggregate can own hypothesis text, scope/constraints, linked ob
 **Current:** Core's native scanner includes deterministic secret rules with the legacy IDs `critical.api-key`, `critical.secret`, `critical.password`, and `critical.private-key`. They are shared by Core workspace scans and `scan.file`, use the characterized legacy patterns/case behavior, and emit source locations plus safe metadata without copying the matched source line into finding evidence. The previous Dart-only rule remains as a fallback for shorter literals outside those patterns. Adjacent native findings on a matching line also omit raw line evidence.
 
 **Not migrated:** Agent `secrets.scan` still uses its existing VS Code scanner, filtering, state merge, summary limit, and webview redaction. Adding Core detection parity does not yet establish workspace policy/scope parity; see [Agent workspace scan migration](agent-workspace-scan-migration.md).
+
+### Workspace policy parity in progress
+
+**Current:** `ResolvedWorkspaceScanPolicy` is a portable, contract-only type. The VS Code adapter can resolve the characterized supported extensions, exclusions, `.aq` rules, generated/minified/compiled choices and byte-size limit into it. Workspace existence, first-folder selection, Flutter eligibility and workspace trust are host decisions; they are not fields in the resolved scan policy. Trust remains a separate actual host boolean.
+
+**Not wired:** `scan.start` does not accept or enforce `ResolvedWorkspaceScanPolicy`. Agent `secrets.scan` remains on `WorkspaceScanner`. Keep that path in place until Core request validation, native workspace enumeration, skip/count semantics and tests consume the policy with parity. The exact sources and remaining differences are in [Agent workspace scan migration](agent-workspace-scan-migration.md).

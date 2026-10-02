@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { AqironIssue } from '../models/issue';
+import type { ResolvedWorkspaceScanPolicy } from '../../packages/core/src/shared/workspaceScanPolicy';
 
 export const supportedExtensions = new Set([
 	'.dart',
@@ -77,6 +78,10 @@ const compiledOutputExtensions = new Set([
 	'.dylib',
 ]);
 
+// These filename globs are part of the existing WorkspaceScanner findFiles selector and
+// remain excluded even when the scanGeneratedFiles setting enables other generated files.
+const workspaceExcludedFileNamePatterns = ['*.g.dart', '*.freezed.dart', '*.generated.*', '*.mocks.dart', '*.mock.dart', '*.config.dart'];
+
 export const defaultAqExclusions = [
 	'build/',
 	'.build/',
@@ -108,9 +113,7 @@ export function getWorkspaceRootForFile(file: string): string | undefined {
 
 export function isInsideSkippedDirectory(file: string): boolean {
 	const normalized = normalizePath(file);
-	const configured = vscode.workspace.getConfiguration('aqiron-security').get<string[]>('excludeFolders', defaultExcludeFolders);
-	const folders = new Set([...defaultExcludeFolders, ...configured].map(normalizePath));
-	return [...folders].some((folder) => normalized.includes(`/${folder}/`) || normalized.endsWith(`/${folder}`));
+	return getResolvedExcludeFolders().some((folder) => normalized.includes(`/${folder}/`) || normalized.endsWith(`/${folder}`));
 }
 
 export function shouldScanGeneratedFiles(): boolean {
@@ -120,6 +123,26 @@ export function shouldScanGeneratedFiles(): boolean {
 export function getMaxFileSizeBytes(): number {
 	const maxFileSizeKB = vscode.workspace.getConfiguration('aqiron-security').get<number>('maxFileSizeKB', 512);
 	return Math.max(1, maxFileSizeKB) * 1024;
+}
+
+/** Returns the effective default and configured folder exclusions used by the legacy workspace scanner. */
+export function getResolvedExcludeFolders(): string[] {
+	const configured = vscode.workspace.getConfiguration('aqiron-security').get<string[]>('excludeFolders', defaultExcludeFolders);
+	return [...new Set([...defaultExcludeFolders, ...configured].map(normalizePath))];
+}
+
+/** Resolves existing VS Code workspace settings into a portable, non-sensitive Core policy value. */
+export function resolveWorkspaceScanPolicy(root: string): ResolvedWorkspaceScanPolicy {
+	return {
+		supportedExtensions: [...supportedExtensions],
+		excludedDirectoryPaths: getResolvedExcludeFolders(),
+		excludedFileNamePatterns: [...workspaceExcludedFileNamePatterns],
+		aqExclusionPatterns: getAqExclusions(root),
+		maxFileSizeBytes: getMaxFileSizeBytes(),
+		skipGeneratedFiles: !shouldScanGeneratedFiles(),
+		skipMinifiedFiles: true,
+		skipCompiledFiles: true,
+	};
 }
 
 export function getSkipReason(file: string, content?: string): string | undefined {

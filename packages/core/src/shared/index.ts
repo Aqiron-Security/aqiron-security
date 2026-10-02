@@ -4,6 +4,7 @@ export * from './platform';
 export * from './issue';
 export * from './finding';
 export * from './fileScan';
+export * from './workspaceScanPolicy';
 export * from './pipeline';
 export * from './analysis';
 export * from './rag';

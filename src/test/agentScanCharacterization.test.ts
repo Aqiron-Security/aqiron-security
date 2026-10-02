@@ -8,6 +8,7 @@ import { CoreClient } from '../core/coreClient';
 import { CoreScanStartRequest, CoreScanStartResult } from '../../packages/core/src/runtime';
 import { createFinding, UnifiedFinding } from '../../packages/core/src/shared/finding';
 import { scanContent } from '../scanner/rules';
+import { WorkspaceScanner } from '../scanner/workspaceScanner';
 import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/nativeScanner';
 
 interface AgentResult {
@@ -114,6 +115,29 @@ suite('AI agent scan characterization', () => {
 			assert.equal(result.content, 'Workspace scan complete. Scanned 0 files and found 0 issues.');
 			assert.equal(result.stats?.filesScanned, 0);
 		});
+	});
+
+	test('secrets.scan keeps first-folder selection and the existing WorkspaceScanner path', async () => {
+		await withFlutterFixture(async firstRoot => {
+			const first: vscode.WorkspaceFolder = { uri: vscode.Uri.file(firstRoot), name: 'First Flutter folder', index: 0 };
+			const second: vscode.WorkspaceFolder = { uri: vscode.Uri.file(path.resolve(__dirname, '../../../src')), name: 'Second folder', index: 1 };
+			await withWorkspaceFolders([first, second], async () => {
+				let selectedRoot: string | undefined;
+				const provider = harness({ filesScanned: 1, durationMs: 1, issues: [], target: firstRoot }, folder => { selectedRoot = folder.uri.fsPath; });
+				await provider.runSecretsScan();
+				assert.equal(selectedRoot, firstRoot);
+				assert.equal(provider.legacyCalls, 1);
+				assert.equal(provider.coreRequests.length, 0, 'policy preparation does not migrate secrets.scan');
+			});
+		});
+	});
+
+	test('legacy Agent workspace scanner retains its Flutter host gate', async () => {
+		const root = path.resolve(__dirname, '../../../src/test/fixtures/file-scan');
+		const folder: vscode.WorkspaceFolder = { uri: vscode.Uri.file(root), name: 'Non-Flutter fixture', index: 0 };
+		const result = await new WorkspaceScanner({ appendLine: () => undefined } as unknown as vscode.OutputChannel).scanWorkspace(folder);
+		assert.equal(result.filesScanned, 0);
+		assert.deepEqual(result.issues, []);
 	});
 
 	test('Agent workspace scan forwards request-correlated Core progress without fabricating events', async () => {
@@ -375,6 +399,18 @@ async function withFlutterFixture(run: (root: string) => Promise<void>): Promise
 		} else {
 			Reflect.deleteProperty(workspace, 'workspaceFolders');
 		}
+	}
+}
+
+async function withWorkspaceFolders<T>(folders: vscode.WorkspaceFolder[], run: () => Promise<T>): Promise<T> {
+	const workspace = vscode.workspace as unknown as Record<string, unknown>;
+	const descriptor = Object.getOwnPropertyDescriptor(workspace, 'workspaceFolders');
+	Object.defineProperty(workspace, 'workspaceFolders', { configurable: true, value: folders });
+	try {
+		return await run();
+	} finally {
+		if (descriptor) {Object.defineProperty(workspace, 'workspaceFolders', descriptor);}
+		else {Reflect.deleteProperty(workspace, 'workspaceFolders');}
 	}
 }
 
