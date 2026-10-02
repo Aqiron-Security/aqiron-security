@@ -263,14 +263,19 @@ export class CoreRuntime {
 		}
 		const eventBus = new PipelineEventBus();
 		eventBus.on((event) => emit({ type: 'event', event: event.type, requestId: scanId, payload: event }));
+		const workspacePolicy = request.workspacePolicy;
 		const scannerContext = {
 			workspaceRoot: request.workspaceRoot,
 			targetPath: request.targetPath ?? request.workspaceRoot,
 			mode: request.mode ?? 'deep',
-			exclusions: ['node_modules/', 'dist/', 'build/', 'coverage/', '.git/', '.dart_tool/', '.aqiron-security/', 'generated/', 'gen/', 'target/', 'bin/', 'obj/'],
+			exclusions: workspacePolicy
+				? [...new Set([...workspacePolicy.excludedDirectoryPaths, ...workspacePolicy.aqExclusionPatterns])]
+				: ['node_modules/', 'dist/', 'build/', 'coverage/', '.git/', '.dart_tool/', '.aqiron-security/', 'generated/', 'gen/', 'target/', 'bin/', 'obj/'],
 			cancellationToken,
 			configuration: {
 				get: <T>(key: string, defaultValue?: T): T | undefined => {
+					if (workspacePolicy && key === 'scanGeneratedFiles') {return (!workspacePolicy.skipGeneratedFiles) as T;}
+					if (workspacePolicy && key === 'maxFileSizeKB') {return (workspacePolicy.maxFileSizeBytes / 1024) as T;}
 					const value = this.projectConfiguration(request.workspaceRoot, key);
 					return (value === undefined ? defaultValue : value) as T | undefined;
 				},
@@ -287,6 +292,8 @@ export class CoreRuntime {
 			workspaceRoot: request.workspaceRoot,
 			targetPath: request.targetPath,
 			mode: request.mode,
+			workspacePolicy: request.workspacePolicy,
+			includeExternalScanners: request.includeExternalScanners,
 			cancellationToken,
 			emitter: eventBus,
 			scannerContext: scannerContext as never,
@@ -531,7 +538,7 @@ function validateRequest(value: unknown): value is CoreRequestMessage {
 		case 'project.detect': case 'project.profile': case 'rag.status': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('currentFile');
 		case 'rag.index': return string('workspaceRoot') && (input.withAi === undefined || typeof input.withAi === 'boolean');
 		case 'rag.query': return string('workspaceRoot') && string('query') && (input.limit === undefined || typeof input.limit === 'number');
-		case 'scan.start': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('requestId') && optionalString('targetPath') && optionalString('currentFile') && (input.mode === undefined || ['quick', 'deep', 'analysis'].includes(String(input.mode)));
+		case 'scan.start': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('requestId') && optionalString('targetPath') && optionalString('currentFile') && (input.mode === undefined || ['quick', 'deep', 'analysis'].includes(String(input.mode))) && (input.includeExternalScanners === undefined || typeof input.includeExternalScanners === 'boolean') && (input.workspacePolicy === undefined || validateWorkspaceScanPolicy(input.workspacePolicy));
 		case 'scan.file': return validateFileScanRequest(input);
 		case 'scan.cancel': case 'scan.status': return optionalString('scanId');
 		case 'ai.models': return optionalString('providerId');
@@ -563,4 +570,18 @@ function validateFileScanRequest(input: Record<string, unknown>): boolean {
 		&& ['Critical', 'High', 'Medium', 'Low'].includes(String(rule.severity))
 		&& (rule.caseSensitive === undefined || typeof rule.caseSensitive === 'boolean')
 		&& (rule.extensions === undefined || (Array.isArray(rule.extensions) && rule.extensions.every((value) => typeof value === 'string'))));
+}
+
+function validateWorkspaceScanPolicy(value: unknown): boolean {
+	if (!isRecord(value)) {return false;}
+	const stringArray = (candidate: unknown): candidate is string[] => Array.isArray(candidate) && candidate.every((item) => typeof item === 'string');
+	if (!stringArray(value.supportedExtensions) || !stringArray(value.excludedDirectoryPaths) || !stringArray(value.excludedFileNamePatterns) || !stringArray(value.aqExclusionPatterns)) {return false;}
+	if (typeof value.maxFileSizeBytes !== 'number' || !Number.isSafeInteger(value.maxFileSizeBytes) || value.maxFileSizeBytes < 0) {return false;}
+	if (!['skipGeneratedFiles', 'skipMinifiedFiles', 'skipCompiledFiles'].every((key) => typeof value[key] === 'boolean')) {return false;}
+	return Array.isArray(value.customRules) && value.customRules.every((rule) => isRecord(rule)
+		&& typeof rule.id === 'string' && rule.id.length > 0
+		&& typeof rule.title === 'string' && typeof rule.message === 'string'
+		&& typeof rule.pattern === 'string' && ['Critical', 'High', 'Medium', 'Low'].includes(String(rule.severity))
+		&& (rule.extensions === undefined || stringArray(rule.extensions))
+		&& (rule.caseSensitive === undefined || typeof rule.caseSensitive === 'boolean'));
 }

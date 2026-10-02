@@ -7,8 +7,7 @@ import { AIProviderId, AISettings, AITaskDefaults, AIWebviewState as ProductionA
 import { normalizeProviderError } from '../ai/utils/request';
 import { AqironIssue, AqironSeverity, AqironWorkspaceStats, severityOrder } from '../models/issue';
 import { PipelineEvent, PipelineStageState, ToolExecutionState } from '../security/pipeline/events';
-import { WorkspaceScanner } from '../scanner/workspaceScanner';
-import { getIssueSkipReason, isFlutterWorkspace } from '../utils/files';
+import { getIssueSkipReason, isFlutterWorkspace, resolveWorkspaceScanPolicy } from '../utils/files';
 import { getCounts } from '../views/aqironTreeProvider';
 import { RagWorkspaceService } from '../rag/ragWorkspaceService';
 import { ThreatHistoryService, ThreatSnapshot } from '../security/threatHistoryService';
@@ -160,7 +159,6 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 	private readonly gitPromptedRoots = new Set<string>();
 	private readonly threatHistory = new ThreatHistoryService();
 	private readonly agentOutput = vscode.window.createOutputChannel('Aqiron Agent Tools');
-	private readonly agentScanner = new WorkspaceScanner(this.agentOutput);
 	private readonly activeAgentScans = new Map<string, string>();
 	private state: WebviewState = {
 		issues: [],
@@ -1034,7 +1032,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		this.agentOutput.appendLine(`[agent] ${tool.id}: ${prompt}`);
 		switch (tool.id) {
 			case 'secrets.scan':
-				return this.runSecretsScan();
+				return this.runSecretsScan(sessionId);
 			case 'workspace.scan':
 				return this.runWorkspaceScan(sessionId);
 			case 'dependencies.scan':
@@ -1048,33 +1046,74 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		}
 	}
 
-	private async runSecretsScan(): Promise<AgentToolResult> {
+	private async runSecretsScan(sessionId?: string): Promise<AgentToolResult> {
 		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 		if (!workspaceFolder) {
 			return unavailableToolResult('Hunt secrets', 'Open a workspace folder before running the secret scan.');
 		}
+		const workspaceRoot = workspaceFolder.uri.fsPath;
+		if (!isFlutterWorkspace(workspaceRoot)) {
+			return {
+				content: 'Secret scan complete. I scanned 0 files and found no hardcoded API keys, passwords, tokens, or private key material with the current Aqiron rules.',
+				commands: [
+					{ label: 'Hunt secrets', command: 'secrets.scan', status: 'complete' },
+					{ label: 'Workspace scanner', command: 'Scanned 0 files with Aqiron rules', status: 'complete' },
+				],
+				issues: mergeIssues(this.state.issues.filter((issue) => !isSecretRule(issue.ruleId)), []),
+				stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete', lastScanDurationMs: 0 },
+			};
+		}
+		const requestId = `agent-secrets-${createId()}`;
 		const startedAt = Date.now();
-		const result = await this.agentScanner.scanWorkspace(workspaceFolder);
-		const secretIssues = result.issues.filter((issue) => isSecretRule(issue.ruleId));
-		const stats = {
-			filesScanned: result.filesScanned,
-			indexedFiles: result.filesScanned,
-			scanStatus: 'Complete' as const,
-			lastScanDurationMs: Date.now() - startedAt,
+		const listener = (event: { event: string; requestId?: string; payload?: unknown }) => {
+			if (event.requestId !== requestId) {return;}
+			const pipelineEvent = toAgentPipelineEvent(event.payload);
+			if (pipelineEvent) {this.onPipelineEvent(pipelineEvent);}
 		};
-		const commands: ToolCommand[] = [
-			{ label: 'Hunt secrets', command: 'secrets.scan', status: 'complete' },
-			{ label: 'Workspace scanner', command: `Scanned ${result.filesScanned} files with Aqiron rules`, status: 'complete' },
-		];
-		const findings = secretIssues.slice(0, 5).map((issue) => `- ${issue.title} in ${path.relative(workspaceFolder.uri.fsPath, issue.file)}:${issue.range.startLine + 1}`).join('\n');
-		return {
-			content: secretIssues.length > 0
-				? [`Secret scan complete. Found ${secretIssues.length} potential secret finding${secretIssues.length === 1 ? '' : 's'}.`, findings].join('\n\n')
-				: `Secret scan complete. I scanned ${result.filesScanned} files and found no hardcoded API keys, passwords, tokens, or private key material with the current Aqiron rules.`,
-			commands,
-			issues: mergeIssues(this.state.issues.filter((issue) => !isSecretRule(issue.ruleId)), secretIssues),
-			stats,
-		};
+		if (sessionId) {this.activeAgentScans.set(sessionId, requestId);}
+		this.coreClient.on('event', listener);
+		try {
+			this.setScanStatus('Scanning');
+			const result = await this.coreClient.startScan({
+				requestId,
+				workspaceRoot,
+				targetPath: workspaceRoot,
+				mode: 'quick',
+				trusted: vscode.workspace.isTrusted,
+				currentFile: workspaceRoot,
+				workspacePolicy: resolveWorkspaceScanPolicy(workspaceRoot),
+				includeExternalScanners: false,
+			});
+			const secretFindings = result.findings.filter((finding) => isSecretRule(finding.ruleId));
+			const secretIssues = await findingsToAgentIssues(secretFindings);
+			const filesScanned = result.filesScanned ?? 0;
+			const findings = secretIssues.slice(0, 5).map((issue) => `- ${issue.title} in ${path.relative(workspaceRoot, issue.file)}:${issue.range.startLine + 1}`).join('\n');
+			return {
+				content: secretIssues.length > 0
+					? [`Secret scan complete. Found ${secretIssues.length} potential secret finding${secretIssues.length === 1 ? '' : 's'}.`, findings].join('\n\n')
+					: `Secret scan complete. I scanned ${filesScanned} files and found no hardcoded API keys, passwords, tokens, or private key material with the current Aqiron rules.`,
+				commands: [
+					{ label: 'Hunt secrets', command: 'secrets.scan', status: 'complete' },
+					{ label: 'Workspace scanner', command: `Scanned ${filesScanned} files with Aqiron rules`, status: 'complete' },
+				],
+				issues: mergeIssues(this.state.issues.filter((issue) => !isSecretRule(issue.ruleId)), secretIssues),
+				stats: { filesScanned, indexedFiles: filesScanned, scanStatus: 'Complete', lastScanDurationMs: Date.now() - startedAt },
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const cancelled = message.toLowerCase().includes('cancel');
+			const failure = cancelled ? 'Secret scan cancelled.' : `Secret scan failed: ${message}`;
+			this.agentOutput.appendLine(`[agent] ${failure}`);
+			if (!cancelled) {void vscode.window.showErrorMessage(`Aqiron Agent secret scan failed: ${message}`);}
+			return {
+				content: failure,
+				commands: [{ label: 'Hunt secrets', command: 'secrets.scan', status: 'unavailable' }],
+				stats: { scanStatus: 'Failed', lastScanDurationMs: Date.now() - startedAt },
+			};
+		} finally {
+			this.coreClient.removeListener('event', listener);
+			if (sessionId && this.activeAgentScans.get(sessionId) === requestId) {this.activeAgentScans.delete(sessionId);}
+		}
 	}
 
 	private async runWorkspaceScan(sessionId?: string): Promise<AgentToolResult> {
