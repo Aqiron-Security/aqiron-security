@@ -67,7 +67,7 @@ No duplicate implementation is declared safe to remove in Phase 1. Recommended m
 
 This section follows actual callers, not directory names. “Active” means a checked-in production caller reaches the path; “adapter-only” means it translates or delegates to another implementation.
 
-### Path A — workspace commands (Core is authoritative today)
+### Path A — VS Code workspace commands and Agent `workspace.scan` (Core-backed)
 
     VS Code command -> ScanController.scanWorkspace/analyzeWorkspace
       -> SecurityOrchestrator.scanWorkspace
@@ -88,33 +88,32 @@ Parser/normalization flow: Core scanner classes parse with packages/core/src/par
 
 CoreScanRequest.targetPath is supplied to registered scanners, but NativeWorkspaceScanner always traverses workspaceRoot. currentFile and trusted are not used by scan orchestration. The VS Code workspace command gates scans to Flutter workspaces even though Core runtime itself has no such gate.
 
-Event flow: CoreScanService emits PipelineEvent to a local bus; CoreRuntime wraps each payload in a Core event whose outer requestId is the request’s scan id; CoreProcessManager forwards it; CoreClient re-emits it; SecurityPipelineEngine unwraps it into orchestrator.events; ScanController forwards it to webview/output. The webview currently handles stage/tool/log/complete/cancelled/error variants.
+Event flow: CoreScanService emits PipelineEvent to a local bus; CoreRuntime wraps each payload in a Core event whose outer requestId is the request's scan id; CoreProcessManager forwards it and CoreClient re-emits it. The command path adapts through SecurityPipelineEngine and ScanController; Agent `workspace.scan` filters by its request id and adapts progress directly in AqironWebviewProvider. The webview handles stage/tool/log/complete/cancelled/error variants.
 
-Tests: coreScanners tests ScannerManager mode selection and scanner classes; coreRuntime tests handshake/credentials but not scan.start; coreProcessManager tests framing/cancel/restart but not scan event correlation; coreModules tests correlation/graph; reportExporters tests formats; extension.test is sample-only. There is no end-to-end scan.start test asserting scanner order, result, report, cancellation and event identity.
+Tests: coreScanners tests ScannerManager mode selection and scanner classes; coreRuntime tests handshake/credentials; coreProcessManager tests framing/cancel/restart; coreScanIdentity tests scan.start result/event identity and cancellation; coreModules tests correlation/graph; reportExporters tests formats; Agent scan tests verify its Core adapter and projection. Scanner-order/report parity is not comprehensively asserted end-to-end.
 
-Status: Core owns the authoritative workspace command scan behavior today. SecurityOrchestrator and SecurityPipelineEngine are active VS Code adapters. Report persistence and issue/UI projection are client work.
+The AI Agent workspace tool uses the same Core scan.start operation directly from `AqironWebviewProvider`; its Agent-facing projection and request-correlated progress handling remain separate client adapter work. The Agent path retains the Flutter gate and first-folder selection but does not persist/show the generated Core report.
 
-### Path B — current-file and save/realtime scans (active separate implementation)
+Status: Core owns workspace security analysis for the main workspace commands and Agent `workspace.scan`. SecurityOrchestrator, SecurityPipelineEngine and the Agent provider are VS Code adapters. Report persistence and issue/UI projection are client work.
+
+### Path B — current-file and save/realtime scans (Core-backed; post-fix helper remains local)
 
     scanCurrentFile / onDidSaveTextDocument
-      -> ScanController.scanDocument
-      -> WorkspaceScanner.scanDocument
-      -> scanContent plus VS Code customRules
-      -> AqironIssue -> diagnostics and views
+      -> ScanController current-file/realtime adapter
+      -> CoreClient.fileScan -> scan.file -> UnifiedFinding
+      -> VS Code issue/diagnostic projection
 
-This path does not call CoreClient, Core IPC, Core scanner manager, Core parser/correlation/report flow. It is implemented by src/scanner/workspaceScanner.ts and src/scanner/rules.ts. It is called by current-file scanning, on-save scanning, and after fixCurrentFile. It uses active unsaved document text, VS Code file discovery, and an mtime/size in-memory cache for file reads. No focused WorkspaceScanner or scanContent tests were found.
+`WorkspaceScanner.scanDocument` remains in the separate `fixCurrentFile` rescan path only; realtime and the current-file command no longer invoke it. Realtime keeps its VS Code-owned 800 ms debounce, latest document buffer read, Flutter eligibility gate and workspace fallback when the controller is busy. VS Code resolves the file policy and reconstructs source-line context at the adapter edge. See `docs/architecture/file-scan-contract.md`.
 
-Behavior differs from Path A: the controller restricts it to Flutter; it uses supportedGlob/excludeGlob, configurable size limits and custom rules; scanContent has language-specific rules and some rule ids not present in Core native rules; and it returns AqironIssue without external scanner results, Core normalization, correlation, graph or report. Core uses a different native rule set, fixed runtime configuration/exclusions, plus external scanners. Redirecting this path would change scanner coverage, rules, custom-rule behavior, cache, unsaved-content behavior and results. It is active but not safe to mechanically redirect.
+The remaining post-fix helper still uses local `scanContent` rules and writes the WorkspaceScanner cache entry. It should be assessed separately before removal.
 
-### Path C — AI-agent workspace/secret tools (active separate implementation)
+### Path C — AI-agent workspace/secret tools (workspace migrated; secret remains legacy)
 
     Webview runAgentTool
-      -> runWorkspaceScan / runSecretsScan
-      -> agentScanner.scanWorkspace
-      -> WorkspaceScanner + scanContent
-      -> secret filtering / agent response and webview state
+      -> workspace.scan -> CoreClient.startScan -> scan.start -> Core findings -> Agent projection
+      -> secrets.scan -> agentScanner.scanWorkspace -> WorkspaceScanner + scanContent -> secret filtering / webview state
 
-src/webview/aqironWebviewProvider.ts routes workspace.scan and secrets.scan here. It does not run Core orchestration. It inherits WorkspaceScanner's Flutter restriction and does not generate Core correlation/report results. There are no dedicated tests for these methods. Migration must preserve secret-only filtering and response shape.
+src/webview/aqironWebviewProvider.ts routes workspace.scan to Core with the first workspace root, the existing Flutter gate, deep mode and the actual VS Code trust value. It adapts UnifiedFinding to AqironIssue and forwards request-correlated pipeline events. The workspace migration is covered in `docs/architecture/agent-workspace-scan-migration.md`. `secrets.scan` continues to use the provider-owned WorkspaceScanner and preserves secret-only filtering, merge behavior, five-location summary limit and result shape.
 
 ### Other duplicate-looking paths
 
@@ -127,7 +126,7 @@ src/webview/aqironWebviewProvider.ts routes workspace.scan and secrets.scan here
 | src/security/reports/reportGenerator.ts | Forwards report generation to Core; no production call to its class found. ScanController passes an executive-summary callback that SecurityOrchestrator ignores. | Adapter-only, apparently unused for workspace scans. |
 | src/security/reports/reportStorage.ts | Called by active Core pipeline adapter to persist JSON/SARIF/PDF. | Active VS Code-specific artifact persistence. |
 | src/security/analysis/aiVulnerabilityAnalysisService.ts | Calls separate Core ai.vulnerabilityAnalysis IPC operation. | Active adapter for separate analysis, not scan.start. |
-| src/scanner/workspaceScanner.ts and src/scanner/rules.ts | Called by Paths B/C. | Active duplicate scan implementation; unsafe to remove now. |
+| src/scanner/workspaceScanner.ts and src/scanner/rules.ts | Current-file/realtime callers have migrated; still used by Agent `secrets.scan` and the post-fix current-document scan. | Active legacy implementation; unsafe to remove now. |
 
 ### Scan identity findings
 

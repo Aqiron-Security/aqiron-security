@@ -69,7 +69,7 @@ The actual runtime dispatch in `CoreRuntime.handle` is the authoritative method 
 | `credentials.status`, `credentials.set`, `credentials.delete`, `credentials.exists` | Generic credential service operations | Credential storage implementation is injected/defaulted by the host runtime. Client must own consent and secret-entry UX. |
 | `report.generate` | Generic report operation | Accepts findings/correlation/graph/telemetry or a scan id and returns report content. |
 | Webview commands such as `focus`, `setZoom`, `ready`, `setupComplete`, `openIssue`, `checkoutBranch`, `createBranch`, `openPolicy`, `openRagSettings` | VS Code/UI-specific | These are not Core IPC. They are handled by the webview provider/host. |
-| Webview intent such as `scanWorkspace`, `cancelScan`, `sendChat`, `ignoreIssue`, `exportReport` | UI-to-client interaction | Provider currently dispatches them; translate to generic Core APIs where appropriate. Keep the message contract distinct from Core protocol. |
+| Webview intent such as `scanWorkspace`, `cancelScan`, `sendChat`, `ignoreIssue`, `exportReport` | UI-to-client interaction | Provider currently dispatches them; `workspace.scan` for Agent uses generic `scan.start`, while `secrets.scan` retains its local adapter. Keep the message contract distinct from Core protocol. |
 
 The webview contract is currently `{ command: string; payload?: unknown }`. Provider inbound cases are at `aqironWebviewProvider.ts:356-524`; outbound `postMessage` updates send a large UI state projection. A future client should not implement this contract.
 
@@ -137,6 +137,10 @@ sequenceDiagram
 ### VS Code
 
 VS Code owns command palette and editor commands, active-file/workspace selection, workspace trust interaction, diagnostics/quick fixes, tree/webview presentation, notifications, opening source locations, branch/Git actions, settings UI, and choosing export destinations. It adapts these inputs to Core requests and maps Core events/results to VS Code views. It should not own scanner execution, parser rules, correlation semantics, AI analysis, RAG retrieval or report model generation.
+
+### Agent workspace scan migration
+
+**Current:** Agent tool selection, summary wording, commands, state and UI projection remain in `AqironWebviewProvider`. The Agent's `workspace.scan` adapter calls `CoreClient.startScan` (`scan.start`) with the first workspace root, that root as target, deep mode, and the actual `vscode.workspace.isTrusted` value. The adapter preserves the existing Flutter-only gate, converts Core `UnifiedFinding` values to `AqironIssue`, and forwards only request-correlated Core pipeline progress. `secrets.scan` still uses `WorkspaceScanner.scanWorkspace` and keeps its filtering/merge/redaction behavior. See [agent-workspace-scan-migration.md](agent-workspace-scan-migration.md) for observed differences and migration caveats.
 
 ### CLI proof
 

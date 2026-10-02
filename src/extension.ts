@@ -23,7 +23,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	const scanner = new WorkspaceScanner(output);
 	const diagnostics = new DiagnosticManager();
 	const rag = new RagWorkspaceService(context, aiService);
-	const sidebar = new AqironWebviewProvider(context, 'agent', aiService, rag);
+	const sidebar = new AqironWebviewProvider(context, 'agent', aiService, rag, coreClient);
 	const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
 	const controller = new ScanController(scanner, diagnostics, sidebar, statusBar, output, aiService, rag, createAiSummaryGenerator(aiService), coreClient);
 
