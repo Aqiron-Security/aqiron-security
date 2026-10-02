@@ -51,18 +51,18 @@ suite('AI agent scan characterization', () => {
 		assert.deepEqual(scanContent('config.js', 'const aws = "akia1234567890abcd";').filter(issue => issue.ruleId.startsWith('critical.')), [], 'fixed provider-token patterns remain case-sensitive');
 	});
 
-	test('Core native workspace rules do not provide the legacy cross-language secret rule contract', async () => {
+	test('Core native file rules provide the deterministic legacy secret contract', async () => {
 		const scanner = new NativeWorkspaceScanner({} as never);
 		const javascript = await scanner.scanFileContent('src/config.js', 'const api_key = "0123456789abcdef";\nconst aws = "AKIA1234567890ABCDEF";', 'gap-test', {
 			supportedExtensions: ['.js'], excludedPaths: [], maxFileSizeBytes: null, skipGeneratedFiles: false,
 			skipMinifiedFiles: false, skipCompiledFiles: false, eligible: true, customRules: [],
 		});
-		assert.deepEqual(javascript.findings.filter(finding => finding.ruleId.startsWith('critical.')), []);
+		assert.deepEqual(javascript.findings.filter(finding => finding.ruleId.startsWith('critical.')).map(finding => finding.ruleId), ['critical.api-key', 'critical.api-key']);
 		const dart = await scanner.scanFileContent('lib/config.dart', 'const api_key = "0123456789abcdef";', 'gap-test-dart', {
 			supportedExtensions: ['.dart'], excludedPaths: [], maxFileSizeBytes: null, skipGeneratedFiles: false,
 			skipMinifiedFiles: false, skipCompiledFiles: false, eligible: true, customRules: [],
 		});
-		assert.ok(dart.findings.some(finding => finding.ruleId === 'native.dart.hardcoded-secret'));
+		assert.ok(dart.findings.some(finding => finding.ruleId === 'critical.api-key'));
 	});
 
 	test('workspace tool returns every scanner issue with the current summary and stats shape', async () => {

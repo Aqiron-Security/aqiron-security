@@ -188,10 +188,16 @@ An investigation aggregate can own hypothesis text, scope/constraints, linked ob
 
 - Do not expand the CLI proof into a production CLI or implement Desktop.
 - Do not split the repository or publish `@aqiron/core`.
-- Do not rewrite Core, merge duplicate implementations wholesale, or change which scanner runs.
-- Do not change scanner ordering, modes, parsers, rules, defaults or findings.
+- Do not rewrite Core or merge duplicate implementations wholesale.
+- Do not change scanner ordering, modes, parsers, or unrelated rules/defaults/findings.
 - Do not migrate UI settings or persistence without a cross-client ownership decision.
 - Do not turn webview message names into Core protocol methods.
 - Do not add autonomous exploitation, validation actions, or an offensive engine.
 - Do not expand the finding model with hypothesis/evidence/investigation lifecycle fields.
 - Do not treat every existing Core IPC method as a stable public API until schemas, compatibility and host adapters are validated.
+
+### Deterministic secret rules
+
+**Current:** Core's native scanner includes deterministic secret rules with the legacy IDs `critical.api-key`, `critical.secret`, `critical.password`, and `critical.private-key`. They are shared by Core workspace scans and `scan.file`, use the characterized legacy patterns/case behavior, and emit source locations plus safe metadata without copying the matched source line into finding evidence. The previous Dart-only rule remains as a fallback for shorter literals outside those patterns. Adjacent native findings on a matching line also omit raw line evidence.
+
+**Not migrated:** Agent `secrets.scan` still uses its existing VS Code scanner, filtering, state merge, summary limit, and webview redaction. Adding Core detection parity does not yet establish workspace policy/scope parity; see [Agent workspace scan migration](agent-workspace-scan-migration.md).

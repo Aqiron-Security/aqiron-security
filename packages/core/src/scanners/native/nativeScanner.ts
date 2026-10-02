@@ -10,6 +10,16 @@ export interface NativeRuleScanResult {
 	durationMs: number;
 }
 
+const legacySecretRules: Array<{ pattern: RegExp; id: string; title: string; description: string }> = [
+	{ pattern: /\b(?:api[_-]?key|client[_-]?secret|access[_-]?key)\b\s*[:=]\s*['"][A-Za-z0-9_\-./+=]{16,}['"]/i, id: 'critical.api-key', title: 'Hardcoded API Key', description: 'Move hardcoded API keys to a secret manager or environment variable.' },
+	{ pattern: /\bAKIA[0-9A-Z]{16}\b/, id: 'critical.api-key', title: 'Hardcoded API Key', description: 'AWS access keys must not be stored in source code.' },
+	{ pattern: /\bAIza[0-9A-Za-z_\-]{35}\b/, id: 'critical.api-key', title: 'Hardcoded API Key', description: 'Google API keys must not be stored in source code.' },
+	{ pattern: /\b(?:sk|pk)_(?:live|test)_[0-9A-Za-z]{20,}\b/, id: 'critical.api-key', title: 'Hardcoded API Key', description: 'Provider API keys must not be stored in source code.' },
+	{ pattern: /\b(?:secret|token)\b\s*[:=]\s*['"][A-Za-z0-9_\-./+=]{16,}['"]/i, id: 'critical.secret', title: 'Hardcoded Secret', description: 'Move hardcoded secrets to a protected secret source.' },
+	{ pattern: /\bpassword\b\s*[:=]\s*['"][^'"\s]{8,}['"]/i, id: 'critical.password', title: 'Hardcoded Password', description: 'Move hardcoded passwords to a protected secret source.' },
+	{ pattern: /-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/, id: 'critical.private-key', title: 'Private Key Material', description: 'Private key material must not be stored in source code.' },
+];
+
 /** Portable baseline rules used when external SAST binaries are unavailable. */
 export class NativeWorkspaceScanner {
 	constructor(private readonly filesystem: FileSystem) {}
@@ -323,22 +333,49 @@ function scanFile(file: string, content: string): UnifiedFinding[] {
 	}
 	const extension = path.extname(file).toLowerCase();
 	const lines = content.split(/\r?\n/);
+	const executableLines = stripFileComments(content, extension).split(/\r?\n/);
 	const findings: UnifiedFinding[] = [];
 	for (let index = 0; index < lines.length; index += 1) {
-		findings.push(...scanSourceLine(file, lines[index], index, extension, true));
+		findings.push(...scanSourceLine(file, lines[index], index, extension, true, false, executableLines[index] ?? lines[index]));
+		findings.push(...scanLegacySecretRules(file, executableLines[index] ?? lines[index], index));
 	}
 	return findings;
 }
 
-function scanSourceLine(file: string, line: string, index: number, extension: string, includeEvidence: boolean): UnifiedFinding[] {
+function scanSourceLine(file: string, line: string, index: number, extension: string, includeEvidence: boolean, includeSecretRules = true, evidenceScanLine = line): UnifiedFinding[] {
 	const rules = extension === '.dart' ? dartRules(line) : extension === '.py' ? pythonRules(line) : extension === '.xml' ? androidRules(line) : dockerRules(file, line);
-	return rules.filter((rule) => Boolean(rule.id)).map((rule) => createFinding({
+	const secretFindings = includeSecretRules ? scanLegacySecretRules(file, line, index) : [];
+	const legacySecretMatchesSource = hasLegacySecret(evidenceScanLine);
+	const hasNativeDartSecret = rules.some((rule) => rule.id === 'native.dart.hardcoded-secret');
+	const suppressEvidence = hasLegacySecret(line) || hasLegacySecret(evidenceScanLine) || hasNativeDartSecret;
+	const findings = rules.filter((rule) => Boolean(rule.id) && (rule.id !== 'native.dart.hardcoded-secret' || !legacySecretMatchesSource)).map((rule) => createFinding({
 		title: rule.title, description: rule.description, severity: rule.severity, cwe: rule.cwe, owasp: rule.owasp,
 		file, line: index + 1, column: Math.max(1, line.indexOf(rule.match) + 1), sourceTool: 'Aqiron', ruleId: rule.id,
 		confidence: 'Medium', remediation: rule.remediation, tags: ['flutter', 'portable', 'native-rule'],
 		...(!includeEvidence ? { endColumn: Math.max(1, line.indexOf(rule.match) + 1) + rule.match.length } : {}),
-		rawEvidence: includeEvidence ? { line: line.slice(0, 500) } : undefined,
+		rawEvidence: includeEvidence && !suppressEvidence ? { line: line.slice(0, 500) } : undefined,
 	}));
+	return [...findings, ...secretFindings];
+}
+
+/** Deterministic, language-neutral secret rules retained from the characterized VS Code scanner. */
+function scanLegacySecretRules(file: string, line: string, index: number): UnifiedFinding[] {
+	return legacySecretRules.flatMap(({ pattern, id, title, description }) => {
+		const match = pattern.exec(line);
+		if (!match) {return [];}
+		const column = match.index + 1;
+		return [createFinding({
+			title, description, severity: 'Critical', cwe: ['CWE-798'], owasp: ['M2: Security Misconfiguration'],
+			file, line: index + 1, column, endColumn: column + match[0].length,
+			sourceTool: 'Aqiron', ruleId: id, confidence: 'High',
+			remediation: 'Rotate exposed credentials and move values into a managed secret store.',
+			tags: ['secret', 'credential', 'portable', 'native-rule'], rawEvidence: undefined,
+		})];
+	});
+}
+
+function hasLegacySecret(line: string): boolean {
+	return legacySecretRules.some(({ pattern }) => pattern.test(line));
 }
 
 function isMinifiedFile(filePath: string, content: string): boolean {
@@ -405,7 +442,7 @@ function match(line: string, pattern: RegExp, id: string, title: string, severit
 const emptyRule: Rule = { id: '', title: '', description: '', severity: 'Low', match: '', remediation: '', cwe: [], owasp: [] };
 
 function isSupported(file: string): boolean {
-	return /\.(dart|py|xml)$/i.test(file) || path.basename(file).toLowerCase() === 'dockerfile';
+	return /\.(dart|ts|tsx|js|jsx|py|rs|java|c|cpp|h|json|xml|yaml|yml|gradle|rules)$/i.test(file) || path.basename(file).toLowerCase() === 'dockerfile';
 }
 
 function isExcluded(file: string, root: string): boolean {
