@@ -89,7 +89,7 @@ node dist/aqiron-cli.js scan <path> --format sarif --output result.sarif --trust
 node dist/aqiron-cli.js scan <path> --fail-on high --trust-local-workspace
 ```
 
-The trust flag is required before a local workspace is sent to Core as trusted. Text is the default output; JSON and SARIF use Core's report data. Output goes to stdout unless `--output` is given; existing output files are not overwritten. Exit code `0` indicates a completed scan without a configured severity violation, `1` indicates a Core/runtime/cancellation/output failure or a matching `--fail-on` finding, and `2` indicates invalid usage or input. This is not yet a published package, and the repository currently has no suitable GitHub Actions workflow for invoking it reliably. See [CLI architecture and JSON shape](docs/architecture/cli-prototype.md) for details and limitations.
+The trust flag is required before a local workspace is sent to Core as trusted. Text is the default output; JSON and SARIF use Core's report data. Output goes to stdout unless `--output` is given; existing output files are not overwritten. Exit code `0` indicates a completed scan without a configured severity violation, `1` indicates a Core/runtime/cancellation/output failure or a matching `--fail-on` finding, and `2` indicates invalid usage or input. The CLI is built from source and is not yet a published standalone package. [CLI architecture and JSON shape](docs/architecture/cli-prototype.md) includes a minimal consumer-side GitHub Actions example that builds Aqiron from a source checkout, emits SARIF, and gates on severity; there is no repository-owned workflow or stable release distribution yet.
 
 ## Architecture
 
