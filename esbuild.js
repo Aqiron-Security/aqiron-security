@@ -59,6 +59,20 @@ async function main() {
 			esbuildProblemMatcherPlugin,
 		],
 	});
+	const cliCtx = await esbuild.context({
+		entryPoints: ['packages/cli/src/main.ts'],
+		bundle: true,
+		format: 'cjs',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'node',
+		outfile: 'dist/aqiron-cli.js',
+		banner: { js: '#!/usr/bin/env node' },
+		external: ['keytar'],
+		logLevel: 'silent',
+		plugins: [esbuildProblemMatcherPlugin],
+	});
 	const webviewCtx = await esbuild.context({
 		entryPoints: [
 			'src/webview/ui/index.tsx'
@@ -81,10 +95,10 @@ async function main() {
 		],
 	});
 	if (watch) {
-		await Promise.all([extensionCtx.watch(), runtimeCtx.watch(), webviewCtx.watch()]);
+		await Promise.all([extensionCtx.watch(), runtimeCtx.watch(), cliCtx.watch(), webviewCtx.watch()]);
 	} else {
-		await Promise.all([extensionCtx.rebuild(), runtimeCtx.rebuild(), webviewCtx.rebuild()]);
-		await Promise.all([extensionCtx.dispose(), runtimeCtx.dispose(), webviewCtx.dispose()]);
+		await Promise.all([extensionCtx.rebuild(), runtimeCtx.rebuild(), cliCtx.rebuild(), webviewCtx.rebuild()]);
+		await Promise.all([extensionCtx.dispose(), runtimeCtx.dispose(), cliCtx.dispose(), webviewCtx.dispose()]);
 	}
 }
 
