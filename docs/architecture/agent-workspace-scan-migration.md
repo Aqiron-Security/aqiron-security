@@ -4,7 +4,7 @@
 
 ## `secrets.scan` inventory and Core parity decision
 
-**Decision: do not migrate in this change.** Core's available workspace scanner set cannot currently guarantee the legacy Agent secret contract. A Core-only migration would risk losing detectable secrets and changing Agent filtering because the legacy rule IDs and Core scanner rule IDs are not an equivalent set.
+**Decision: do not migrate in this change.** Core now has deterministic native rules for the legacy secret patterns and IDs. Agent `secrets.scan` remains on `WorkspaceScanner` until workspace eligibility, exclusion, size, and filtering behavior are characterized against the Core path; the new detector capability alone does not establish full scan parity.
 
 ### Exact legacy dependencies
 
@@ -17,13 +17,13 @@
 - **Projection/presentation:** all matching issues are retained in `AgentToolResult.issues`; the text summary includes the total and at most five path/line locations. Secret findings replace prior secret findings while prior non-secret Agent issues remain (`mergeIssues` dedupes by issue id). No-match text reports scanned file count. Scanner failures propagate to the enclosing Agent message handler, which presents a VS Code error.
 - **Privacy:** summary locations contain paths/lines, not values. Issue `lineText` may hold source text internally, but webview serialization redacts the matched secret source span before client state is posted. Keep this serialization boundary unchanged.
 
-### What Core currently covers and misses
+### Core secret capability added; Agent migration pending
 
-Core's always-present `NativeWorkspaceScanner` only enumerates Dart, Python, XML and Dockerfile targets, and its workspace rule function has one explicit secret rule: `native.dart.hardcoded-secret` for a subset of quoted assignment forms. It does not implement the seven legacy rule patterns or their legacy IDs across the VS Code extension's full supported extension set. Its Core file-only scanner adds custom-rule support but is not the workspace operation used by this Agent flow.
+Core's always-present `NativeWorkspaceScanner` now applies the seven characterized deterministic patterns with legacy IDs (`critical.api-key`, `critical.secret`, `critical.password`, `critical.private-key`) to files in its native workspace source/config scope and to explicit `scan.file` content. When one of these exact patterns overlaps Core's older Dart-only secret rule, Core emits the legacy-ID finding instead of a duplicate; the older rule remains as a Dart-specific fallback for shorter literals outside the legacy patterns. Native workspace enumeration includes the characterized legacy extension set for this capability; the pre-existing non-secret native rule set remains limited to its prior targets. Secret findings contain rule/location/safe metadata and omit source-line evidence. If a native finding on the same line could otherwise carry matched secret text as raw evidence, that evidence is omitted as well.
 
-Core can also register Betterleaks, Semgrep and Trivy scanners with secret capability. They may discover additional secrets when their executables/configuration are available, but they are optional, use tool-defined rule IDs/evidence, and do not guarantee the same seven legacy patterns, file scope, `.aq`/configured exclusions, size behavior or Agent filter matches. Betterleaks parser redacts raw evidence and tags findings as secret; however the Agent's established filter does not inspect tags. Scanner availability therefore does not prove parity.
+Optional Betterleaks, Semgrep and Trivy scanners may add other secret findings with tool-defined IDs. They remain distinct from the deterministic legacy-ID rules; the Agent's established filter still selects by case-sensitive ID substrings rather than tags.
 
-The minimum safe blocker to resolve before migration is a deterministic Core workspace secret capability whose detection coverage and stable IDs can represent the seven legacy patterns across the legacy supported scope (or a separately approved rule-ID/tag-aware Agent filter contract), with explicit workspace policy parity for exclusions and max size. The contract must keep secret material redacted in events/logging and preserve the Agent serializer redaction. Do not solve this by assuming an optional external binary is present or by running Core and the legacy scanner and unioning results.
+Remaining migration blockers are effective scope/policy parity: VS Code Flutter/project gating, VS Code file enumeration, configured/default exclusions, generated/minified/compiled policy, max file size, and the Agent-specific finding projection/merge behavior. Do not solve these by assuming optional tools are installed or by running both scanners and unioning results. The existing webview redaction boundary remains required even though Core's deterministic secret findings do not carry raw evidence.
 
 ## Call paths
 

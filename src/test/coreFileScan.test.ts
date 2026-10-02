@@ -22,7 +22,7 @@ suite('Core file scan contract', () => {
 		assert.equal(result.filePath, 'D:/workspace/lib/main.dart');
 		assert.equal(result.filesScanned, 1);
 		assert.equal(result.findingCount, 2);
-		assert.equal(result.findings[0].ruleId, 'native.dart.hardcoded-secret');
+		assert.equal(result.findings[0].ruleId, 'critical.api-key');
 		assert.equal(result.findings[1].ruleId, 'low.unused-variable');
 		assert.equal(result.findings[0].file, result.filePath);
 		assert.equal('rawEvidence' in result.findings[0] ? result.findings[0].rawEvidence : undefined, undefined);
