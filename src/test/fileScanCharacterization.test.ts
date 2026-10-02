@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ScanController } from '../commands/scanController';
@@ -7,7 +8,7 @@ import { DiagnosticManager } from '../diagnostics/diagnosticManager';
 import { AqironScanResult } from '../models/issue';
 import { WorkspaceScanner } from '../scanner/workspaceScanner';
 import { scanContent } from '../scanner/rules';
-import { getMaxFileSizeBytes, getSkipReason, isFlutterWorkspace, isSupportedFile, supportedExtensions } from '../utils/files';
+import { defaultAqExclusions, getMaxFileSizeBytes, getSkipReason, isFlutterWorkspace, isSupportedFile, resolveWorkspaceScanPolicy, supportedExtensions } from '../utils/files';
 import { AqironWebviewController } from '../webview/aqironWebviewProvider';
 import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
 import { CoreFileScanRequest, CoreFileScanResult } from '../../packages/core/src/shared/fileScan';
@@ -279,10 +280,57 @@ suite('Legacy file scan characterization', () => {
 				const result = await new WorkspaceScanner(quietOutput()).scanFile(vscode.Uri.file(oversized));
 				assert.equal(result.filesScanned, 0);
 				assert.deepEqual(result.issues, []);
+				assert.ok(!('skipReason' in result), 'legacy adapter aggregates skipped targets as zero scanned without a reason field');
 			} finally {
 				await fs.rm(oversized, { force: true });
 			}
 		});
+	});
+
+	test('resolves deterministic workspace policy from effective VS Code settings and .aq rules', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-workspace-policy-'));
+		const aqFile = path.join(root, '.aq');
+		await fs.writeFile(aqFile, 'private/\n!private/keep.dart\n*.local\n# ignored comment\n', 'utf8');
+		try {
+			await withWorkspaceFolder({ uri: vscode.Uri.file(root), name: 'Resolved policy fixture', index: 0 }, async () => {
+				await withSettingsAsync({ excludeFolders: ['vendor', 'ios\\Pods'], scanGeneratedFiles: true, maxFileSizeKB: 128 }, async () => {
+					const first = resolveWorkspaceScanPolicy(root);
+					const second = resolveWorkspaceScanPolicy(root);
+					assert.deepEqual(first, second, 'same host settings and .aq input resolve deterministically');
+					assert.deepEqual(first.supportedExtensions, [
+						'.dart', '.ts', '.tsx', '.js', '.jsx', '.py', '.rs', '.java', '.c', '.cpp', '.h', '.json', '.xml', '.yaml', '.yml', '.gradle', '.rules',
+					]);
+					assert.ok(first.excludedDirectoryPaths.includes('vendor'));
+					assert.ok(first.excludedDirectoryPaths.includes('ios/pods'));
+					assert.ok(first.excludedDirectoryPaths.includes('node_modules'));
+					assert.deepEqual(first.excludedFileNamePatterns, ['*.g.dart', '*.freezed.dart', '*.generated.*', '*.mocks.dart', '*.mock.dart', '*.config.dart']);
+					assert.deepEqual(first.aqExclusionPatterns, [...defaultAqExclusions, 'private/', '!private/keep.dart', '*.local']);
+					assert.equal(first.maxFileSizeBytes, 128 * 1024);
+					assert.equal(first.skipGeneratedFiles, false, 'scanGeneratedFiles=true disables generated-file skipping');
+					assert.equal(first.skipMinifiedFiles, true);
+					assert.equal(first.skipCompiledFiles, true);
+					assert.ok(!('eligible' in first), 'Flutter/project eligibility remains host-owned');
+					assert.ok(!('trusted' in first), 'workspace trust remains separate from scan policy');
+					assert.ok(!('content' in first), 'policy does not carry source content');
+					assert.equal(getSkipReason(path.join(root, 'vendor', 'input.dart')), 'excluded folder');
+					assert.equal(getSkipReason(path.join(root, 'private', 'blocked.dart')), 'excluded by .aq');
+					assert.equal(getSkipReason(path.join(root, 'private', 'keep.dart')), undefined, 'ordered .aq negation preserves the existing re-include behavior');
+					assert.equal(getSkipReason(path.join(root, 'lib', 'model.generated.dart')), undefined, 'scanGeneratedFiles disables heuristic generated checks');
+					assert.equal(getSkipReason(path.join(root, 'lib', 'bundle.min.js')), 'minified file');
+					assert.equal(getSkipReason(path.join(root, 'lib', 'Main.class')), 'compiled output');
+				});
+				await withSettingsAsync({}, async () => {
+					const defaults = resolveWorkspaceScanPolicy(root);
+					assert.equal(defaults.maxFileSizeBytes, 512 * 1024);
+					assert.equal(defaults.skipGeneratedFiles, true);
+					assert.equal(defaults.skipMinifiedFiles, true);
+					assert.equal(defaults.skipCompiledFiles, true);
+					assert.equal(getSkipReason(path.join(root, 'lib', 'model.generated.dart')), 'generated code');
+				});
+			});
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	test('scanFile cache reuses results when path, size, and mtime match', async () => {
