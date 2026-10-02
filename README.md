@@ -104,7 +104,7 @@ Useful implementation references: [architecture diagrams](ARCHITECTURE_DIAGRAMS.
 - Optional external scanner installations/configuration for the corresponding checks: Betterleaks, OSV-Scanner, Semgrep, Trivy, and MobSF.
 - Optional credentials for one of the implemented AI providers (OpenRouter, OpenAI, Claude, or Gemini).
 
-Exact scanner invocation, target, and availability behavior is determined by the current scan mode and adapter. See the scanner implementations under [`packages/core/src/scanners/`](packages/core/src/scanners/) and extension-side scope/configuration in [`src/security/scanners/`](src/security/scanners/). Do not treat example commands in older design notes as proof that a tool runs in every mode.
+Exact scanner invocation, target, and availability behavior is determined by the current scan mode and Core adapter. Scanner implementations and parsers live under [`packages/core/src/scanners/`](packages/core/src/scanners/); the extension resolves client policy and presents results. Do not treat example commands in older design notes as proof that a tool runs in every mode.
 
 ## Build and run from source
 

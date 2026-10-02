@@ -4,7 +4,6 @@ import * as vscode from 'vscode';
 import { CancellationTokenLike, PipelineEventBus, findingToIssue, issueToFinding, SecurityReportBundle, SecurityGraph, UnifiedFinding } from '../../../packages/core/src';
 import { CoreScanResult } from '../../../packages/core/src/orchestration';
 import { getCoreClient } from '../../core/coreClientSingleton';
-import { WorkspaceScanner } from '../../scanner/workspaceScanner';
 import { ScannerResult } from '../scanners/types';
 import { createReportBundlePaths } from '../reports/reportStorage';
 
@@ -26,12 +25,7 @@ export interface OrchestratedScanResult {
 }
 
 export class SecurityPipelineEngine {
-	constructor(
-		private readonly nativeScanner: WorkspaceScanner,
-		private readonly events: PipelineEventBus,
-	) {
-		void this.nativeScanner;
-	}
+	constructor(private readonly events: PipelineEventBus) {}
 
 	async scanWorkspace(workspaceFolder: vscode.WorkspaceFolder, options: PipelineScanOptions = {}): Promise<OrchestratedScanResult> {
 		const client = getCoreClient();

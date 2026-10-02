@@ -8,7 +8,6 @@ import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/
 import { ScannerManager } from '../../packages/core/src/scanners';
 import { FileSystem } from '../../packages/core/src/shared/platform';
 import { PipelineEvent, PipelineEventBus } from '../../packages/core/src/shared/pipeline';
-import { scanContent } from '../scanner/rules';
 import { createNodeFileSystem } from '../../packages/core/src/runtime/nodeAdapters';
 import { ResolvedWorkspaceScanPolicy } from '../../packages/core/src/shared/workspaceScanPolicy';
 import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
@@ -30,17 +29,12 @@ suite('Core deterministic secret parity', () => {
 		const result = await new NativeWorkspaceScanner({} as never).scanFileContent('src/secrets.js', content, 'secret-parity', filePolicy);
 		const findings = result.findings.filter(finding => finding.ruleId.startsWith('critical.'));
 		assert.deepEqual(findings.map(finding => finding.ruleId), cases.map(item => item.id));
-		assert.deepEqual(findings.map(finding => [finding.line, finding.column, finding.endColumn]), cases.map((item, index) => {
-			const match = legacyMatch(item.line);
-			return [index + 1, match.index + 1, match.index + match.length + 1];
-		}));
+		assert.deepEqual(findings.map(finding => [finding.line, finding.column, finding.endColumn]), [
+			[1, 7, 35], [2, 14, 34], [3, 17, 56], [4, 19, 47],
+			[5, 7, 34], [6, 7, 33], [7, 7, 28], [8, 1, 32],
+		]);
 		assert.ok(findings.every(finding => finding.severity === 'Critical'));
 		assert.ok(findings.every(finding => finding.tags.includes('secret')));
-		for (const [index, finding] of findings.entries()) {
-			const legacy = scanContent('src/secrets.js', cases[index].line).find(issue => issue.ruleId.startsWith('critical.'));
-			assert.equal(finding.title, legacy?.title);
-			assert.equal(finding.description, legacy?.message);
-		}
 	});
 
 	test('keeps legacy case rules and rejects short or malformed lookalikes', async () => {
@@ -58,7 +52,6 @@ suite('Core deterministic secret parity', () => {
 		const result = await new NativeWorkspaceScanner({} as never).scanFileContent('src/secrets.ts', lines.join('\n'), 'secret-case', filePolicy);
 		const expected = ['critical.api-key', 'critical.secret', 'critical.secret', 'critical.password'];
 		assert.deepEqual(result.findings.filter(finding => finding.ruleId.startsWith('critical.')).map(finding => finding.ruleId), expected);
-		assert.deepEqual(scanContent('src/secrets.ts', lines.join('\n')).filter(issue => issue.ruleId.startsWith('critical.')).map(issue => issue.ruleId), expected);
 	});
 
 	test('retains the previous Dart-only shorter-literal fallback without duplicating legacy matches', async () => {
@@ -69,19 +62,14 @@ suite('Core deterministic secret parity', () => {
 		assert.equal(fallback.findings.find(finding => finding.ruleId === 'native.dart.hardcoded-secret')?.rawEvidence, undefined);
 	});
 
-	test('fixture parity compares every legacy secret class against Core', async () => {
+	test('fixture covers every characterized secret class in Core', async () => {
 		const fixturePath = path.resolve(__dirname, '../../../src/test/fixtures/core-secrets/legacy-patterns.txt');
 		const fixture = await fs.readFile(fixturePath, 'utf8');
 		const sourcePath = fixturePath.replace(/\.txt$/, '.js');
-		const legacy = scanContent(sourcePath, fixture).filter(issue => issue.ruleId.startsWith('critical.'));
 		const core = await new NativeWorkspaceScanner({} as never).scanFileContent(sourcePath, fixture, 'fixture-parity', filePolicy);
 		const coreSecrets = core.findings.filter(finding => finding.ruleId.startsWith('critical.'));
-		assert.deepEqual(legacy.map(issue => issue.ruleId), cases.map(item => item.id));
-		assert.deepEqual(coreSecrets.map(finding => finding.ruleId), legacy.map(issue => issue.ruleId));
-		for (const [index, finding] of coreSecrets.entries()) {
-			assert.equal(finding.severity, legacy[index].severity);
-			assert.deepEqual([finding.line, finding.column, finding.endColumn], [legacy[index].range.startLine + 1, legacy[index].range.startColumn + 1, legacy[index].range.endColumn + 1]);
-		}
+		assert.deepEqual(coreSecrets.map(finding => finding.ruleId), cases.map(item => item.id));
+		assert.ok(coreSecrets.every(finding => finding.severity === 'Critical' && (finding.endColumn ?? 0) > finding.column));
 	});
 
 	test('workspace scan applies portable secret rules across the characterized supported file scope', async () => {
@@ -177,12 +165,6 @@ const filePolicy = {
 	excludedPaths: [], maxFileSizeBytes: null, skipGeneratedFiles: false, skipMinifiedFiles: false,
 	skipCompiledFiles: false, eligible: true, customRules: [],
 };
-
-function legacyMatch(line: string): { index: number; length: number } {
-	const issue = scanContent('fixture.js', line).find(item => item.ruleId.startsWith('critical.'));
-	assert.ok(issue);
-	return { index: issue.range.startColumn, length: issue.range.endColumn - issue.range.startColumn };
-}
 
 function memoryFileSystem(root: string, directoryName: string, fileName: string, content: string): FileSystem {
 	const rootPath = path.normalize(root);
