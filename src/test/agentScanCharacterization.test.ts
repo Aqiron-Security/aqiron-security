@@ -7,6 +7,8 @@ import { AqironWebviewProvider } from '../webview/aqironWebviewProvider';
 import { CoreClient } from '../core/coreClient';
 import { CoreScanStartRequest, CoreScanStartResult } from '../../packages/core/src/runtime';
 import { createFinding, UnifiedFinding } from '../../packages/core/src/shared/finding';
+import { scanContent } from '../scanner/rules';
+import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/nativeScanner';
 
 interface AgentResult {
 	content: string;
@@ -33,6 +35,36 @@ interface AgentProviderHarness {
 }
 
 suite('AI agent scan characterization', () => {
+	test('legacy secret contract detects the seven current patterns with their existing rule IDs', () => {
+		const cases: Array<{ file: string; line: string; ruleId: string }> = [
+			{ file: 'config.js', line: 'const api_key = "0123456789abcdef";', ruleId: 'critical.api-key' },
+			{ file: 'config.js', line: 'const aws = "AKIA1234567890ABCDEF";', ruleId: 'critical.api-key' },
+			{ file: 'config.js', line: 'const google = "AIza12345678901234567890123456789012345";', ruleId: 'critical.api-key' },
+			{ file: 'config.js', line: 'const stripe = "sk_live_12345678901234567890";', ruleId: 'critical.api-key' },
+			{ file: 'config.js', line: 'const secret = "0123456789abcdef";', ruleId: 'critical.secret' },
+			{ file: 'config.js', line: 'const password = "12345678";', ruleId: 'critical.password' },
+			{ file: 'config.js', line: '-----BEGIN RSA PRIVATE KEY-----', ruleId: 'critical.private-key' },
+		];
+		for (const item of cases) {
+			assert.ok(scanContent(item.file, item.line).some(issue => issue.ruleId === item.ruleId), `${item.ruleId} should be detected for ${item.line}`);
+		}
+		assert.deepEqual(scanContent('config.js', 'const aws = "akia1234567890abcd";').filter(issue => issue.ruleId.startsWith('critical.')), [], 'fixed provider-token patterns remain case-sensitive');
+	});
+
+	test('Core native workspace rules do not provide the legacy cross-language secret rule contract', async () => {
+		const scanner = new NativeWorkspaceScanner({} as never);
+		const javascript = await scanner.scanFileContent('src/config.js', 'const api_key = "0123456789abcdef";\nconst aws = "AKIA1234567890ABCDEF";', 'gap-test', {
+			supportedExtensions: ['.js'], excludedPaths: [], maxFileSizeBytes: null, skipGeneratedFiles: false,
+			skipMinifiedFiles: false, skipCompiledFiles: false, eligible: true, customRules: [],
+		});
+		assert.deepEqual(javascript.findings.filter(finding => finding.ruleId.startsWith('critical.')), []);
+		const dart = await scanner.scanFileContent('lib/config.dart', 'const api_key = "0123456789abcdef";', 'gap-test-dart', {
+			supportedExtensions: ['.dart'], excludedPaths: [], maxFileSizeBytes: null, skipGeneratedFiles: false,
+			skipMinifiedFiles: false, skipCompiledFiles: false, eligible: true, customRules: [],
+		});
+		assert.ok(dart.findings.some(finding => finding.ruleId === 'native.dart.hardcoded-secret'));
+	});
+
 	test('workspace tool returns every scanner issue with the current summary and stats shape', async () => {
 		await withFlutterFixture(async fixtureRoot => {
 			const finding = makeFinding(path.join(fixtureRoot, 'lib', 'vulnerable.dart'), 'high.eval');
