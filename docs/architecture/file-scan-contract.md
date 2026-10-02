@@ -1,6 +1,6 @@
 # Core file-scan contract
 
-**Status:** `scan.file` backs the VS Code current-file command and save/realtime document path. Agent callers remain unmigrated; parity is path-specific.
+**Status:** `scan.file` backs VS Code current-file, save/realtime, and post-fix document scans. Agent workspace and secret scans use `scan.start`; parity guarantees remain operation-specific.
 
 ## Current
 
@@ -38,16 +38,16 @@ The file operation uses Core's native file-rule subset plus supplied portable re
 
 The result is `CoreFileScanResult`: canonical request-derived `scanId`, `filePath`, `state` (`completed` or `skipped`), optional bounded `skipReason`, canonical `UnifiedFinding[]`, `filesScanned`, `findingCount`, and `durationMs`. Malformed requests fail through the existing Core protocol error envelope. Cancellation uses existing `core.cancel` with the request id; start/completion events use that same id. The operation does not generate a report or telemetry snapshot.
 
-## Current-file migrated; other callers not migrated
+## File-scoped callers
 
-`ScanController.scanCurrentFile` and the debounced realtime/save adapter invoke `CoreClient.fileScan`, passing the editor/document's in-memory content and resolved policy. Both reconstruct `AqironIssue.lineText` locally from the same content snapshot. Workspace scans, workspace-Agent, and secret-Agent callers remain on their existing paths. `WorkspaceScanner` remains for Agent workspace scanning and the separate post-fix current-document flow; `scan.start` is unchanged. Client adapters continue to own:
+`ScanController.scanCurrentFile`, the debounced realtime/save adapter, and the post-fix current-document rescan invoke `CoreClient.fileScan`, passing the document's in-memory content and resolved policy. They reconstruct `AqironIssue.lineText` locally from that same content snapshot. Workspace and Agent workspace/secret scans use `scan.start`; `scan.start` behavior is unchanged. `WorkspaceScanner` remains in the tree for characterization compatibility and is still injected into the workspace adapter, but none of its scan methods is called by the post-fix flow. Client adapters continue to own:
 
 - resolving VS Code settings, workspace trust, Flutter/project gates, custom-rule configuration and `.aq`/glob semantics;
 - `TextDocument` access, save listeners, debounce, active-scan fallback, editor generations, cancellation UX and diagnostics;
 - Agent secret-only filtering, five-location message limit, issue merging, error presentation and result serialization;
 - conversion such as `UnifiedFinding → AqironIssue` and client-specific UI projection. Current-file projection preserves rule metadata, range, severity, and issue ID format; webview serialization continues through its existing redaction boundary.
 
-`excludedPaths` is intentionally a resolved path list, not a general glob language. VS Code `.aq` patterns and exclusion globs therefore need explicit resolution/adaptation before a caller can use this operation. The built-in scanner subset and skip heuristics also differ from the characterized VS Code implementation. Current callers must not be redirected until parity tests cover their own language rules, Flutter behavior, settings, exclusions, generated/minified/compiled policy, custom rules, size behavior, cache semantics, diagnostic/result mapping, Agent filtering and cancellation/error UX.
+`excludedPaths` is intentionally a resolved path list, not a general glob language. VS Code `.aq` patterns and exclusion globs therefore need explicit resolution/adaptation before a caller can use this operation. The built-in scanner subset and skip heuristics can differ from the characterized VS Code implementation. Any future caller must have parity tests for its language rules, Flutter behavior, settings, exclusions, generated/minified/compiled policy, custom rules, size behavior, cache semantics, diagnostic/result mapping, Agent filtering and cancellation/error UX.
 
 ## Future work
 

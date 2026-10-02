@@ -222,6 +222,35 @@ suite('Legacy file scan characterization', () => {
 		});
 	});
 
+	test('post-fix current-document rescan uses Core file scanning and preserves the issue projection', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const filePath = path.join(fixtureRoot, 'lib', 'post-fix.dart');
+			const content = "void main() {\n  print('remaining issue');\n}\n";
+			let capturedRequest: CoreFileScanRequest | undefined;
+			await withRealtimeController(async request => {
+				capturedRequest = request;
+				const response = await new CoreRuntime({ coreVersion: 'post-fix-scan-test' }).handle({
+					id: `post-fix-${process.pid}`, type: 'request', method: 'scan.file', params: request,
+				}, () => undefined);
+				if (!response.success) {throw new Error(response.error?.message ?? 'Core post-fix scan failed.');}
+				return response.result as CoreFileScanResult;
+			}, async controller => {
+				const document = documentAt(filePath, () => content);
+				await (controller as unknown as { scanDocument(document: vscode.TextDocument, showMessage?: boolean): Promise<void> }).scanDocument(document, true);
+				const actual = (controller as unknown as { diagnosticIssues: import('../models/issue').AqironIssue[] }).diagnosticIssues;
+				const expected = scanContent(filePath, content);
+				assert.deepEqual(actual.map(issue => [issue.id, issue.ruleId, issue.severity, issue.range.startLine, issue.range.startColumn, issue.range.endLine, issue.range.endColumn, issue.lineText]), expected.map(issue => [issue.id, issue.ruleId, issue.severity, issue.range.startLine, issue.range.startColumn, issue.range.endLine, issue.range.endColumn, issue.lineText]));
+				assert.equal((controller as unknown as { legacyCalls: number }).legacyCalls, 0, 'post-fix rescan must not invoke WorkspaceScanner.scanDocument');
+				assert.ok((controller as unknown as { outputLines: string[] }).outputLines.some(line => line.startsWith('Issues found: 1')));
+			});
+			assert.ok(capturedRequest);
+			assert.equal(capturedRequest.filePath, filePath);
+			assert.equal(capturedRequest.content, content, 'Core receives the current document buffer after the fix/save sequence');
+			assert.equal(capturedRequest.policy.eligible, true);
+			assert.ok(capturedRequest.policy.customRules.some(rule => rule.id === 'medium.print'));
+		});
+	});
+
 	test('current-file command retains workspace and Flutter gates without invoking Core', async () => {
 		const fixtureRoot = path.resolve(__dirname, '../../../src/test/fixtures/file-scan');
 		const file = path.join(fixtureRoot, 'outside.dart');

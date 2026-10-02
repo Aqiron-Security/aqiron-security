@@ -181,8 +181,19 @@ export class ScanController implements vscode.Disposable {
 
 	private async scanDocument(document: vscode.TextDocument, showMessage = false): Promise<void> {
 		await this.runScan(async () => {
-			const result = await this.scanner.scanDocument(document);
-			this.replaceFile(document.uri.fsPath, filterVisibleIssues(result.issues));
+			const startedAt = Date.now();
+			const filePath = document.uri.fsPath;
+			const workspaceRoot = vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath;
+			const eligible = Boolean(workspaceRoot && isFlutterWorkspace(workspaceRoot));
+			const content = document.getText();
+			const skipReason = !workspaceRoot || !eligible ? 'Flutter workspaces only' : getSkipReason(filePath, content);
+			this.output.appendLine(`Scan started: ${filePath}`);
+			if (skipReason) {this.output.appendLine(`Skipped ${filePath}: ${skipReason}`);}
+			const result = await this.scanDocumentWithCore(document, workspaceRoot, content, eligible, false);
+			this.output.appendLine(`Files scanned: ${skipReason ? 0 : 1}`);
+			this.output.appendLine(`Files skipped: ${skipReason ? 1 : 0}`);
+			this.output.appendLine(`Issues found: ${result.issues.length}`);
+			this.output.appendLine(`Scan time: ${Date.now() - startedAt}ms`);
 			if (showMessage) {
 				vscode.window.showInformationMessage(`Aqiron Security file scan completed: ${result.issues.length} issue${result.issues.length === 1 ? '' : 's'} found.`);
 			}

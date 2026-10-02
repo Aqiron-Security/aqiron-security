@@ -111,6 +111,6 @@ Portable policy now supplies custom rules, configured/default exclusions, `.aq`,
 ## Remaining implementation boundaries
 
 - `secrets.scan` now calls `CoreClient.startScan`; no production Agent secret caller invokes `WorkspaceScanner.scanWorkspace`. It filters findings with the existing case-sensitive ID substrings, merges/replaces state, retains all matched issues, caps text at five locations and uses the existing serializer redaction.
-- `WorkspaceScanner` and `src/scanner/rules.ts` remain for `ScanController` workspace/current-document paths and characterization coverage. No scanner code was deleted.
+- `WorkspaceScanner` and `src/scanner/rules.ts` remain for legacy characterization tests and policy-resolution helpers. The post-fix current-document rescan now uses `CoreClient.fileScan`; no production call site invokes `WorkspaceScanner.scanDocument`, `scanFile`, or `scanWorkspace`. No scanner code was deleted.
 - Core progress forwarding filters by the supplied request id and only maps existing stage, scanner, output, completion, cancellation and failure events. Finding events are not copied into Agent progress state.
 - The adapter sends `vscode.workspace.isTrusted`; Core's current workspace scan does not use that flag to deny or alter scanning. A future trust/policy decision must be implemented explicitly in Core/runtime contracts.
