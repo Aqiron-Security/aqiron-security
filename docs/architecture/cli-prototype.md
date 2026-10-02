@@ -11,10 +11,38 @@ npm run cli:build
 node dist/aqiron-cli.js scan <path> --trust-local-workspace
 ```
 
-The build emits `dist/aqiron-cli.js` and `dist/core-runtime.js` together. The CLI adapter explicitly supplies the runtime path to the shared Core client, so location is host configuration rather than a path assumption inside the transport. No npm package is published. The repository has no GitHub Actions workflow suitable for reliable CLI invocation yet, so a CI workflow is future work:
+The build emits `dist/aqiron-cli.js` and `dist/core-runtime.js` together. The CLI adapter explicitly supplies the runtime path to the shared Core client, so location is host configuration rather than a path assumption inside the transport. No npm package is published. The CLI can be built from this source checkout in a workflow, but Aqiron does not yet publish a standalone CLI artifact or package. This example shows that source-build path for a Flutter project; pin the Aqiron checkout to a reviewed commit before using it in a production workflow. It saves SARIF as an artifact and gates the job at High severity:
 
-```text
-GitHub Actions → Aqiron CLI → Aqiron Core → SARIF
+```yaml
+name: Aqiron scan
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Get Aqiron CLI source
+        run: git clone --depth 1 https://github.com/Aqiron-Security/aqiron-security.git "$RUNNER_TEMP/aqiron-cli-source"
+      - run: npm ci
+        working-directory: ${{ runner.temp }}/aqiron-cli-source
+      - run: npm run cli:build
+        working-directory: ${{ runner.temp }}/aqiron-cli-source
+      - name: Scan workspace
+        run: >-
+          node "$RUNNER_TEMP/aqiron-cli-source/dist/aqiron-cli.js" scan .
+          --format sarif --output aqiron-results.sarif
+          --fail-on high --trust-local-workspace
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aqiron-sarif
+          path: aqiron-results.sarif
+          if-no-files-found: ignore
 ```
 
 ## Commands and behavior
@@ -26,7 +54,7 @@ aqiron scan <path> --format sarif --output result.sarif --trust-local-workspace
 aqiron scan <path> --fail-on high --trust-local-workspace
 ```
 
-During repository development, invoke these as `node dist/aqiron-cli.js ...` or `npm run cli -- ...`. `--format` accepts only `text` (default), `json`, or `sarif`. Results go to stdout unless `--output <path>` is supplied. Output files are created exclusively; an existing file is never overwritten. `--output` may also be used with text format.
+During repository development, invoke these as `node dist/aqiron-cli.js ...` or `npm run cli -- ...`. `--format` accepts only `text` (default), `json`, or `sarif`. Results go to stdout unless `--output <path>` is supplied. Output files are created exclusively; an existing file is never overwritten. If writing a newly-created artifact fails, the CLI attempts to remove the incomplete file. `--output` may also be used with text format. Machine-readable output never includes progress events or text banners on stdout; diagnostics and threshold violations go to stderr.
 
 The JSON document has this stable top-level shape:
 
@@ -45,7 +73,7 @@ The JSON document has this stable top-level shape:
 
 `report` is the existing Core JSON report representation, including its summary and canonical findings; raw evidence uses the Core exporter's redaction behavior and unavailable optional scan measurements are `null`. SARIF is the existing `report.sarif` representation returned by Core's scan result. The CLI does not construct a report model or SARIF.
 
-Exit codes are exact: `0` means the scan completed and no `--fail-on` threshold was violated; `1` means Core startup/scan failure, cancellation, output failure, or a matching finding; `2` means invalid command, option, format, severity, missing explicit trust, or invalid workspace path. `--fail-on critical|high|medium|low` checks actual Core findings and includes all severities at or above the requested level. Findings alone do not fail an un-gated scan.
+Exit codes are exact: `0` means the scan completed and no `--fail-on` threshold was violated; `1` means Core startup/scan failure, cancellation, output failure, or a matching finding; `2` means invalid command, option, duplicate option, format, severity, missing explicit trust, or invalid workspace path. `--fail-on critical|high|medium|low` checks actual Core findings and includes all severities at or above the requested level. A threshold violation writes a count-only diagnostic to stderr. Findings alone do not fail an un-gated scan.
 
 The workspace must be an accessible local directory. The `--trust-local-workspace` option is required and is the only condition under which this CLI sends `trusted: true` to Core. It acknowledges the caller's choice; it does not add a new trust policy framework. Scans use Core's existing deep workspace scan semantics.
 
@@ -67,4 +95,4 @@ The host-neutral client is shared with the VS Code adapter and imports protocol/
 - **Near-term:** only if another consumer needs it, define a stable package subpath/version policy. A GitHub Actions workflow can invoke CLI and consume SARIF after CLI distribution is reliable.
 - **Future Desktop:** pass Desktop runtime location and lifecycle choices into the same client; keep windows, workspace interaction, permissions, dialogs and presentation in the Desktop adapter.
 
-This in-repository CLI has no release packaging, npm publication, configuration file, policy framework, CI annotations, or GitHub Actions integration. Continue using CLI flags and current Core defaults until a concrete need justifies those additions.
+This in-repository CLI currently emits `dist/aqiron-cli.js` and `dist/core-runtime.js` together and can be run from the source checkout. It has no standalone package manifest, release/distribution workflow, npm publication, configuration file, policy framework, CI annotations, or repository-owned GitHub Actions workflow. The YAML above is a consumer-side example that builds from source; it is not an Aqiron workflow or a stable distribution contract. Continue using CLI flags and current Core defaults until a concrete need justifies those additions.

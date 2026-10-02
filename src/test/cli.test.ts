@@ -58,10 +58,14 @@ suite('Aqiron CLI', () => {
 			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--trust-local-workspace'], { stdout: json, stderr: captureOutput(), createClient: () => new FakeCoreClient() }), 0);
 			assert.equal(JSON.parse(json.text).schemaVersion, 1);
 			assert.equal(JSON.parse(json.text).report.summary.total, 2);
+			assert.doesNotMatch(json.text, /Aqiron Security|Scanning\.\.\./);
 			assert.doesNotMatch(json.text, /sk-test-secret-value-123456/);
 			assert.match(json.text, /\[REDACTED\]/);
 			assert.equal(await runCli(['scan', workspace, '--format', 'sarif', '--trust-local-workspace'], { stdout: sarif, stderr: captureOutput(), createClient: () => new FakeCoreClient() }), 0);
-			assert.equal(JSON.parse(sarif.text).version, '2.1.0');
+			const sarifDocument = JSON.parse(sarif.text);
+			assert.equal(sarifDocument.version, '2.1.0');
+			assert.equal(sarifDocument.$schema, 'https://json.schemastore.org/sarif-2.1.0.json');
+			assert.doesNotMatch(sarif.text, /Aqiron Security\n|Scanning\.\.\./);
 		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
 	});
 
@@ -75,21 +79,50 @@ suite('Aqiron CLI', () => {
 			assert.equal(JSON.parse(fs.readFileSync(outputPath, 'utf8')).report.summary.total, 2);
 			assert.equal(stdout.text, '');
 			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--output', outputPath, '--trust-local-workspace'], { stderr: captureOutput(), createClient: () => new FakeCoreClient() }), 1);
+			assert.equal(JSON.parse(fs.readFileSync(outputPath, 'utf8')).report.summary.total, 2);
 		} finally {
 			fs.rmSync(workspace, { recursive: true, force: true });
 			fs.rmSync(outputDir, { recursive: true, force: true });
 		}
 	});
 
+	test('reports output directory failures without dumping filesystem details', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		const output = captureOutput();
+		const stderr = captureOutput();
+		try {
+			const target = path.join(workspace, 'missing-parent', 'result.json');
+			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--output', target, '--trust-local-workspace'], { stdout: output, stderr, createClient: () => new FakeCoreClient() }), 1);
+			assert.equal(output.text, '');
+			assert.match(stderr.text, /Output failed/);
+			assert.doesNotMatch(stderr.text, /missing-parent/);
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
+
 	for (const [threshold, expected] of [['critical', false], ['high', true], ['medium', true], ['low', true]] as const) {
 		test(`--fail-on ${threshold} gates against actual findings`, async () => {
 			const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+			const stderr = captureOutput();
 			try {
-				const code = await runCli(['scan', workspace, '--fail-on', threshold, '--trust-local-workspace'], { stdout: captureOutput(), stderr: captureOutput(), createClient: () => new FakeCoreClient() });
+				const code = await runCli(['scan', workspace, '--fail-on', threshold, '--trust-local-workspace'], { stdout: captureOutput(), stderr, createClient: () => new FakeCoreClient() });
 				assert.equal(code, expected ? 1 : 0);
+				assert.equal(stderr.text.includes('Policy violation'), expected);
 			} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
 		});
 	}
+
+	test('all fail-on thresholds succeed when Core returns no findings', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		try {
+			for (const threshold of ['critical', 'high', 'medium', 'low']) {
+				const fake = new FakeCoreClient();
+				fake.emptyFindings = true;
+				const stderr = captureOutput();
+				assert.equal(await runCli(['scan', workspace, '--fail-on', threshold, '--trust-local-workspace'], { stdout: captureOutput(), stderr, createClient: () => fake }), 0);
+				assert.equal(stderr.text, '');
+			}
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
 
 	test('reports startup and scan failures separately without exposing raw error content', async () => {
 		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
@@ -128,6 +161,22 @@ suite('Aqiron CLI', () => {
 		const stderr = captureOutput();
 		assert.equal(await runCli(['scan', '.', '--format', 'xml', '--trust-local-workspace'], { stderr }), 2);
 		assert.match(stderr.text, /Invalid format/);
+	});
+
+	test('rejects invalid severity values and duplicate options as usage errors', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		try {
+			for (const args of [
+				['--fail-on', 'toString'],
+				['--format', 'json', '--format', 'sarif'],
+				['--fail-on', 'high', '--fail-on', 'low'],
+				['--output', 'a.json', '--output', 'b.json'],
+			]) {
+				const stderr = captureOutput();
+				assert.equal(await runCli(['scan', workspace, ...args, '--trust-local-workspace'], { stderr }), 2);
+				assert.match(stderr.text, /Usage: aqiron scan/);
+			}
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
 	});
 
 	test('rejects invalid command/path with nonzero status without starting Core', async () => {
@@ -185,6 +234,7 @@ class FakeCoreClient implements CliCoreClient {
 	startCalls = 0;
 	stopCalls = 0;
 	cancelCalls = 0;
+	emptyFindings = false;
 	request?: { requestId: string; workspaceRoot: string; trusted: boolean; mode: 'deep' };
 	onStart?: (request: NonNullable<FakeCoreClient['request']>) => Promise<void>;
 	onStartUp?: () => Promise<void>;
@@ -206,7 +256,7 @@ class FakeCoreClient implements CliCoreClient {
 		this.startCalls += 1;
 		this.request = request;
 		await this.onStart?.(request);
-		const findings = [
+		const findings = this.emptyFindings ? [] : [
 			{ severity: 'High', rawEvidence: { token: 'sk-test-secret-value-123456' } },
 			{ severity: 'Low', rawEvidence: { line: 'safe' } },
 		] as CoreScanStartResult['findings'];
@@ -214,7 +264,7 @@ class FakeCoreClient implements CliCoreClient {
 			scanId: request.requestId,
 			state: { mode: 'deep' } as CoreScanStartResult['state'],
 			findings,
-			report: { sarif: { version: '2.1.0', runs: [] }, model: { summary: { total: 2 }, findings } } as unknown as CoreScanStartResult['report'],
+			report: { sarif: { version: '2.1.0', $schema: 'https://json.schemastore.org/sarif-2.1.0.json', runs: [] }, model: { summary: { total: findings.length }, findings } } as unknown as CoreScanStartResult['report'],
 			durationMs: 1250,
 		};
 	}

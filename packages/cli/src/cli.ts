@@ -41,7 +41,14 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
 		if (!fs.statSync(workspaceRoot).isDirectory()) { stderr.write('Invalid workspace: path must be a directory.\n'); return 2; }
 	} catch { stderr.write('Invalid workspace: directory does not exist or cannot be accessed.\n'); return 2; }
 
-	const client = options.createClient?.() ?? new CoreClient({ clientVersion: '0.0.1', runtimePath: path.join(__dirname, 'core-runtime.js'), restartOnCrash: false });
+	let client: CliCoreClient;
+	try {
+		client = options.createClient?.() ?? new CoreClient({ clientVersion: '0.0.1', runtimePath: path.join(__dirname, 'core-runtime.js'), restartOnCrash: false });
+	} catch (error) {
+		stderr.write('Core startup failed. Check that the bundled Core runtime is available. Use AQIRON_DEBUG=1 for details.\n');
+		writeDebug(error, stderr);
+		return 1;
+	}
 	const requestId = `cli-${process.pid}-${Date.now().toString(36)}`;
 	let cancelled = false;
 	const onEvent = (event: CliEvent) => { if (event.requestId === requestId && parsed.format === 'text') { writeProgress(event, stdout); } };
@@ -64,7 +71,12 @@ export async function runCli(args: readonly string[], options: CliOptions = {}):
 		const output = renderResult(parsed.format, result);
 		try { writeResult(parsed, output, stdout); }
 		catch { stderr.write('Output failed: could not write the requested output file. It may already exist or its directory may be unavailable.\n'); return 1; }
-		return parsed.failOn && hasThresholdViolation(result, parsed.failOn) ? 1 : 0;
+		if (parsed.failOn && hasThresholdViolation(result, parsed.failOn)) {
+			const violating = result.findings.filter((finding) => severityRank[String(finding.severity).toLowerCase() as Severity] >= severityRank[parsed.failOn!]);
+			stderr.write(`Policy violation: ${violating.length} finding${violating.length === 1 ? '' : 's'} met or exceeded --fail-on ${parsed.failOn}.\n`);
+			return 1;
+		}
+		return 0;
 	} catch (error) {
 		if (cancelled || isCancellation(error)) { stderr.write('Scan cancelled.\n'); }
 		else if (phase === 'startup') { stderr.write('Core startup failed. Check that the bundled Core runtime is available. Use AQIRON_DEBUG=1 for details.\n'); writeDebug(error, stderr); }
@@ -81,10 +93,18 @@ function parseArgs(args: readonly string[]): ScanArgs {
 	if (args[0] !== 'scan' || !args[1] || args[1].startsWith('-')) { throw new Error('Invalid command or missing workspace path.'); }
 	if (!args.includes('--trust-local-workspace')) { throw new Error('Workspace trust is required. Add --trust-local-workspace to scan this local directory.'); }
 	const parsed: ScanArgs = { workspace: args[1], format: 'text' };
+	const seen = new Set<string>();
+	let trustSeen = false;
 	for (let i = 2; i < args.length; i++) {
 		const flag = args[i];
-		if (flag === '--trust-local-workspace') { continue; }
+		if (flag === '--trust-local-workspace') {
+			if (trustSeen) { throw new Error('Duplicate --trust-local-workspace option.'); }
+			trustSeen = true;
+			continue;
+		}
 		if (flag === '--format' || flag === '--output' || flag === '--fail-on') {
+			if (seen.has(flag)) { throw new Error(`Duplicate ${flag} option.`); }
+			seen.add(flag);
 			const value = args[++i];
 			if (!value || value.startsWith('--')) { throw new Error(`Missing value for ${flag}.`); }
 			if (flag === '--format') {
@@ -92,7 +112,7 @@ function parseArgs(args: readonly string[]): ScanArgs {
 				parsed.format = value as Format;
 			} else if (flag === '--output') { parsed.output = value; }
 			else {
-				if (!(value in severityRank)) { throw new Error('Invalid --fail-on severity. Choose critical, high, medium, or low.'); }
+				if (!Object.prototype.hasOwnProperty.call(severityRank, value)) { throw new Error('Invalid --fail-on severity. Choose critical, high, medium, or low.'); }
 				parsed.failOn = value as Severity;
 			}
 			continue;
@@ -114,9 +134,23 @@ function renderResult(format: Format, result: CoreScanStartResult): string {
 function writeResult(args: ScanArgs, content: string, stdout: CliOutput): void {
 	if (!args.output) { stdout.write(content); return; }
 	const file = path.resolve(args.output);
-	const descriptor = fs.openSync(file, 'wx');
-	try { fs.writeFileSync(descriptor, content, 'utf8'); }
-	finally { fs.closeSync(descriptor); }
+	let descriptor: number | undefined;
+	let created = false;
+	try {
+		descriptor = fs.openSync(file, 'wx');
+		created = true;
+		fs.writeFileSync(descriptor, content, 'utf8');
+		fs.closeSync(descriptor);
+		descriptor = undefined;
+	} catch (error) {
+		if (descriptor !== undefined) {
+			try { fs.closeSync(descriptor); } catch { /* cleanup below removes this incomplete artifact */ }
+		}
+		if (created) {
+			try { fs.unlinkSync(file); } catch { /* cleanup is best effort after a failed write */ }
+		}
+		throw error;
+	}
 }
 
 function countSeverities(result: CoreScanStartResult): Record<'Critical' | 'High' | 'Medium' | 'Low', number> {
