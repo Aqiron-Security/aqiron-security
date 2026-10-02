@@ -12,6 +12,7 @@ import { SecurityGraph } from '../correlation/relationshipGraph';
 import { ScannerResult } from '../shared/scanner';
 import { AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
 import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
+import { ResolvedWorkspaceScanPolicy } from '../shared/workspaceScanPolicy';
 
 export const CORE_PROTOCOL_VERSION = 1;
 
@@ -191,6 +192,10 @@ export interface CoreScanStartRequest {
 	mode?: 'quick' | 'deep' | 'analysis';
 	trusted: boolean;
 	currentFile?: string;
+	/** Explicit scan policy resolved by the client; omitted requests retain existing Core defaults. */
+	workspacePolicy?: ResolvedWorkspaceScanPolicy;
+	/** Defaults to true. False runs Core's deterministic native scanner without optional external tools. */
+	includeExternalScanners?: boolean;
 }
 
 export interface CoreScanStartResult {

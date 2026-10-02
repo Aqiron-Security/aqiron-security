@@ -36,7 +36,7 @@ export class CoreScanService {
 			emit({ type: 'stage', stage: { name: 'Preparing', status: 'running', progress: 10, startedAt: new Date().toISOString() } });
 
 			const native = request.nativeScanner
-				? await request.nativeScanner.scanWorkspace(request.workspaceRoot, request.cancellationToken)
+				? await request.nativeScanner.scanWorkspace(request.workspaceRoot, request.cancellationToken, request.workspacePolicy)
 				: { findings: [], filesScanned: 0, durationMs: 0 };
 			const nativeFindings = native.findings ?? [];
 			throwIfCancelled(request.cancellationToken);
@@ -49,7 +49,7 @@ export class CoreScanService {
 			emit({ type: 'stage', stage: { name: 'Scanner Execution', status: 'running', progress: 20, startedAt: new Date().toISOString() } });
 
 			const scannerContext = request.scannerContext;
-			const scannerResults = await this.runScanners(request, scannerContext, emitEvent);
+			const scannerResults = request.includeExternalScanners === false ? [] : await this.runScanners(request, scannerContext, emitEvent);
 			throwIfCancelled(request.cancellationToken);
 			emit({ type: 'stage', stage: { name: 'Scanner Execution', status: 'completed', progress: 100, startedAt: new Date().toISOString() } });
 			const scannerFindings = scannerResults.flatMap((result) => result.findings);

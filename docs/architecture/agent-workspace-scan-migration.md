@@ -1,10 +1,10 @@
 # Agent workspace scan migration
 
-**Status:** `workspace.scan` is Core-backed through the existing `scan.start` operation. `secrets.scan` remains on its existing `WorkspaceScanner` implementation.
+**Status:** `workspace.scan` and `secrets.scan` are Core-backed through the existing `scan.start` operation. Agent-specific selection, filtering, summary, merge, projection and redaction remain in the VS Code adapter.
 
 ## `secrets.scan` inventory and Core parity decision
 
-**Decision: do not migrate in this change.** Core now has deterministic native rules for the legacy secret patterns and IDs. Agent `secrets.scan` remains on `WorkspaceScanner` until workspace eligibility, exclusion, size, and filtering behavior are characterized against the Core path; the new detector capability alone does not establish full scan parity.
+**Migration completed:** Core performs the security analysis; the Agent adapter retains the characterized host gate and applies the same case-sensitive secret rule-ID substring filter (`secret`, `api-key`, `password`, `private-key`, `token`). The adapter still owns issue projection, merge/replacement, summary wording and five-location cap, errors, state, and serialization redaction.
 
 ### Exact legacy dependencies
 
@@ -17,17 +17,17 @@
 - **Projection/presentation:** all matching issues are retained in `AgentToolResult.issues`; the text summary includes the total and at most five path/line locations. Secret findings replace prior secret findings while prior non-secret Agent issues remain (`mergeIssues` dedupes by issue id). No-match text reports scanned file count. Scanner failures propagate to the enclosing Agent message handler, which presents a VS Code error.
 - **Privacy:** summary locations contain paths/lines, not values. Issue `lineText` may hold source text internally, but webview serialization redacts the matched secret source span before client state is posted. Keep this serialization boundary unchanged.
 
-### Core secret capability added; Agent migration pending
+### Core secret capability and Agent migration
 
 Core's always-present `NativeWorkspaceScanner` now applies the seven characterized deterministic patterns with legacy IDs (`critical.api-key`, `critical.secret`, `critical.password`, `critical.private-key`) to files in its native workspace source/config scope and to explicit `scan.file` content. When one of these exact patterns overlaps Core's older Dart-only secret rule, Core emits the legacy-ID finding instead of a duplicate; the older rule remains as a Dart-specific fallback for shorter literals outside the legacy patterns. Native workspace enumeration includes the characterized legacy extension set for this capability; the pre-existing non-secret native rule set remains limited to its prior targets. Secret findings contain rule/location/safe metadata and omit source-line evidence. If a native finding on the same line could otherwise carry matched secret text as raw evidence, that evidence is omitted as well.
 
-Optional Betterleaks, Semgrep and Trivy scanners may add other secret findings with tool-defined IDs. They remain distinct from the deterministic legacy-ID rules; the Agent's established filter still selects by case-sensitive ID substrings rather than tags.
+`secrets.scan` invokes generic `scan.start` in quick mode with `includeExternalScanners: false`; no Agent-specific Core operation or external-scanner findings are involved. This preserves the old local-rule-only execution scope and avoids exposing scanner output through Core events. The Core response still includes other native findings, which the unchanged Agent filter drops unless their rule ID contains one of the established substrings. In particular, Core's pre-existing `native.dart.hardcoded-secret` fallback can add short Dart secret findings that the legacy seven-pattern rules did not produce; this is an additive coverage difference, not a change to the Agent filter.
 
-Remaining migration blockers are effective scope/policy parity: VS Code Flutter/project gating, VS Code file enumeration, configured/default exclusions, generated/minified/compiled policy, max file size, and the Agent-specific finding projection/merge behavior. A portable `ResolvedWorkspaceScanPolicy` type and VS Code-side resolver now characterize the current settings, but `scan.start` does not accept or enforce that policy yet. Do not solve the gaps by assuming optional tools are installed or by running both scanners and unioning results. The existing webview redaction boundary remains required even though Core's deterministic secret findings do not carry raw evidence.
+The Agent resolves and sends the portable `ResolvedWorkspaceScanPolicy`; Core consumes it for extension scope, directory/file exclusions, ordered `.aq` rules, generated/minified/compiled skips, byte-size limits and custom rules. Workspace existence, first-folder selection, Flutter eligibility and actual trust remain host inputs. Core trust is recorded/validated but is not an enforcement policy. There is no workspace cache equivalent, and Core traversal/counting may differ from VS Code `findFiles`; skipped or unreadable files remain absent from the aggregate count. Core correlation can also normalize/deduplicate findings. These are documented remaining parity caveats; they do not cause the adapter to union old scanner output. Webview redaction remains mandatory because the Agent edge reconstructs source-line context for issues.
 
 ## Workspace policy inventory and contract preparation
 
-**Current Agent secret path:** `runSecretsScan` selects `vscode.workspace.workspaceFolders[0]`; with no folder it returns an unavailable result. It calls the provider's `WorkspaceScanner.scanWorkspace`. That scanner applies the Flutter gate (`pubspec.yaml` containing `flutter:`/`flutter_test:` or `.metadata`), then asks VS Code to enumerate the first folder using `supportedGlob` and static `excludeGlob`. `scanUri` rechecks supported file extensions, measures `stat.size` in bytes, checks the metadata cache, and then applies `.aq`, configured/default folder, generated, minified, and compiled skip logic. A skipped or unreadable file contributes zero to `filesScanned` and no issue; the aggregate result does not retain a skip reason. `secrets.scan` itself has no trust gate and currently sends no trust value to Core because it does not call Core.
+**Current Agent secret path:** `runSecretsScan` selects the first VS Code workspace folder, applies the Flutter eligibility gate, resolves effective policy, and invokes Core. This replaces the former `WorkspaceScanner.scanWorkspace` path described below as historical characterization. The adapter passes `vscode.workspace.isTrusted` as received; Core currently validates but does not enforce trust policy.
 
 | Existing input/decision | Effective current value/source | Portable contract mapping | Ownership / caveat |
 |---|---|---|---|
@@ -43,11 +43,11 @@ Remaining migration blockers are effective scope/policy parity: VS Code Flutter/
 | Compiled outputs | `getSkipReason` recognizes `.class`, `.jar`, `.wasm`, `.dll`, `.exe`, `.o`, `.obj`, `.so`, `.dylib`; most are already outside the supported extension selector | `skipCompiledFiles: true` | The current per-file check is retained in the contract, though the workspace supported-file gate makes much of this path unreachable. |
 | Size | `aqiron-security.maxFileSizeKB`, default 512; effective bytes are `Math.max(1, setting) * 1024`; compare filesystem `stat.size > limit` | `maxFileSizeBytes` | Workspace only. `scanDocument` has no corresponding cap. A size skip produces no findings and zero scanned files, with no per-file reason in the aggregate. |
 
-### Prepared type (not wired to IPC)
+### Resolved policy wired to `scan.start`
 
-`packages/core/src/shared/workspaceScanPolicy.ts` defines `ResolvedWorkspaceScanPolicy`. `src/utils/files.ts` exports `resolveWorkspaceScanPolicy(root)`, which resolves the current VS Code settings and `.aq` rules into that type. The value contains only extensions, path/name exclusions, policy flags and a byte limit; it contains no `TextDocument`, source content, credentials, Flutter eligibility or trust. Tests assert repeat resolution is deterministic, check default and configured values, and ensure the host-only fields are absent.
+`packages/core/src/shared/workspaceScanPolicy.ts` defines `ResolvedWorkspaceScanPolicy`. `src/utils/files.ts` exports `resolveWorkspaceScanPolicy(root)`, which resolves current VS Code settings, custom rules and `.aq` rules into that type. `scan.start` validates and passes it to Core's native workspace traversal. It contains no `TextDocument`, source content, credentials, Flutter eligibility or trust. Tests cover deterministic policy resolution and Core enforcement.
 
-This is **contract preparation only**: `CoreScanStartRequest` has not changed and `scan.start` does not accept this type. No workspace scanner consumes these fields yet. Before migration, the Core request/validator and native enumeration must explicitly adopt and enforce them, while VS Code keeps first-folder selection, Flutter eligibility and actual trust resolution. The existing Agent secret filtering, merge, summary cap and redaction remain untouched.
+This policy is used for Agent `secrets.scan`; existing non-Agent workspace scan requests omit it and retain their current behavior. VS Code keeps first-folder selection, Flutter eligibility and trust resolution. Agent secret filtering, merge, summary cap and redaction remain at the client edge.
 
 ## Call paths
 
@@ -57,9 +57,9 @@ Before:
 Agent tool selection
   → AqironWebviewProvider.runWorkspaceScan
   → first VS Code workspace folder
-  → provider-owned WorkspaceScanner.scanWorkspace
-  → VS Code findFiles + local scanContent rules/cache
-  → AqironScanResult / AqironIssue
+  → provider-owned WorkspaceScanner.scanWorkspace [former path]
+  → VS Code findFiles + local scanContent rules/cache [former path]
+  → AqironScanResult / AqironIssue [former result]
   → AgentToolResult summary + UI state
 ```
 
@@ -67,10 +67,10 @@ Current:
 
 ```text
 Agent tool selection
-  → AqironWebviewProvider.runWorkspaceScan
+  → AqironWebviewProvider.runSecretsScan
   → first VS Code workspace folder + Flutter eligibility + workspace trust
-  → CoreClient.startScan / scan.start (deep, exact workspace target)
-  → Core workspace orchestration, scanners, findings, correlation, report
+  → resolveWorkspaceScanPolicy + CoreClient.startScan / scan.start (quick, native-only)
+  → Core policy-aware native workspace traversal, findings, correlation, report
   → request-correlated Core pipeline events → Agent pipeline projection
   → UnifiedFinding → AqironIssue + local source-line context
   → existing AgentToolResult summary/stats and UI state
@@ -104,13 +104,13 @@ No Agent-specific IPC was added. The scan request id is generated by the Agent a
 
 ### Intentional versus accidental differences
 
-The first-folder selection, Flutter-only eligibility, compact Agent summary, command descriptor, all-findings projection and Agent-owned UI state are retained deliberately. Moving analysis and orchestration to Core, enabling the existing Core scanner set, using Core correlation/report generation, and adopting Core request cancellation/progress are intentional consequences of making Core authoritative.
+The first-folder selection, Flutter-only eligibility, compact Agent summary, command descriptor, Agent-owned filtering/merge and UI state are retained deliberately. Moving deterministic security analysis and orchestration to Core, using Core correlation/report generation, and adopting Core request cancellation/progress are intentional consequences of making Core authoritative. External scanners are disabled for this tool because the former Agent path used only local deterministic rules.
 
-Custom-rule configuration, VS Code-specific exclusions, generated/minified/compiled policy, per-file size settings, local rule coverage, exact file counts and cache semantics do not currently have equivalent `scan.start` request inputs or guarantees. These are explicit behavior gaps, not preserved parity. The Agent path is migrated to the mandated Core operation; future parity requires a separately designed portable workspace policy contract rather than silently invoking the legacy scanner alongside Core.
+Portable policy now supplies custom rules, configured/default exclusions, `.aq`, generated/minified/compiled policy, extensions and file size to Core. Exact file counts/cache behavior and enumeration semantics still differ from the former VS Code scanner. Core's native non-secret rules also execute but are filtered at the Agent edge; an existing short-literal Dart rule ID contains `secret` and therefore can add results under the unchanged substring filter. The seven characterized legacy patterns remain covered and no external scanner is added to the Agent secret scan.
 
 ## Remaining implementation boundaries
 
-- `secrets.scan` still calls `agentScanner.scanWorkspace`, filters secret-related rule ids, merges secret findings with existing non-secret state, and caps displayed locations at five. Its serializer continues to redact secret source spans. Migration is blocked until the Core secret coverage and scope gaps above are resolved and parity fixtures demonstrate the same behavior.
-- `WorkspaceScanner` and `src/scanner/rules.ts` remain needed by the secret Agent path and other callers. No code was deleted.
+- `secrets.scan` now calls `CoreClient.startScan`; no production Agent secret caller invokes `WorkspaceScanner.scanWorkspace`. It filters findings with the existing case-sensitive ID substrings, merges/replaces state, retains all matched issues, caps text at five locations and uses the existing serializer redaction.
+- `WorkspaceScanner` and `src/scanner/rules.ts` remain for `ScanController` workspace/current-document paths and characterization coverage. No scanner code was deleted.
 - Core progress forwarding filters by the supplied request id and only maps existing stage, scanner, output, completion, cancellation and failure events. Finding events are not copied into Agent progress state.
 - The adapter sends `vscode.workspace.isTrusted`; Core's current workspace scan does not use that flag to deny or alter scanning. A future trust/policy decision must be implemented explicitly in Core/runtime contracts.

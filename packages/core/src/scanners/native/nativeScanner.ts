@@ -3,6 +3,7 @@ import { createFinding, UnifiedFinding } from '../../shared/finding';
 import { CancellationTokenLike } from '../../shared/cancellation';
 import { FileSystem } from '../../shared/platform';
 import { CoreFileScanResult, ResolvedFileScanPolicy } from '../../shared/fileScan';
+import { ResolvedWorkspaceScanPolicy } from '../../shared/workspaceScanPolicy';
 
 export interface NativeRuleScanResult {
 	findings: UnifiedFinding[];
@@ -50,22 +51,44 @@ export class NativeWorkspaceScanner {
 		return { scanId, filePath, state: 'completed', findings, filesScanned: 1, findingCount: findings.length, durationMs: Date.now() - startedAt };
 	}
 
-	async scanWorkspace(root: string, token?: CancellationTokenLike): Promise<NativeRuleScanResult> {
+	async scanWorkspace(root: string, token?: CancellationTokenLike, policy?: ResolvedWorkspaceScanPolicy): Promise<NativeRuleScanResult> {
 		const startedAt = Date.now();
-		const files = await collectFiles(root, root, this.filesystem, token);
+		const files = policy
+			? await collectPolicyFiles(root, root, this.filesystem, token, policy)
+			: await collectFiles(root, root, this.filesystem, token);
 		const findings: UnifiedFinding[] = [];
+		let filesScanned = 0;
 		for (const file of files) {
 			if (token?.isCancellationRequested) {
 				break;
 			}
 			try {
+				const stat = policy ? await this.filesystem.stat(file) : undefined;
+				if (policy && stat && stat.size > policy.maxFileSizeBytes) {continue;}
 				const content = await this.filesystem.readFile(file, 'utf8');
-				findings.push(...scanFile(file, content));
+				if (policy && shouldSkipByWorkspacePolicy(file, root, content, policy)) {continue;}
+				if (policy) {
+					const filePolicy: ResolvedFileScanPolicy = {
+						supportedExtensions: policy.supportedExtensions,
+						excludedPaths: [],
+						maxFileSizeBytes: policy.maxFileSizeBytes,
+						skipGeneratedFiles: false,
+						skipMinifiedFiles: false,
+						skipCompiledFiles: false,
+						eligible: true,
+						customRules: policy.customRules,
+					};
+					const result = await this.scanFileContent(file, content, 'workspace', filePolicy, token);
+					findings.push(...result.findings.map(withWorkspaceSecretIdentity));
+				} else {
+					findings.push(...scanFile(file, content));
+				}
+				filesScanned += 1;
 			} catch {
 				// Individual unreadable files do not abort the workspace scan.
 			}
 		}
-		return { findings, filesScanned: files.length, durationMs: Date.now() - startedAt };
+		return { findings, filesScanned: policy ? filesScanned : files.length, durationMs: Date.now() - startedAt };
 	}
 }
 
@@ -327,6 +350,100 @@ async function collectFiles(root: string, current: string, filesystem: FileSyste
 	return files;
 }
 
+async function collectPolicyFiles(root: string, current: string, filesystem: FileSystem, token: CancellationTokenLike | undefined, policy: ResolvedWorkspaceScanPolicy): Promise<string[]> {
+	if (token?.isCancellationRequested || isExcludedByWorkspacePolicy(current, root, policy)) {return [];}
+	let entries: Array<string | { name: string; isDirectory(): boolean; isFile(): boolean }>;
+	try {
+		entries = await filesystem.readdir(current, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const files: string[] = [];
+	for (const entry of entries) {
+		if (token?.isCancellationRequested) {break;}
+		const name = typeof entry === 'string' ? entry : entry.name;
+		const filePath = path.join(current, name);
+		if (isExcludedByWorkspacePolicy(filePath, root, policy)) {continue;}
+		if (typeof entry !== 'string' && entry.isDirectory()) {
+			files.push(...await collectPolicyFiles(root, filePath, filesystem, token, policy));
+		} else if ((typeof entry === 'string' || entry.isFile()) && hasPolicyExtension(filePath, policy.supportedExtensions) && !matchesFileNamePattern(name, policy.excludedFileNamePatterns) && !isAqExcludedByPolicy(filePath, root, policy)) {
+			files.push(filePath);
+		}
+	}
+	return files;
+}
+
+function shouldSkipByWorkspacePolicy(filePath: string, root: string, content: string, policy: ResolvedWorkspaceScanPolicy): boolean {
+	const normalized = normalizeWorkspacePath(filePath);
+	const basename = path.posix.basename(normalized);
+	if (!hasPolicyExtension(filePath, policy.supportedExtensions) || matchesFileNamePattern(basename, policy.excludedFileNamePatterns)) {return true;}
+	if (isExcludedByWorkspacePolicy(filePath, root, policy) || isAqExcludedByPolicy(filePath, root, policy)) {return true;}
+	if (policy.skipGeneratedFiles && isLegacyGeneratedFile(normalized, basename, content)) {return true;}
+	if (policy.skipMinifiedFiles && isMinifiedFile(filePath, content)) {return true;}
+	return policy.skipCompiledFiles && /\.(?:class|jar|wasm|dll|exe|o|obj|so|dylib)$/i.test(filePath);
+}
+
+function isExcludedByWorkspacePolicy(filePath: string, _root: string, policy: ResolvedWorkspaceScanPolicy): boolean {
+	const normalized = normalizeWorkspacePath(filePath);
+	return policy.excludedDirectoryPaths.some((rawPath) => {
+		const directory = normalizeWorkspacePath(rawPath).replace(/^\/+|\/+$/g, '');
+		return directory.length > 0 && (normalized.includes(`/${directory}/`) || normalized.endsWith(`/${directory}`));
+	});
+}
+
+function isAqExcludedByPolicy(filePath: string, root: string, policy: ResolvedWorkspaceScanPolicy): boolean {
+	const relative = normalizeWorkspacePath(path.relative(root, filePath));
+	if (!relative || relative.startsWith('../')) {return false;}
+	let ignored = false;
+	for (const rawPattern of policy.aqExclusionPatterns) {
+		const negated = rawPattern.startsWith('!');
+		if (matchesAqPattern(relative, negated ? rawPattern.slice(1) : rawPattern)) {ignored = !negated;}
+	}
+	return ignored;
+}
+
+function matchesAqPattern(relative: string, rawPattern: string): boolean {
+	const pattern = normalizeWorkspacePath(rawPattern).replace(/^\/+/, '');
+	if (!pattern) {return false;}
+	const directory = pattern.endsWith('/');
+	const normalizedPattern = directory ? pattern.slice(0, -1) : pattern;
+	if (directory && (relative === normalizedPattern || relative.startsWith(`${normalizedPattern}/`))) {return true;}
+	const expression = globToRegExp(normalizedPattern, pattern.includes('/'));
+	return pattern.includes('/') ? expression.test(relative) : relative.split('/').some((segment) => expression.test(segment));
+}
+
+function globToRegExp(pattern: string, fullPath: boolean): RegExp {
+	let source = '';
+	for (let index = 0; index < pattern.length; index += 1) {
+		const character = pattern[index];
+		if (character === '*' && pattern[index + 1] === '*') {source += '.*'; index++;}
+		else if (character === '*') {source += fullPath ? '[^/]*' : '.*';}
+		else if (character === '?') {source += '.';}
+		else {source += /[\\^$+?.()|{}[\]]/.test(character) ? `\\${character}` : character;}
+	}
+	return new RegExp(`^${source}$`, 'i');
+}
+
+function matchesFileNamePattern(fileName: string, patterns: readonly string[]): boolean {
+	return patterns.some((pattern) => globToRegExp(pattern, false).test(fileName));
+}
+
+function hasPolicyExtension(filePath: string, extensions: readonly string[]): boolean {
+	const extension = path.extname(filePath).toLowerCase();
+	return extensions.some((item) => (item.startsWith('.') ? item : `.${item}`).toLowerCase() === extension);
+}
+
+function isLegacyGeneratedFile(normalizedPath: string, basename: string, content: string): boolean {
+	if (/^app_localizations(?:_[a-z_]+)?\.dart$/.test(basename) || basename.includes('.generated.') || basename.endsWith('.generated')) {return true;}
+	if (['.g.dart', '.freezed.dart', '.generated.dart', '.generated.ts', '.generated.js', '.pb.dart', '.pb.go', '.min.js', '.min.css', '.mocks.dart', '.mock.dart', '.config.dart'].some((suffix) => basename.endsWith(suffix))) {return true;}
+	if (normalizedPath.includes('/.generated/') || normalizedPath.includes('/generated/') || normalizedPath.includes('/gen/') || normalizedPath.includes('/.dart_tool/')) {return true;}
+	return /(@generated|<auto-generated|generated code|do not edit|DO NOT EDIT|coverage:ignore-file|Generated file|This file is generated)/i.test(content.slice(0, 2048));
+}
+
+function normalizeWorkspacePath(value: string): string {
+	return value.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
 function scanFile(file: string, content: string): UnifiedFinding[] {
 	if (content.length > 512 * 1024) {
 		return [];
@@ -372,6 +489,18 @@ function scanLegacySecretRules(file: string, line: string, index: number): Unifi
 			tags: ['secret', 'credential', 'portable', 'native-rule'], rawEvidence: undefined,
 		})];
 	});
+}
+
+/** Avoid truncated Core fingerprint collisions only on the policy-aware Agent workspace path. */
+function withWorkspaceSecretIdentity(finding: UnifiedFinding): UnifiedFinding {
+	if (!['secret', 'api-key', 'password', 'private-key', 'token'].some((term) => finding.ruleId.includes(term))) {return finding;}
+	const fingerprint = Buffer.from([finding.sourceTool, finding.ruleId, finding.file.replace(/\\/g, '/').toLowerCase(), String(finding.line), String(finding.column)].join('|')).toString('base64url');
+	return {
+		...finding,
+		id: `${finding.sourceTool.toLowerCase()}:${fingerprint}`,
+		fingerprint,
+		graph: { ...finding.graph, nodeId: `finding:${fingerprint}` },
+	};
 }
 
 function hasLegacySecret(line: string): boolean {

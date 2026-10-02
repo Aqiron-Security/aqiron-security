@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as fs from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
 import { CoreScanService } from '../../packages/core/src/orchestration';
 import { CoreScanRequest } from '../../packages/core/src/orchestration/types';
@@ -8,6 +9,9 @@ import { ScannerManager } from '../../packages/core/src/scanners';
 import { FileSystem } from '../../packages/core/src/shared/platform';
 import { PipelineEvent, PipelineEventBus } from '../../packages/core/src/shared/pipeline';
 import { scanContent } from '../scanner/rules';
+import { createNodeFileSystem } from '../../packages/core/src/runtime/nodeAdapters';
+import { ResolvedWorkspaceScanPolicy } from '../../packages/core/src/shared/workspaceScanPolicy';
+import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
 
 const cases = [
 	{ line: 'const api_key = "0123456789abcdef";', id: 'critical.api-key' },
@@ -84,10 +88,65 @@ suite('Core deterministic secret parity', () => {
 		const root = '/fixture';
 		const filePath = `${root}/src/config.js`;
 		const filesystem = memoryFileSystem(root, 'src', 'config.js', '// const secret = "commented-secret-value-1234";\nconst api_key = "0123456789abcdef";');
-		const result = await new NativeWorkspaceScanner(filesystem).scanWorkspace(root);
+		const scanner = new NativeWorkspaceScanner(filesystem);
+		const result = await scanner.scanWorkspace(root);
+		const directFileResult = await scanner.scanFileContent(filePath, '// const secret = "commented-secret-value-1234";\nconst api_key = "0123456789abcdef";', 'direct-identity', filePolicy);
 		assert.equal(result.filesScanned, 1);
 		assert.deepEqual(result.findings.map(finding => finding.ruleId), ['critical.api-key']);
 		assert.equal(path.normalize(result.findings[0].file), path.normalize(filePath));
+		assert.equal(result.findings[0].id, directFileResult.findings.find(finding => finding.ruleId === 'critical.api-key')?.id, 'workspace scan requests without explicit policy retain the existing finding identity');
+	});
+
+	test('workspace scan honors resolved extensions, .aq negation, exclusions, file policy, size, and custom rules', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-core-workspace-policy-'));
+		try {
+			const files: Record<string, string> = {
+				'secret/blocked.js': 'const secret = "blocked-secret-value-123";',
+				'secret/keep.js': 'const secret = "0123456789abcdef";\ncredentialMarker();',
+				'vendor/hidden.js': 'const token = "vendor-secret-value-123";',
+				'lib/model.generated.js': 'const token = "generated-secret-value-123";',
+				'lib/bundle.min.js': 'x'.repeat(1200),
+				'lib/large.js': 'x'.repeat(1500),
+				'lib/notes.txt': 'const secret = "unsupported-secret-value-123";',
+				'lib/clean.js': 'const safe = true;',
+			};
+			for (const [relative, content] of Object.entries(files)) {
+				const target = path.join(root, relative);
+				await fs.mkdir(path.dirname(target), { recursive: true });
+				await fs.writeFile(target, content, 'utf8');
+			}
+			await fs.writeFile(path.join(root, '.aq'), 'secret/\n!secret/keep.js\n', 'utf8');
+			const policy: ResolvedWorkspaceScanPolicy = {
+				supportedExtensions: ['.js'],
+				excludedDirectoryPaths: ['vendor'],
+				excludedFileNamePatterns: ['*.generated.*'],
+				aqExclusionPatterns: ['secret/', '!secret/keep.js'],
+				maxFileSizeBytes: 1400,
+				customRules: [{ id: 'critical.secret.custom', title: 'Custom secret marker', message: 'Review this marker.', severity: 'High', pattern: 'credentialMarker', extensions: ['.js'] }],
+				skipGeneratedFiles: true,
+				skipMinifiedFiles: true,
+				skipCompiledFiles: true,
+			};
+			const result = await new NativeWorkspaceScanner(createNodeFileSystem()).scanWorkspace(root, undefined, policy);
+			assert.equal(result.filesScanned, 2, 'only the .aq re-included file and clean eligible file count as scanned');
+			assert.deepEqual(result.findings.filter(finding => finding.ruleId.startsWith('critical.secret')).map(finding => finding.ruleId), ['critical.secret', 'critical.secret.custom']);
+			assert.ok(result.findings.filter(finding => finding.ruleId.startsWith('critical.secret')).every(finding => path.join(root, 'secret', 'keep.js') === finding.file));
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test('scan.start rejects malformed resolved workspace policy before scanning', async () => {
+		const runtime = new CoreRuntime({ coreVersion: 'secret-policy-validation' });
+		const response = await runtime.handle({
+			id: 'bad-workspace-policy', type: 'request', method: 'scan.start',
+			params: { workspaceRoot: '/fixture', trusted: false, workspacePolicy: {
+				supportedExtensions: ['.js'], excludedDirectoryPaths: [], excludedFileNamePatterns: [], aqExclusionPatterns: [],
+				maxFileSizeBytes: -1, customRules: [], skipGeneratedFiles: true, skipMinifiedFiles: true, skipCompiledFiles: true,
+			} },
+		}, () => undefined);
+		assert.equal(response.success, false);
+		assert.equal(response.error?.code, 'CORE_INVALID_REQUEST');
 	});
 
 	test('secret values do not appear in Core finding events or telemetry', async () => {
