@@ -78,6 +78,19 @@ Create/Open Workspace → Configure / Settings → Scan → Findings → Reports
 
 The current UI redesign is implemented as screens inside the VS Code webview: application shell/navigation, Scan workflow, Findings triage, Reports workspace, Agent, Settings, and workspace-index onboarding. These are not separate desktop applications or independently deployed product modules.
 
+## Aqiron CLI
+
+The repository includes an in-repository CLI for local developer and CI scans. It calls Aqiron Core through the existing Node Core client; it does not bundle a separate scanner implementation. Build the CLI and Core runtime together with `npm run cli:build`, then run it from the repository:
+
+```sh
+node dist/aqiron-cli.js scan <path> --trust-local-workspace
+node dist/aqiron-cli.js scan <path> --format json --output result.json --trust-local-workspace
+node dist/aqiron-cli.js scan <path> --format sarif --output result.sarif --trust-local-workspace
+node dist/aqiron-cli.js scan <path> --fail-on high --trust-local-workspace
+```
+
+The trust flag is required before a local workspace is sent to Core as trusted. Text is the default output; JSON and SARIF use Core's report data. Output goes to stdout unless `--output` is given; existing output files are not overwritten. Exit code `0` indicates a completed scan without a configured severity violation, `1` indicates a Core/runtime/cancellation/output failure or a matching `--fail-on` finding, and `2` indicates invalid usage or input. This is not yet a published package, and the repository currently has no suitable GitHub Actions workflow for invoking it reliably. See [CLI architecture and JSON shape](docs/architecture/cli-prototype.md) for details and limitations.
+
 ## Architecture
 
 ```text
