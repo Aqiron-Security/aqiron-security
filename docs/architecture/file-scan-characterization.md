@@ -1,6 +1,6 @@
 # File and Agent Scan Characterization
 
-Status: characterization of the current VS Code implementation. No scan path is migrated or behavior changed by this document.
+Status: original characterization baseline. The current-file command and save/realtime path now use `scan.file`; Agent workspace and Agent secret scans remain on their characterized paths. The baseline below records legacy behavior that migration must preserve.
 
 ## Runtime call graphs
 
@@ -9,16 +9,12 @@ Status: characterization of the current VS Code implementation. No scan path is 
 ```text
 VS Code command aqiron-security.scanCurrentFile
   → ScanController.scanCurrentFile
-  → activeTextEditor.document
-  → supported-file check + workspace-folder/Flutter gate
-  → ScanController.scanDocument
-  → WorkspaceScanner.scanDocument
-  → document.getText() (in-memory editor buffer)
-  → getSkipReason(path, content) + scanContent(path, content)
-  → filterVisibleIssues
-  → replaceFile(file, issues) → refreshViews
-  → DiagnosticManager.setIssues → VS Code diagnostics
-  → sidebar/webview state and status bar
+  → activeTextEditor.document + workspace/Flutter eligibility
+  → runScan admission
+  → TextDocument.getText() + resolved file policy
+  → CoreClient.fileScan → scan.file → UnifiedFinding[]
+  → shared VS Code projection (AqironIssue + local lineText)
+  → diagnostics / issue store / sidebar
 ```
 
 The `scanCurrentFile` command is registered in `src/extension.ts`. The webview and tree provider can invoke the command, but neither owns a separate current-file scan implementation. `WorkspaceScanner.scanFile(uri)` is a separate disk-reading API; repository call-site search found no production caller for it outside `WorkspaceScanner` itself.
@@ -28,16 +24,17 @@ The `scanCurrentFile` command is registered in `src/extension.ts`. The webview a
 ```text
 VS Code onDidSaveTextDocument
   → ScanController.scanDocumentDebounced(document)
-  → enableRealtimeScan setting (default true)
-  → file-scheme/supported-extension check
+  → enableRealtimeScan setting (default true) + file/supported-extension gate
   → shared Debouncer(800ms)
-  → ScanController.scanDocument(document)
-  → WorkspaceScanner.scanDocument
-  → document.getText() at debounce execution time
-  → same local rules, skip policy, UI/diagnostic replacement as A
+  → ScanController.scanRealtimeDocument
+  → existing runScan admission (active run schedules workspace fallback)
+  → document.getText() at task execution + resolved VS Code file policy
+  → CoreClient.fileScan → scan.file → UnifiedFinding[]
+  → shared VS Code projection (AqironIssue + lineText from captured buffer)
+  → diagnostics / issue store / sidebar
 ```
 
-`scanWorkspaceDebounced` uses the same `Debouncer` instance, so workspace-folder changes and document saves can replace one another while pending. If the controller is already running when a document task reaches `runScan`, the controller schedules a workspace scan and returns; it does not queue that document for a later file scan. The file scan itself has no cancellation token. There is no explicit workspace-trust check on this path. The deferred call does not independently check Flutter before entering `WorkspaceScanner.scanDocument`; the scanner then requires the document's workspace root to be Flutter.
+`scanWorkspaceDebounced` still uses the same `Debouncer` instance, so workspace-folder changes and document saves can replace one another while pending. If the controller is already running when the debounced document task reaches `runScan`, the controller schedules a workspace scan and returns; it does not queue that document for a later file scan. Content is read only after that admission check, at debounce execution time. The existing Flutter gate is now represented as resolved `eligible` policy for Core; there is no new trust check, queue, cache, or document generation tracking. Core request timeout/cancellation failures flow through the same `runScan` failure presentation. `WorkspaceScanner.scanDocument` remains for the separate post-fix scan call; the save/realtime path no longer calls it.
 
 ### C. AI-agent workspace scan
 
@@ -79,21 +76,21 @@ No secret-specific scanner is invoked. Secret findings use the same local rule e
 
 | Behavior | Current-file | Realtime | Agent workspace | Agent secret | Core equivalent today |
 |---|---|---|---|---|---|
-| Entry and caller | Command → `ScanController.scanCurrentFile` → `CoreClient.fileScan` → `scan.file` | `onDidSaveTextDocument` → controller debounce | Agent tool → provider method | Agent tool → provider method | `scan.start` through Core client/runtime for workspace scans |
-| Input model | `TextDocument` buffer | Saved-document event object; text read when debounce fires | Workspace folder path plus files enumerated by VS Code | Same workspace scan, then rule-ID filter | Workspace root, target path, mode, trust flag; no document-content field |
-| Source bytes | Adapter snapshots `document.getText()`; Core analyzes supplied buffer including unsaved edits | `document.getText()` at execution; a later edit can be visible | `fs.readFile` from disk | `fs.readFile` from disk | `scan.file` accepts explicit content; workspace operation remains disk-backed |
+| Entry and caller | Command → `ScanController.scanCurrentFile` → `CoreClient.fileScan` → `scan.file` | `onDidSaveTextDocument` → existing controller debounce → `CoreClient.fileScan` → `scan.file` | Agent tool → provider method | Agent tool → provider method | `scan.start` through Core client/runtime for workspace scans |
+| Input model | `TextDocument` buffer | Saved-document event object; latest `getText()` read after debounce and active-run admission | Workspace folder path plus files enumerated by VS Code | Same workspace scan, then rule-ID filter | Workspace root, target path, mode, trust flag; no document-content field |
+| Source bytes | Adapter snapshots `document.getText()`; Core analyzes supplied buffer including unsaved edits | Core receives the latest in-memory text captured when the debounced scan begins; it does not read disk | `fs.readFile` from disk | `fs.readFile` from disk | `scan.file` accepts explicit content; workspace operation remains disk-backed |
 | Workspace/project gate | Supported file, workspace membership, Flutter | Setting + file URI/extension first; Flutter gate in scanner | Flutter gate in scanner | Flutter gate in shared scanner | Core scan accepts workspace paths and does not reproduce the extension's Flutter-only command gate |
 | Workspace trust | No explicit check | No explicit check | No explicit check | No explicit check | Request validates `trusted` as true, but extension adapter supplies that value; this is not equivalent to a VS Code trust decision for local editor content |
-| Rules/scanners | Adapter resolves existing line rules/configured custom rules; Core scans supplied content and returns canonical findings | `scanContent`: local language rules, secret regexes, configured custom rules | Same local scanner/rules | Same local scanner/rules; filters result afterward | Core file operation supports supplied custom rules; some rule behavior remains a parity caveat |
+| Rules/scanners | Adapter resolves existing line rules/configured custom rules; Core scans supplied content and returns canonical findings | Same resolved file-rule policy and Core analysis as current-file scanning | Same local scanner/rules | Same local scanner/rules; filters result afterward | Core file operation supports supplied custom rules; some rule behavior remains a parity caveat |
 | Supported extensions | `.dart`, `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.rs`, `.java`, `.c`, `.cpp`, `.h`, `.json`, `.xml`, `.yaml`, `.yml`, `.gradle`, `.rules` | Same | Same glob/extensions | Same | Core scanner support is scanner-specific; no contract for this extension list |
-| Custom rules | `aqiron-security.customRules` via VS Code configuration; built-in defaults apply when setting is absent; invalid entries/regexes are ignored | Same | Same provider process/config | Same, then secret rule-ID filter | Not supplied as a resolved custom-rule set to Core scan orchestration |
+| Custom rules | `aqiron-security.customRules` via VS Code configuration; built-in defaults apply when setting is absent; invalid entries/regexes are ignored | Same VS Code setting resolved into the portable Core policy | Same provider process/config | Same, then secret rule-ID filter | Not supplied to workspace scan orchestration; supplied to `scan.file` |
 | Exclusions/generated files | `getSkipReason`: `.aq`, configured/default folders, generated policy, minified files, compiled outputs | Same | Static VS Code `excludeGlob` plus per-file `getSkipReason` | Same | Core has its own exclusions/configuration; parity with `.aq`, VS Code settings, and generated-file policy is unproven |
 | Size policy | `scanDocument` does not call `getMaxFileSizeBytes`; content size is not capped here | Same | `scanUri` skips disk files over configured `maxFileSizeKB` (default 512 KB) | Same | Core currently uses its own scanner-specific limits; no equivalent resolved VS Code max-size input |
-| Cache | Writes a cache entry but does not read it in `scanDocument` | Same | Uses a per-instance path + `mtimeMs` + size cache in `scanUri` | Same agent scanner/cache | Different Core scanner caches; no parity contract |
+| Cache | Legacy `scanDocument` wrote an entry but did not read it | No new cache; file scan is content-driven | Uses a per-instance path + `mtimeMs` + size cache in `scanUri` | Same agent scanner/cache | Different Core scanner caches; no parity contract |
 | Concurrency | Single `runScan` guard; while another scan runs the request schedules a workspace scan | Shared 800 ms debounce; one active controller scan | Per-file batches of 50 run concurrently; batches are sequential | Same as agent workspace | Core worker queue and scanner execution policy differ |
 | Result shape | `AqironScanResult` adapter result with projected `AqironIssue[]`; reports one file even when skipped | Same local result | `AgentToolResult` with summary, command, all issues, file-count stats | Same shape but only secret-rule issues are merged into the issue state; content lists at most five locations | `scan.file` returns `CoreFileScanResult` with `UnifiedFinding[]`; client projects findings |
 | UI/diagnostics | Replaces that file in `issuesByFile`, then refreshes all diagnostics and sidebar state | Same | Agent result updates provider state and posts Agent UI state; no diagnostic-manager call here | Preserves existing non-secret issues, replaces prior secret issues, updates counts/risk from merged state | Core scan events are projected by the VS Code adapter; they do not implement the Agent tool result contract |
-| Error behavior | Scanner document path has no local catch; controller `runScan` marks Failed, logs and shows an error | Same | Per-file `scanUri` catches stat/read errors and skips that file; top-level `findFiles` errors propagate to webview handler | Top-level scanner errors propagate to webview handler | Core returns IPC error/cancellation contracts; UI presentation is client-owned |
+| Error behavior | Core IPC errors flow through controller `runScan`, which marks Failed, logs and shows an error | Same Core error/cancellation path through `runScan` | Per-file `scanUri` catches stat/read errors and skips that file; top-level `findFiles` errors propagate to webview handler | Top-level scanner errors propagate to webview handler | Core returns IPC error/cancellation contracts; UI presentation is client-owned |
 
 ## Detailed current-file contract (original characterization; command now uses Core)
 
@@ -141,14 +138,14 @@ No secret-specific scanner is invoked. Secret findings use the same local rule e
 
 ## Migration order
 
-1. Keep the Core workspace scan authoritative for workspace scans. Keep current-file, realtime, and both Agent tools on their characterized adapters.
-2. Close the required parity gaps with Core request/config/data contracts and tests before redirecting any caller.
-3. Run old and candidate paths against the fixtures and representative workspaces; compare findings, counts, ranges, diagnostics, secret projection, cancellation/errors, and agent result payloads.
-4. Redirect one path at a time behind its existing entry point. Keep VS Code commands, save listeners, and Agent UI projection in VS Code adapters.
-5. Remove duplicated implementations only after parity evidence covers supported file types, Flutter gating, settings, exclusions, generated/build files, unsaved content, caches, and errors.
+1. Keep the Core workspace scan authoritative for workspace scans; the current-file command and save/realtime document path now use `scan.file` through VS Code adapters.
+2. Keep both Agent tools on their characterized `WorkspaceScanner` path until their filtering, scope, error and UI contracts are migrated separately.
+3. Keep the current-file/realtime parity fixtures and compare findings, counts, ranges, diagnostics, cancellation/errors and Agent result payloads for any future changes.
+4. Keep VS Code commands, save listeners, document access and Agent UI projection in VS Code adapters.
+5. Remove duplicated implementations only after all remaining callers and behavior are covered. `WorkspaceScanner.scanDocument` still serves the post-fix current-document flow; `WorkspaceScanner` itself remains required by Agent scans.
 
 ## Characterization coverage and remaining unknowns
 
-Added tests use the Flutter fixture in `src/test/fixtures/file-scan/flutter` and cover built-in vulnerable/clean/comment-only inputs, configured custom rules, unsaved document versus disk content, supported extension/size/skip policy, metadata-keyed cache reuse, 800 ms save-request coalescing, Agent workspace result projection, and Agent secret filter/merge/no-result/error/multiple-result behavior.
+Added tests use the Flutter fixture in `src/test/fixtures/file-scan/flutter` and cover built-in vulnerable/clean/comment-only inputs, configured custom rules, unsaved document versus disk content, supported extension/size/skip policy, metadata-keyed cache reuse, 800 ms save-request coalescing, Core-backed realtime policy/projection and busy-scan fallback, Agent workspace result projection, and Agent secret filter/merge/no-result/error/multiple-result behavior.
 
-Still not directly covered: command registration and its warning/info messages; unsupported/untitled command behavior; untrusted-workspace behavior; changing custom rules/exclusions while cache entries exist; file-scan error UI; concurrent save while an actual scan is still running; diagnostic severity/source/code assertions against a captured VS Code diagnostic collection; secret rule-ID case sensitivity and every substring; serialization of secret-bearing `lineText`; `findFiles` failure; and multi-folder Agent selection beyond the first folder. These are current source observations, not asserted future contracts.
+Still not directly covered: command registration and its warning/info messages; unsupported/untitled command behavior; untrusted-workspace behavior; changing custom rules/exclusions while cache entries exist; concurrent save while an actual scan is still running (the controller busy branch is tested directly); diagnostic severity/source/code assertions against a captured VS Code diagnostic collection; secret rule-ID case sensitivity and every substring; serialization of secret-bearing `lineText`; `findFiles` failure; and multi-folder Agent selection beyond the first folder. These are current source observations, not asserted future contracts.

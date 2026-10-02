@@ -1,12 +1,12 @@
 # Core file-scan contract
 
-**Status:** `scan.file` now backs the VS Code current-file command. Realtime/save and Agent callers remain unmigrated; parity is path-specific.
+**Status:** `scan.file` backs the VS Code current-file command and save/realtime document path. Agent callers remain unmigrated; parity is path-specific.
 
 ## Current
 
 - Workspace scans use `scan.start` → `CoreScanService` → native and registered scanners. Supplying `targetPath` does not constrain the native scanner to that path.
 - `NativeWorkspaceScanner` reads workspace files from its filesystem port and owns its current native rule subset, size check, and directory exclusions.
-- VS Code current-file scans use `TextDocument.getText()` and pass captured content plus resolved policy to `CoreClient.fileScan`; realtime/save and Agent scans retain their existing implementations.
+- VS Code current-file and save/realtime scans use `TextDocument.getText()` and pass supplied content plus resolved policy to `CoreClient.fileScan`. The save adapter reads the buffer only when the existing debounced task is admitted by `runScan`. Agent scans retain their existing implementations.
 - `UnifiedFinding` is the Core domain model. `AqironIssue`, diagnostics, Agent summaries, debounce, editor state, and webview projections remain client concerns.
 
 ## New contract
@@ -40,10 +40,10 @@ The result is `CoreFileScanResult`: canonical request-derived `scanId`, `filePat
 
 ## Current-file migrated; other callers not migrated
 
-`ScanController.scanCurrentFile` invokes `CoreClient.fileScan`, passing the active editor's in-memory content and resolved policy. It reconstructs `AqironIssue.lineText` locally from the same content snapshot. Realtime/save, workspace scans, workspace-Agent, and secret-Agent callers remain on their existing paths. `WorkspaceScanner` and `scan.start` are unchanged. Client adapters continue to own:
+`ScanController.scanCurrentFile` and the debounced realtime/save adapter invoke `CoreClient.fileScan`, passing the editor/document's in-memory content and resolved policy. Both reconstruct `AqironIssue.lineText` locally from the same content snapshot. Workspace scans, workspace-Agent, and secret-Agent callers remain on their existing paths. `WorkspaceScanner` remains for Agent workspace scanning and the separate post-fix current-document flow; `scan.start` is unchanged. Client adapters continue to own:
 
 - resolving VS Code settings, workspace trust, Flutter/project gates, custom-rule configuration and `.aq`/glob semantics;
-- `TextDocument` access, save listeners, debounce, editor generations, cancellation UX and diagnostics;
+- `TextDocument` access, save listeners, debounce, active-scan fallback, editor generations, cancellation UX and diagnostics;
 - Agent secret-only filtering, five-location message limit, issue merging, error presentation and result serialization;
 - conversion such as `UnifiedFinding → AqironIssue` and client-specific UI projection. Current-file projection preserves rule metadata, range, severity, and issue ID format; webview serialization continues through its existing redaction boundary.
 

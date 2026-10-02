@@ -11,7 +11,7 @@ import { AqironWebviewController } from '../webview/aqironWebviewProvider';
 import { ExecutiveSummaryGenerator } from '../security/reports/reportGenerator';
 import { AIService } from '../ai/services/aiService';
 import { RagWorkspaceService } from '../rag/ragWorkspaceService';
-import { CoreFileScanRequest, CoreFileScanResult } from '../../packages/core/src/shared/fileScan';
+import { CoreFileScanRequest, CoreFileScanResult, ResolvedFileScanPolicy } from '../../packages/core/src/shared/fileScan';
 import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
 import { CoreClient } from '../core/coreClient';
 import { getResolvedCurrentFileRules } from '../scanner/rules';
@@ -66,7 +66,7 @@ export class ScanController implements vscode.Disposable {
 		}
 
 		this.debouncer.run(() => {
-			void this.scanDocument(document);
+			void this.scanRealtimeDocument(document);
 		});
 	}
 
@@ -112,43 +112,7 @@ export class ScanController implements vscode.Disposable {
 		}
 
 		await this.runScan(async () => {
-			if (!this.fileScanClient) {
-				throw new Error('Core file scanning is unavailable.');
-			}
-			const content = document.getText();
-			const skipReason = getSkipReason(document.uri.fsPath, content);
-			const request: CoreFileScanRequest = {
-				filePath: document.uri.fsPath,
-				content,
-				policy: {
-					supportedExtensions: [...supportedExtensions],
-					excludedPaths: skipReason ? [document.uri.fsPath] : [],
-					maxFileSizeBytes: null,
-					skipGeneratedFiles: !shouldScanGeneratedFiles(),
-					skipMinifiedFiles: true,
-					skipCompiledFiles: true,
-					eligible: !skipReason,
-					customRules: getResolvedCurrentFileRules(document.uri.fsPath),
-				},
-			};
-			const result = await this.fileScanClient.fileScan(request);
-			const lines = content.split(/\r?\n/);
-			const projected = result.findings.flatMap((finding) => {
-				const issue = projectFinding(finding, lines);
-				return issue ? [issue] : [];
-			});
-			const issues = [...new Map(projected.map((issue) => [`${issue.ruleId}:${issue.range.startLine}:${issue.range.startColumn}`, issue])).values()];
-			this.replaceFile(document.uri.fsPath, filterVisibleIssues(issues));
-			if (showMessage) {
-				vscode.window.showInformationMessage(`Aqiron Security file scan completed: ${issues.length} issue${issues.length === 1 ? '' : 's'} found.`);
-			}
-			return {
-				workspaceRoot: workspaceFolder.uri.fsPath,
-				target: document.uri.fsPath,
-				filesScanned: 1,
-				issues,
-				durationMs: result.durationMs,
-			};
+			return await this.scanDocumentWithCore(document, workspaceFolder.uri.fsPath, document.getText(), true, showMessage);
 		});
 	}
 
@@ -226,6 +190,44 @@ export class ScanController implements vscode.Disposable {
 		});
 	}
 
+	private async scanRealtimeDocument(document: vscode.TextDocument): Promise<void> {
+		await this.runScan(async () => {
+			const workspaceRoot = vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath;
+			const eligible = Boolean(workspaceRoot && isFlutterWorkspace(workspaceRoot));
+			// Read after the debounce fires and only after runScan has accepted this task, matching the legacy save path.
+			return await this.scanDocumentWithCore(document, workspaceRoot, document.getText(), eligible, false);
+		});
+	}
+
+	private async scanDocumentWithCore(document: vscode.TextDocument, workspaceRoot: string | undefined, content: string, eligible: boolean, showMessage: boolean): Promise<AqironScanResult> {
+		if (!this.fileScanClient) {
+			throw new Error('Core file scanning is unavailable.');
+		}
+		const request: CoreFileScanRequest = {
+			filePath: document.uri.fsPath,
+			content,
+			policy: resolveFileScanPolicy(document.uri.fsPath, content, eligible),
+		};
+		const result = await this.fileScanClient.fileScan(request);
+		const lines = content.split(/\r?\n/);
+		const projected = result.findings.flatMap((finding) => {
+			const issue = projectFinding(finding, lines);
+			return issue ? [issue] : [];
+		});
+		const issues = [...new Map(projected.map((issue) => [`${issue.ruleId}:${issue.range.startLine}:${issue.range.startColumn}`, issue])).values()];
+		this.replaceFile(document.uri.fsPath, filterVisibleIssues(issues));
+		if (showMessage) {
+			vscode.window.showInformationMessage(`Aqiron Security file scan completed: ${issues.length} issue${issues.length === 1 ? '' : 's'} found.`);
+		}
+		return {
+			workspaceRoot,
+			target: document.uri.fsPath,
+			filesScanned: 1,
+			issues,
+			durationMs: result.durationMs,
+		};
+	}
+
 	private async runScan(task: () => Promise<AqironScanResult>, scanMode?: 'quick' | 'deep' | 'analysis'): Promise<void> {
 		if (this.running) {
 			this.scanWorkspaceDebounced();
@@ -286,6 +288,20 @@ export class ScanController implements vscode.Disposable {
 		this.statusBar.text = `$(shield) Aqiron Security ${counts.total} Issue${counts.total === 1 ? '' : 's'}`;
 		this.statusBar.tooltip = `${counts.critical} critical, ${counts.high} high, ${counts.medium} medium, ${counts.low} low across ${counts.filesAffected} file${counts.filesAffected === 1 ? '' : 's'}`;
 	}
+}
+
+function resolveFileScanPolicy(filePath: string, content: string, eligible: boolean): ResolvedFileScanPolicy {
+	const skipReason = eligible ? getSkipReason(filePath, content) : undefined;
+	return {
+		supportedExtensions: [...supportedExtensions],
+		excludedPaths: skipReason ? [filePath] : [],
+		maxFileSizeBytes: null,
+		skipGeneratedFiles: !shouldScanGeneratedFiles(),
+		skipMinifiedFiles: true,
+		skipCompiledFiles: true,
+		eligible: eligible && !skipReason,
+		customRules: getResolvedCurrentFileRules(filePath),
+	};
 }
 
 function projectFinding(finding: UnifiedFinding, lines: readonly string[]): AqironIssue | undefined {

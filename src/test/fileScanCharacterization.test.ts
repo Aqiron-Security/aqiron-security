@@ -309,25 +309,18 @@ suite('Legacy file scan characterization', () => {
 		});
 	});
 
-	test('save/realtime requests coalesce to the last supported document after the 800ms debounce', async function () {
+	test('save/realtime requests coalesce to the last supported document after the 800ms debounce and use Core', async function () {
 		this.timeout(5000);
 		await withFlutterFixture(async fixtureRoot => {
-			const seen: string[] = [];
-			const output = { appendLine: () => undefined } as unknown as vscode.OutputChannel;
-			const scanner = new WorkspaceScanner(output);
-			(scanner as unknown as { scanDocument(document: vscode.TextDocument): Promise<AqironScanResult> }).scanDocument = async document => {
-				seen.push(document.uri.fsPath);
-				return { workspaceRoot: fixtureRoot, target: document.uri.fsPath, filesScanned: 1, issues: [], durationMs: 1 };
-			};
-			const diagnostics = { setIssues: () => undefined } as unknown as DiagnosticManager;
-			const sidebar = { setScanStatus: () => undefined, update: () => undefined, onPipelineEvent: () => undefined } as unknown as AqironWebviewController;
-			const statusBar = { text: '', tooltip: '' } as vscode.StatusBarItem;
-			const controller = new ScanController(scanner, diagnostics, sidebar, statusBar, output);
-			const first = documentAt(path.join(fixtureRoot, 'lib', 'first.dart'));
-			const second = documentAt(path.join(fixtureRoot, 'lib', 'second.dart'));
-			const last = documentAt(path.join(fixtureRoot, 'lib', 'last.dart'));
-			const unsupported = documentAt(path.join(fixtureRoot, 'lib', 'notes.txt'));
-			try {
+			const seen: CoreFileScanRequest[] = [];
+			await withRealtimeController(async request => {
+				seen.push(request);
+				return emptyFileScanResult(request);
+			}, async controller => {
+				const first = documentAt(path.join(fixtureRoot, 'lib', 'first.dart'));
+				const second = documentAt(path.join(fixtureRoot, 'lib', 'second.dart'));
+				const last = documentAt(path.join(fixtureRoot, 'lib', 'last.dart'));
+				const unsupported = documentAt(path.join(fixtureRoot, 'lib', 'notes.txt'));
 				controller.scanDocumentDebounced(unsupported);
 				controller.scanDocumentDebounced(first);
 				await delay(100);
@@ -335,10 +328,147 @@ suite('Legacy file scan characterization', () => {
 				await delay(100);
 				controller.scanDocumentDebounced(last);
 				await delay(900);
-				assert.deepEqual(seen, [last.uri.fsPath]);
+				assert.deepEqual(seen.map(request => request.filePath), [last.uri.fsPath]);
+				assert.equal((controller as unknown as { legacyCalls: number }).legacyCalls, 0);
+			});
+		});
+	});
+
+	test('save/realtime reads the latest in-memory buffer after debounce and never reads stale disk content', async function () {
+		this.timeout(5000);
+		await withFlutterFixture(async fixtureRoot => {
+			const filePath = path.join(fixtureRoot, 'lib', `realtime-buffer-${process.pid}.js`);
+			const diskContent = 'function safe() { return true; }\n';
+			let editorContent = 'function safe() { return true; }\n';
+			await fs.writeFile(filePath, diskContent, 'utf8');
+			const requestList: CoreFileScanRequest[] = [];
+			try {
+				await withRealtimeController(async request => {
+					requestList.push(request);
+					const response = await new CoreRuntime({ coreVersion: 'realtime-test' }).handle({
+						id: `realtime-${process.pid}`, type: 'request', method: 'scan.file', params: request,
+					}, () => undefined);
+					if (!response.success) {throw new Error(response.error?.message ?? 'Core realtime scan failed.');}
+					return response.result as CoreFileScanResult;
+				}, async controller => {
+					const document = documentAt(filePath, () => editorContent);
+					controller.scanDocumentDebounced(document);
+					await delay(450);
+					editorContent = 'function unsafe(input) { return eval(input); }\n';
+					await delay(500);
+					assert.equal(requestList.length, 1);
+					assert.equal(requestList[0].content, editorContent);
+					assert.notEqual(requestList[0].content, diskContent);
+					const expected = scanContent(filePath, editorContent);
+					assert.ok(expected.some(issue => issue.ruleId === 'high.eval'));
+					const observed = (controller as unknown as { diagnosticIssues: import('../models/issue').AqironIssue[] }).diagnosticIssues;
+					assert.deepEqual(observed.map(issue => [issue.id, issue.ruleId, issue.severity, issue.range.startLine, issue.range.startColumn, issue.range.endLine, issue.range.endColumn, issue.lineText]), expected.map(issue => [issue.id, issue.ruleId, issue.severity, issue.range.startLine, issue.range.startColumn, issue.range.endLine, issue.range.endColumn, issue.lineText]));
+				});
 			} finally {
-				controller.dispose();
+				await fs.rm(filePath, { force: true });
 			}
+		});
+	});
+
+	test('realtime scanning obeys the enable setting and continues to ignore unsupported extensions', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			await withSettingsAsync({ enableRealtimeScan: false }, async () => {
+				await withRealtimeController(async () => { throw new Error('Core must not be called'); }, async controller => {
+					controller.scanDocumentDebounced(documentAt(path.join(fixtureRoot, 'lib', 'eligible.dart'), () => 'print("x");'));
+					assert.equal((controller as unknown as { requestCount: number }).requestCount, 0);
+				});
+			});
+			await withSettingsAsync({ enableRealtimeScan: true }, async () => {
+				await withRealtimeController(async () => { throw new Error('Core must not be called'); }, async controller => {
+					controller.scanDocumentDebounced(documentAt(path.join(fixtureRoot, 'lib', 'notes.txt'), () => 'print("x");'));
+					controller.scanDocumentDebounced(documentAt(path.join(fixtureRoot, 'lib', 'Main.class'), () => 'compiled'));
+					assert.equal((controller as unknown as { requestCount: number }).requestCount, 0);
+				});
+			});
+		});
+	});
+
+	test('realtime preserves Flutter gating, custom rules, skip policy, and uncapped document size', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const rule = { id: 'fixture.realtime', title: 'Realtime custom', message: 'Review this call.', severity: 'High', pattern: 'unsafeRealtime\\s*\\(', extensions: ['.js'] };
+			await withCustomRulesAsync([rule], async () => {
+				await withRealtimeController(async request => {
+					const response = await new CoreRuntime({ coreVersion: 'realtime-policy-test' }).handle({
+						id: `policy-${process.pid}`, type: 'request', method: 'scan.file', params: request,
+					}, () => undefined);
+					if (!response.success) {throw new Error(response.error?.message ?? 'Core policy scan failed.');}
+					return response.result as CoreFileScanResult;
+				}, async controller => {
+					const customPath = path.join(fixtureRoot, 'lib', 'realtime-custom.js');
+					await invokeRealtimeNow(controller, documentAt(customPath, () => 'unsafeRealtime();'));
+					assert.equal((controller as unknown as { lastRequest: CoreFileScanRequest }).lastRequest.policy.customRules.some(candidate => candidate.id === rule.id), true);
+					assert.ok((controller as unknown as { diagnosticIssues: import('../models/issue').AqironIssue[] }).diagnosticIssues.some(issue => issue.ruleId === rule.id));
+
+					const generatedPath = path.join(fixtureRoot, 'lib', 'model.generated.dart');
+					await invokeRealtimeNow(controller, documentAt(generatedPath, () => 'print("generated");'));
+					let request = (controller as unknown as { lastRequest: CoreFileScanRequest }).lastRequest;
+					assert.equal(request.policy.eligible, false);
+					assert.deepEqual(request.policy.excludedPaths, [generatedPath]);
+
+					const minifiedPath = path.join(fixtureRoot, 'lib', 'realtime-bundle.js');
+					await invokeRealtimeNow(controller, documentAt(minifiedPath, () => `${'x'.repeat(1200)}\\n${'y'.repeat(1200)}`));
+					request = (controller as unknown as { lastRequest: CoreFileScanRequest }).lastRequest;
+					assert.equal(request.policy.eligible, false);
+					assert.equal(request.policy.maxFileSizeBytes, null);
+					assert.equal(request.policy.skipCompiledFiles, true);
+
+					await withSettingsAsync({ excludeFolders: ['vendor'] }, async () => {
+						const excludedPath = path.join(fixtureRoot, 'vendor', 'realtime-excluded.js');
+						await invokeRealtimeNow(controller, documentAt(excludedPath, () => 'unsafeRealtime();'));
+						request = (controller as unknown as { lastRequest: CoreFileScanRequest }).lastRequest;
+						assert.equal(request.policy.eligible, false);
+						assert.deepEqual(request.policy.excludedPaths, [excludedPath]);
+					});
+					assert.equal((controller as unknown as { legacyCalls: number }).legacyCalls, 0);
+				});
+			});
+
+			const nonFlutterRoot = path.resolve(__dirname, '../../../src/test/fixtures/file-scan');
+			const nonFlutterFolder: vscode.WorkspaceFolder = { uri: vscode.Uri.file(nonFlutterRoot), name: 'Non-Flutter fixture', index: 0 };
+			await withWorkspaceFolder(nonFlutterFolder, async () => {
+				await withRealtimeController(async request => {
+					const response = await new CoreRuntime({ coreVersion: 'realtime-flutter-test' }).handle({
+						id: `flutter-${process.pid}`, type: 'request', method: 'scan.file', params: request,
+					}, () => undefined);
+					if (!response.success) {throw new Error(response.error?.message ?? 'Core Flutter gate scan failed.');}
+					return response.result as CoreFileScanResult;
+				}, async controller => {
+					const document = documentAt(path.join(nonFlutterRoot, 'outside.js'), () => 'eval("x");');
+					await invokeRealtimeNow(controller, document);
+					assert.equal((controller as unknown as { lastRequest: CoreFileScanRequest }).lastRequest.policy.eligible, false);
+					assert.deepEqual((controller as unknown as { diagnosticIssues: import('../models/issue').AqironIssue[] }).diagnosticIssues, []);
+				});
+			});
+		});
+	});
+
+	test('realtime request during an active scan retains the workspace-scan fallback', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			await withRealtimeController(async () => { throw new Error('Core file scan must not start while controller is busy'); }, async controller => {
+				const privateController = controller as unknown as { running: boolean; scanWorkspaceDebounced: () => void; fallbackCount: number; requestCount: number; legacyCalls: number };
+				privateController.running = true;
+				privateController.fallbackCount = 0;
+				privateController.scanWorkspaceDebounced = () => {privateController.fallbackCount += 1;};
+				await invokeRealtimeNow(controller, documentAt(path.join(fixtureRoot, 'lib', 'active.js'), () => 'eval("x");'));
+				assert.equal(privateController.fallbackCount, 1);
+				assert.equal(privateController.requestCount, 0);
+				assert.equal(privateController.legacyCalls, 0);
+			});
+		});
+	});
+
+	test('realtime Core errors are surfaced through the existing scan failure path', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			await withRealtimeController(async () => { throw new Error('Core request cancelled.'); }, async controller => {
+				await invokeRealtimeNow(controller, documentAt(path.join(fixtureRoot, 'lib', 'cancelled.js'), () => 'eval("x");'));
+				assert.equal((controller as unknown as { workspaceStats: { scanStatus: string } }).workspaceStats.scanStatus, 'Failed');
+				assert.ok((controller as unknown as { outputLines: string[] }).outputLines.some(line => line.includes('Core request cancelled.')));
+			});
 		});
 	});
 });
@@ -359,6 +489,80 @@ async function withFlutterFixture(run: (root: string) => Promise<void>): Promise
 	} finally {
 		restoreProperty(workspace, 'workspaceFolders', folderDescriptor);
 		restoreProperty(workspace, 'getWorkspaceFolder', lookupDescriptor);
+	}
+}
+
+async function withRealtimeController<T>(fileScan: (request: CoreFileScanRequest) => Promise<CoreFileScanResult>, run: (controller: ScanController) => Promise<T>): Promise<T> {
+	let requestCount = 0;
+	let lastRequest: CoreFileScanRequest | undefined;
+	let legacyCalls = 0;
+	let diagnosticIssues: import('../models/issue').AqironIssue[] = [];
+	const outputLines: string[] = [];
+	const scanner = new WorkspaceScanner(quietOutput());
+	(scanner as unknown as { scanDocument(document: vscode.TextDocument): Promise<AqironScanResult> }).scanDocument = async document => {
+		legacyCalls += 1;
+		throw new Error(`Legacy realtime scanner was called for ${document.uri.fsPath}.`);
+	};
+	const output = { appendLine: (line: string) => outputLines.push(line) } as unknown as vscode.OutputChannel;
+	const diagnostics = { setIssues: (issues: import('../models/issue').AqironIssue[]) => {diagnosticIssues = issues;} } as unknown as DiagnosticManager;
+	const sidebar = { setScanStatus: () => undefined, update: () => undefined, onPipelineEvent: () => undefined } as unknown as AqironWebviewController;
+	const controller = new ScanController(scanner, diagnostics, sidebar, { text: '', tooltip: '' } as vscode.StatusBarItem, output, undefined, undefined, undefined, {
+		fileScan: async request => {
+			requestCount += 1;
+			lastRequest = request;
+			return await fileScan(request);
+		},
+	});
+	Object.defineProperties(controller, {
+		requestCount: { get: () => requestCount },
+		lastRequest: { get: () => lastRequest },
+		legacyCalls: { get: () => legacyCalls },
+		diagnosticIssues: { get: () => diagnosticIssues },
+		outputLines: { get: () => outputLines },
+	});
+	try {
+		return await run(controller);
+	} finally {
+		controller.dispose();
+	}
+}
+
+async function invokeRealtimeNow(controller: ScanController, document: vscode.TextDocument): Promise<void> {
+	await (controller as unknown as { scanRealtimeDocument(document: vscode.TextDocument): Promise<void> }).scanRealtimeDocument(document);
+}
+
+function emptyFileScanResult(request: CoreFileScanRequest): CoreFileScanResult {
+	return { scanId: 'realtime-test', filePath: request.filePath, state: 'completed', findings: [], filesScanned: 1, findingCount: 0, durationMs: 1 };
+}
+
+async function withWorkspaceFolder<T>(folder: vscode.WorkspaceFolder, run: () => Promise<T>): Promise<T> {
+	const workspace = vscode.workspace as unknown as Record<string, unknown>;
+	const foldersDescriptor = Object.getOwnPropertyDescriptor(workspace, 'workspaceFolders');
+	const lookupDescriptor = Object.getOwnPropertyDescriptor(workspace, 'getWorkspaceFolder');
+	Object.defineProperty(workspace, 'workspaceFolders', { configurable: true, value: [folder] });
+	Object.defineProperty(workspace, 'getWorkspaceFolder', { configurable: true, value: () => folder });
+	try {
+		return await run();
+	} finally {
+		restoreProperty(workspace, 'workspaceFolders', foldersDescriptor);
+		restoreProperty(workspace, 'getWorkspaceFolder', lookupDescriptor);
+	}
+}
+
+async function withSettingsAsync<T>(settings: Record<string, unknown>, run: () => Promise<T>): Promise<T> {
+	const workspace = vscode.workspace as unknown as Record<string, unknown>;
+	const descriptor = Object.getOwnPropertyDescriptor(workspace, 'getConfiguration');
+	const original = vscode.workspace.getConfiguration.bind(vscode.workspace);
+	Object.defineProperty(workspace, 'getConfiguration', {
+		configurable: true,
+		value: (section?: string, scope?: vscode.ConfigurationScope) => section === 'aqiron-security'
+			? { get: <V>(key: string, defaultValue?: V): V | unknown => Object.prototype.hasOwnProperty.call(settings, key) ? settings[key] : defaultValue }
+			: original(section, scope),
+	});
+	try {
+		return await run();
+	} finally {
+		restoreProperty(workspace, 'getConfiguration', descriptor);
 	}
 }
 
@@ -486,8 +690,8 @@ function restoreProperty(target: Record<string, unknown>, key: string, descripto
 	}
 }
 
-function documentAt(file: string): vscode.TextDocument {
-	return { uri: vscode.Uri.file(file) } as vscode.TextDocument;
+function documentAt(file: string, getText: () => string = () => ''): vscode.TextDocument {
+	return { uri: vscode.Uri.file(file), getText } as vscode.TextDocument;
 }
 
 function quietOutput(): vscode.OutputChannel {
