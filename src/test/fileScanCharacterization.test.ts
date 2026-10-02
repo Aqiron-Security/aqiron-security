@@ -7,8 +7,10 @@ import { DiagnosticManager } from '../diagnostics/diagnosticManager';
 import { AqironScanResult } from '../models/issue';
 import { WorkspaceScanner } from '../scanner/workspaceScanner';
 import { scanContent } from '../scanner/rules';
-import { getMaxFileSizeBytes, getSkipReason, isFlutterWorkspace, isSupportedFile } from '../utils/files';
+import { getMaxFileSizeBytes, getSkipReason, isFlutterWorkspace, isSupportedFile, supportedExtensions } from '../utils/files';
 import { AqironWebviewController } from '../webview/aqironWebviewProvider';
+import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
+import { CoreFileScanRequest, CoreFileScanResult } from '../../packages/core/src/shared/fileScan';
 
 suite('Legacy file scan characterization', () => {
 	test('built-in rules detect representative Flutter issues and leave clean/comment-only inputs alone', async () => {
@@ -84,6 +86,180 @@ suite('Legacy file scan characterization', () => {
 			assert.equal(currentFileResult.target, file);
 			assert.equal(currentFileResult.workspaceRoot, fixtureRoot);
 			assert.equal(currentFileResult.filesScanned, 1);
+		});
+	});
+
+	test('current-file command scans the active unsaved buffer through Core and preserves the characterized findings', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const file = path.join(fixtureRoot, 'lib', 'clean.dart');
+			const content = "void main() {\n  print('unsaved');\n  const apiKey = '12345678901234567890';\n}\n";
+			const outcome = await runCurrentFileCoreScan(file, content);
+			assert.equal(outcome.request.filePath, file);
+			assert.equal(outcome.request.content, content);
+			assert.equal(outcome.request.policy.maxFileSizeBytes, null, 'current-file scans remain uncapped');
+			assert.ok(outcome.request.policy.supportedExtensions.includes('.dart'));
+			assert.equal(outcome.request.policy.eligible, true);
+			assert.equal(outcome.legacyCalls, 0, 'current-file command must not call WorkspaceScanner.scanDocument');
+			assert.deepEqual(outcome.issues.map(issue => issue.ruleId), scanContent(file, content).map(issue => issue.ruleId));
+			assert.equal(outcome.issues[0].lineText, "  print('unsaved');");
+			assert.equal(outcome.issues[0].range.startLine, 1);
+			assert.equal(outcome.issues[0].range.startColumn, 2);
+			assert.equal(outcome.issues[0].range.endColumn, 8);
+			assert.equal('workspaceRoot' in outcome.request, false, 'file scan must not request workspace traversal');
+		});
+	});
+
+	test('current-file command preserves clean and comment-only fixture behavior', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const cleanPath = path.join(fixtureRoot, 'lib', 'clean.dart');
+			const clean = await fs.readFile(cleanPath, 'utf8');
+			assert.deepEqual((await runCurrentFileCoreScan(cleanPath, clean)).issues, []);
+			const commentedPath = path.join(fixtureRoot, 'lib', 'commented.dart');
+			const commented = await fs.readFile(commentedPath, 'utf8');
+			assert.deepEqual((await runCurrentFileCoreScan(commentedPath, commented)).issues, []);
+		});
+	});
+
+	test('current-file Core projection matches the vulnerable characterization fixture', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const file = path.join(fixtureRoot, 'lib', 'vulnerable.dart');
+			const content = await fs.readFile(file, 'utf8');
+			const expected = scanContent(file, content);
+			const actual = await runCurrentFileCoreScan(file, content);
+			assert.deepEqual(actual.issues.map(issue => [issue.file, issue.title, issue.message, issue.ruleId, issue.severity, issue.range.startLine, issue.range.startColumn, issue.range.endLine, issue.range.endColumn]), expected.map(issue => [issue.file, issue.title, issue.message, issue.ruleId, issue.severity, issue.range.startLine, issue.range.startColumn, issue.range.endLine, issue.range.endColumn]));
+			assert.ok(actual.issues.every(issue => issue.lineText === content.split(/\r?\n/)[issue.range.startLine]));
+			assert.equal(actual.legacyCalls, 0);
+		});
+	});
+
+	test('current-file policy exposes all supported extensions and preserves the extension gate', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const outcome = await runCurrentFileCoreScan(path.join(fixtureRoot, 'lib', 'sample.rs'), '');
+			assert.deepEqual(outcome.request.policy.supportedExtensions.sort(), [...supportedExtensions].sort());
+			for (const extension of supportedExtensions) {
+				assert.equal(isSupportedFile(vscode.Uri.file(path.join(fixtureRoot, 'lib', `sample${extension}`))), true, `${extension} should be accepted by the characterized extension gate`);
+			}
+			assert.equal(isSupportedFile(vscode.Uri.file(path.join(fixtureRoot, 'lib', 'sample.class'))), false, 'compiled .class files are rejected by the existing supported-file gate before Core');
+			let coreCalls = 0;
+			const compiledDocument = { uri: vscode.Uri.file(path.join(fixtureRoot, 'lib', 'Main.class')), getText: () => 'compiled' } as vscode.TextDocument;
+			await withActiveDocument(compiledDocument, () => withCurrentFileController(controller => controller.scanCurrentFile(), async request => {
+				coreCalls += 1;
+				return { scanId: 'unexpected', filePath: request.filePath, state: 'completed', findings: [], filesScanned: 1, findingCount: 0, durationMs: 0 };
+			}));
+			assert.equal(coreCalls, 0, 'compiled extensions do not reach Core because the client supported-file gate rejects them first');
+		});
+	});
+
+	test('current-file skip policy resolves .aq, generated, minified, and compiled cases', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const cases = [
+				{ file: path.join(fixtureRoot, 'build', 'ignored.dart'), content: 'print("ignored");', oldReason: 'excluded by .aq' },
+				{ file: path.join(fixtureRoot, 'lib', 'model.generated.dart'), content: 'print("generated");', oldReason: 'generated code' },
+				{ file: path.join(fixtureRoot, 'lib', 'bundle.js'), content: `${'x'.repeat(1100)}\nshort`, oldReason: 'minified file' },
+			] as const;
+			for (const item of cases) {
+				assert.equal(getSkipReason(item.file, item.content), item.oldReason);
+				const result = await runCurrentFileCoreScan(item.file, item.content);
+				assert.equal(result.request.policy.eligible, false);
+				assert.deepEqual(result.request.policy.excludedPaths, [item.file]);
+				assert.equal(result.result.state, 'skipped');
+				assert.deepEqual(result.issues, []);
+				assert.equal(result.result.filesScanned, 0, 'Core reports that the target was skipped');
+				assert.equal(result.clientFilesScanned, 1, 'the VS Code command preserves its historical one-file result count even when skipped');
+			}
+
+			// Preserve the legacy current-file predicate: a long line alone is not minified.
+			const longButNotMinified = `${'x'.repeat(1001)}\n${'short\n'.repeat(4)}`;
+			const borderlinePath = path.join(fixtureRoot, 'lib', 'source.dart');
+			assert.equal(getSkipReason(borderlinePath, longButNotMinified), undefined, 'legacy minified detection also requires a high average line length');
+			const current = await runCurrentFileCoreScan(borderlinePath, longButNotMinified);
+			assert.equal(current.result.state, 'completed', 'Core should scan a long line when the legacy average-line threshold is not met');
+
+			await withExcludeFoldersAsync(['vendor'], async () => {
+				const excludedPath = path.join(fixtureRoot, 'vendor', 'input.dart');
+				assert.equal(getSkipReason(excludedPath, 'print("excluded");'), 'excluded folder');
+				const excluded = await runCurrentFileCoreScan(excludedPath, 'print("excluded");');
+				assert.equal(excluded.request.policy.eligible, false);
+				assert.deepEqual(excluded.request.policy.excludedPaths, [excludedPath]);
+			});
+		});
+	});
+
+	test('current-file CORS rule conversion preserves legacy case-insensitive matching', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const file = path.join(fixtureRoot, 'lib', 'policy.js');
+			const content = "CORS({ ORIGIN: '*' });";
+			assert.ok(scanContent(file, content).some(issue => issue.ruleId === 'high.permissive-cors'));
+			const current = await runCurrentFileCoreScan(file, content);
+			assert.ok(current.issues.some(issue => issue.ruleId === 'high.permissive-cors'), 'converted Core rule preserves the legacy /i flag');
+		});
+	});
+
+	test('current-file Python triple-quoted docstrings preserve legacy multiline stripping', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const file = path.join(fixtureRoot, 'lib', 'documented.py');
+			const content = '"""\nDEBUG = True\n"""\n';
+			assert.deepEqual(scanContent(file, content), [], 'legacy scanner treats this multiline string as non-executable content');
+			const current = await runCurrentFileCoreScan(file, content);
+			assert.deepEqual(current.issues, [], 'Core preserves triple-quoted string state across lines');
+		});
+	});
+
+	test('current-file command resolves configured custom rules and explicit skip policy before Core scan', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const rule = { id: 'fixture.custom', title: 'Fixture policy', message: 'Remove this call.', severity: 'High', pattern: 'unsafeCall\\s*\\(', extensions: ['.dart'] };
+			await withCustomRulesAsync([rule], async () => {
+				const customPath = path.join(fixtureRoot, 'lib', 'custom.dart');
+				const outcome = await runCurrentFileCoreScan(customPath, 'unsafeCall();');
+				assert.deepEqual(outcome.issues.map(issue => issue.ruleId), ['fixture.custom']);
+				assert.deepEqual(outcome.request.policy.customRules.find(candidate => candidate.id === rule.id), rule);
+			});
+			const generatedPath = path.join(fixtureRoot, 'lib', 'model.generated.dart');
+			const skipped = await runCurrentFileCoreScan(generatedPath, 'print("should skip");');
+			assert.equal(skipped.request.policy.eligible, false);
+			assert.deepEqual(skipped.issues, []);
+		});
+	});
+
+	test('current-file command retains workspace and Flutter gates without invoking Core', async () => {
+		const fixtureRoot = path.resolve(__dirname, '../../../src/test/fixtures/file-scan');
+		const file = path.join(fixtureRoot, 'outside.dart');
+		const folder: vscode.WorkspaceFolder = { uri: vscode.Uri.file(fixtureRoot), name: 'Non-Flutter fixture', index: 0 };
+		const workspace = vscode.workspace as unknown as Record<string, unknown>;
+		const foldersDescriptor = Object.getOwnPropertyDescriptor(workspace, 'workspaceFolders');
+		const lookupDescriptor = Object.getOwnPropertyDescriptor(workspace, 'getWorkspaceFolder');
+		Object.defineProperty(workspace, 'workspaceFolders', { configurable: true, value: [folder] });
+		Object.defineProperty(workspace, 'getWorkspaceFolder', { configurable: true, value: () => folder });
+		let coreCalls = 0;
+		try {
+			const document = { uri: vscode.Uri.file(file), getText: () => 'print("x");' } as vscode.TextDocument;
+			await withActiveDocument(document, () => withCurrentFileController(controller => controller.scanCurrentFile(), async request => {
+				coreCalls += 1;
+				return { scanId: 'unexpected', filePath: request.filePath, state: 'completed', findings: [], filesScanned: 1, findingCount: 0, durationMs: 0 };
+			}));
+		} finally {
+			restoreProperty(workspace, 'workspaceFolders', foldersDescriptor);
+			restoreProperty(workspace, 'getWorkspaceFolder', lookupDescriptor);
+		}
+		assert.equal(coreCalls, 0);
+	});
+
+	test('current-file command retains the active-file workspace-membership gate', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const workspace = vscode.workspace as unknown as Record<string, unknown>;
+			const descriptor = Object.getOwnPropertyDescriptor(workspace, 'getWorkspaceFolder');
+			Object.defineProperty(workspace, 'getWorkspaceFolder', { configurable: true, value: () => undefined });
+			let coreCalls = 0;
+			try {
+				const document = { uri: vscode.Uri.file(path.join(fixtureRoot, 'lib', 'safe.dart')), getText: () => '' } as vscode.TextDocument;
+				await withActiveDocument(document, () => withCurrentFileController(controller => controller.scanCurrentFile(), async request => {
+					coreCalls += 1;
+					return { scanId: 'unexpected', filePath: request.filePath, state: 'completed', findings: [], filesScanned: 1, findingCount: 0, durationMs: 0 };
+				}));
+			} finally {
+				restoreProperty(workspace, 'getWorkspaceFolder', descriptor);
+			}
+			assert.equal(coreCalls, 0);
 		});
 	});
 
@@ -183,6 +359,122 @@ async function withFlutterFixture(run: (root: string) => Promise<void>): Promise
 	} finally {
 		restoreProperty(workspace, 'workspaceFolders', folderDescriptor);
 		restoreProperty(workspace, 'getWorkspaceFolder', lookupDescriptor);
+	}
+}
+
+async function runCurrentFileCoreScan(filePath: string, content: string): Promise<{ request: CoreFileScanRequest; result: CoreFileScanResult; issues: import('../models/issue').AqironIssue[]; legacyCalls: number; clientFilesScanned: number }> {
+	let capturedRequest: CoreFileScanRequest | undefined;
+	let capturedResult: CoreFileScanResult | undefined;
+	let capturedIssues: import('../models/issue').AqironIssue[] = [];
+	let legacyCalls = 0;
+	const client = {
+		fileScan: async (request: CoreFileScanRequest) => {
+			capturedRequest = request;
+			const response = await new CoreRuntime({ coreVersion: 'file-scan-test' }).handle({
+				id: `current-${Math.random().toString(36).slice(2, 8)}`, type: 'request', method: 'scan.file', params: request,
+			}, () => undefined);
+			if (!response.success) {throw new Error(response.error?.message ?? 'Core file scan failed.');}
+			capturedResult = response.result as CoreFileScanResult;
+			return capturedResult;
+		},
+	};
+	const scanDocument = async (): Promise<never> => {legacyCalls += 1; throw new Error('Legacy current-file scan was invoked.');};
+	const scanner = { scanDocument, scanWorkspace: async () => {throw new Error('Workspace scanner was invoked.');} } as unknown as WorkspaceScanner;
+	const output = { appendLine: () => undefined } as unknown as vscode.OutputChannel;
+	const sidebar = {
+		setScanStatus: () => undefined,
+		update: (issues: import('../models/issue').AqironIssue[]) => {capturedIssues = issues;},
+		onPipelineEvent: () => undefined,
+	} as unknown as AqironWebviewController;
+	const controller = new ScanController(
+		scanner,
+		{ setIssues: () => undefined } as unknown as DiagnosticManager,
+		sidebar,
+		{ text: '', tooltip: '' } as vscode.StatusBarItem,
+		output,
+		undefined,
+		undefined,
+		undefined,
+		client,
+	);
+	try {
+		const document = { uri: vscode.Uri.file(filePath), getText: () => content } as vscode.TextDocument;
+		await withActiveDocument(document, () => controller.scanCurrentFile());
+	} finally {
+		controller.dispose();
+	}
+	assert.ok(capturedRequest && capturedResult, 'current-file command must send a Core file-scan request');
+	const clientFilesScanned = (controller as unknown as { workspaceStats: { filesScanned: number } }).workspaceStats.filesScanned;
+	return { request: capturedRequest, result: capturedResult, issues: capturedIssues, legacyCalls, clientFilesScanned };
+}
+
+async function withActiveDocument<T>(document: vscode.TextDocument, run: () => Promise<T>): Promise<T> {
+	const window = vscode.window as unknown as Record<string, unknown>;
+	const descriptor = Object.getOwnPropertyDescriptor(window, 'activeTextEditor');
+	Object.defineProperty(window, 'activeTextEditor', { configurable: true, value: { document } });
+	try {
+		return await run();
+	} finally {
+		restoreProperty(window, 'activeTextEditor', descriptor);
+	}
+}
+
+async function withCurrentFileController<T>(run: (controller: ScanController) => Promise<T>, fileScan: (request: CoreFileScanRequest) => Promise<CoreFileScanResult>): Promise<T> {
+	const scanner = new WorkspaceScanner(quietOutput());
+	(scanner as unknown as { scanDocument: () => Promise<AqironScanResult> }).scanDocument = async () => {
+		throw new Error('Legacy current-file scanner must not be called.');
+	};
+	const output = quietOutput();
+	const sidebar = { setScanStatus: () => undefined, update: () => undefined, onPipelineEvent: () => undefined } as unknown as AqironWebviewController;
+	const controller = new ScanController(
+		scanner,
+		{ setIssues: () => undefined } as unknown as DiagnosticManager,
+		sidebar,
+		{ text: '', tooltip: '' } as vscode.StatusBarItem,
+		output,
+		undefined,
+		undefined,
+		undefined,
+		{ fileScan },
+	);
+	try {
+		return await run(controller);
+	} finally {
+		controller.dispose();
+	}
+}
+
+async function withCustomRulesAsync<T>(rules: unknown[], run: () => Promise<T>): Promise<T> {
+	const workspace = vscode.workspace as unknown as Record<string, unknown>;
+	const descriptor = Object.getOwnPropertyDescriptor(workspace, 'getConfiguration');
+	const original = vscode.workspace.getConfiguration.bind(vscode.workspace);
+	Object.defineProperty(workspace, 'getConfiguration', {
+		configurable: true,
+		value: (section?: string, scope?: vscode.ConfigurationScope) => section === 'aqiron-security'
+			? { get: <V>(key: string, defaultValue?: V): V | unknown => key === 'customRules' ? rules : defaultValue }
+			: original(section, scope),
+	});
+	try {
+		return await run();
+	} finally {
+		restoreProperty(workspace, 'getConfiguration', descriptor);
+	}
+}
+
+async function withExcludeFoldersAsync<T>(folders: string[], run: () => Promise<T>): Promise<T> {
+	const workspace = vscode.workspace as unknown as Record<string, unknown>;
+	const descriptor = Object.getOwnPropertyDescriptor(workspace, 'getConfiguration');
+	const original = vscode.workspace.getConfiguration.bind(vscode.workspace);
+	Object.defineProperty(workspace, 'getConfiguration', {
+		configurable: true,
+		value: (section?: string, scope?: vscode.ConfigurationScope) => section === 'aqiron-security'
+			? { get: <V>(key: string, defaultValue?: V): V | unknown => key === 'excludeFolders' ? folders : defaultValue }
+			: original(section, scope),
+	});
+	try {
+		return await run();
+	} finally {
+		restoreProperty(workspace, 'getConfiguration', descriptor);
 	}
 }
 

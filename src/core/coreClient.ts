@@ -6,6 +6,7 @@ import { SecurityContext } from '../../packages/core/src/context/contextTypes';
 import { RagIndexData, RagSearchResult } from '../../packages/core/src/shared/rag';
 import { ScanState, PipelineEvent } from '../../packages/core/src/pipeline/events';
 import { SecurityReportContent } from '../../packages/core/src/reports';
+import { CoreFileScanRequest, CoreFileScanResult } from '../../packages/core/src/shared/fileScan';
 import { CoreProcessEvent, CoreProcessManager } from './coreProcessManager';
 import { CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreReportGenerateRequest } from '../../packages/core/src/runtime';
 
@@ -82,6 +83,11 @@ export class CoreClient extends EventEmitter {
 		// A deep scan can run several bounded scanner operations sequentially.
 		// The individual scanner timeouts remain strict; this covers the aggregate operation.
 		return await this.manager.request('scan.start', { ...request, requestId }, 10 * 60_000, requestId);
+	}
+
+	async fileScan(request: CoreFileScanRequest): Promise<CoreFileScanResult> {
+		await this.start();
+		return await this.manager.request('scan.file', request, 120_000, createId());
 	}
 
 	async cancelScan(scanId: string): Promise<{ cancelled: boolean }> {

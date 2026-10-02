@@ -5,12 +5,16 @@ import { WorkspaceScanner } from '../scanner/workspaceScanner';
 import { SecurityOrchestrator } from '../security/orchestrator/securityOrchestrator';
 import { SourceLocation } from '../shared/sourceSpan';
 import { Debouncer } from '../utils/debounce';
-import { getIssueSkipReason, isFlutterWorkspace, isSupportedFile } from '../utils/files';
+import { getIssueSkipReason, isFlutterWorkspace, isSupportedFile, supportedExtensions, getSkipReason, shouldScanGeneratedFiles } from '../utils/files';
 import { getCounts } from '../views/aqironTreeProvider';
 import { AqironWebviewController } from '../webview/aqironWebviewProvider';
 import { ExecutiveSummaryGenerator } from '../security/reports/reportGenerator';
 import { AIService } from '../ai/services/aiService';
 import { RagWorkspaceService } from '../rag/ragWorkspaceService';
+import { CoreFileScanRequest, CoreFileScanResult } from '../../packages/core/src/shared/fileScan';
+import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
+import { CoreClient } from '../core/coreClient';
+import { getResolvedCurrentFileRules } from '../scanner/rules';
 
 export class ScanController implements vscode.Disposable {
 	private readonly debouncer = new Debouncer(800);
@@ -35,6 +39,7 @@ export class ScanController implements vscode.Disposable {
 		private readonly aiService?: AIService,
 		private readonly rag?: RagWorkspaceService,
 		private readonly reportSummaryGenerator?: ExecutiveSummaryGenerator,
+		private readonly fileScanClient?: Pick<CoreClient, 'fileScan'>,
 	) {
 		this.orchestrator = new SecurityOrchestrator(scanner, aiService, rag, reportSummaryGenerator);
 		this.pipelineSubscription = this.orchestrator.events.on((event) => {
@@ -106,7 +111,45 @@ export class ScanController implements vscode.Disposable {
 			return;
 		}
 
-		await this.scanDocument(document, showMessage);
+		await this.runScan(async () => {
+			if (!this.fileScanClient) {
+				throw new Error('Core file scanning is unavailable.');
+			}
+			const content = document.getText();
+			const skipReason = getSkipReason(document.uri.fsPath, content);
+			const request: CoreFileScanRequest = {
+				filePath: document.uri.fsPath,
+				content,
+				policy: {
+					supportedExtensions: [...supportedExtensions],
+					excludedPaths: skipReason ? [document.uri.fsPath] : [],
+					maxFileSizeBytes: null,
+					skipGeneratedFiles: !shouldScanGeneratedFiles(),
+					skipMinifiedFiles: true,
+					skipCompiledFiles: true,
+					eligible: !skipReason,
+					customRules: getResolvedCurrentFileRules(document.uri.fsPath),
+				},
+			};
+			const result = await this.fileScanClient.fileScan(request);
+			const lines = content.split(/\r?\n/);
+			const projected = result.findings.flatMap((finding) => {
+				const issue = projectFinding(finding, lines);
+				return issue ? [issue] : [];
+			});
+			const issues = [...new Map(projected.map((issue) => [`${issue.ruleId}:${issue.range.startLine}:${issue.range.startColumn}`, issue])).values()];
+			this.replaceFile(document.uri.fsPath, filterVisibleIssues(issues));
+			if (showMessage) {
+				vscode.window.showInformationMessage(`Aqiron Security file scan completed: ${issues.length} issue${issues.length === 1 ? '' : 's'} found.`);
+			}
+			return {
+				workspaceRoot: workspaceFolder.uri.fsPath,
+				target: document.uri.fsPath,
+				filesScanned: 1,
+				issues,
+				durationMs: result.durationMs,
+			};
+		});
 	}
 
 	async fixCurrentFile(): Promise<void> {
@@ -243,6 +286,16 @@ export class ScanController implements vscode.Disposable {
 		this.statusBar.text = `$(shield) Aqiron Security ${counts.total} Issue${counts.total === 1 ? '' : 's'}`;
 		this.statusBar.tooltip = `${counts.critical} critical, ${counts.high} high, ${counts.medium} medium, ${counts.low} low across ${counts.filesAffected} file${counts.filesAffected === 1 ? '' : 's'}`;
 	}
+}
+
+function projectFinding(finding: UnifiedFinding, lines: readonly string[]): AqironIssue | undefined {
+	if (finding.ruleId.startsWith('native.')) {return undefined;}
+	const lineText = lines[Math.max(0, finding.line - 1)] ?? '';
+	const issue = findingToIssue(finding, lineText);
+	return {
+		...issue,
+		id: `${issue.file}:${issue.range.startLine + 1}:${issue.ruleId}:${issue.range.startColumn}`,
+	};
 }
 
 function filterVisibleIssues(issues: readonly AqironIssue[]): AqironIssue[] {

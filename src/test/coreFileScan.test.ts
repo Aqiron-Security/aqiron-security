@@ -3,6 +3,8 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
 import { CoreFileScanRequest, CoreFileScanResult } from '../../packages/core/src/shared/fileScan';
+import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/nativeScanner';
+import { FileSystem } from '../../packages/core/src/shared/platform';
 
 suite('Core file scan contract', () => {
 	test('scans exactly the supplied in-memory file and returns canonical findings with the request scan ID', async () => {
@@ -19,8 +21,9 @@ suite('Core file scan contract', () => {
 		assert.equal(result.scanId, 'file-memory');
 		assert.equal(result.filePath, 'D:/workspace/lib/main.dart');
 		assert.equal(result.filesScanned, 1);
-		assert.equal(result.findingCount, 1);
+		assert.equal(result.findingCount, 2);
 		assert.equal(result.findings[0].ruleId, 'native.dart.hardcoded-secret');
+		assert.equal(result.findings[1].ruleId, 'low.unused-variable');
 		assert.equal(result.findings[0].file, result.filePath);
 		assert.equal('rawEvidence' in result.findings[0] ? result.findings[0].rawEvidence : undefined, undefined);
 		assert.ok(!JSON.stringify(response).includes(secret));
@@ -61,6 +64,26 @@ suite('Core file scan contract', () => {
 		assert.equal(result.findings[0].line, 1);
 		assert.equal(result.findings[0].sourceTool, 'Aqiron');
 		assert.equal(typeof result.findings[0].fingerprint, 'string');
+	});
+
+	test('workspace scanning keeps its prior raw-line rules and does not run file-only comment stripping or extra rules', async () => {
+		const root = '/fixture';
+		const filePath = '/fixture/lib/main.dart';
+		const source = "// print('comment');\nvoid main() {\n  print('active');\n}\n";
+		const filesystem = {
+			readdir: async (directory: string) => directory === root
+				? [{ name: 'lib', isDirectory: () => true, isFile: () => false }]
+				: [{ name: 'main.dart', isDirectory: () => false, isFile: () => true }],
+			readFile: async () => source,
+		} as unknown as FileSystem;
+		const scanner = new NativeWorkspaceScanner(filesystem);
+		const workspaceResult = await scanner.scanWorkspace(root);
+		assert.equal(workspaceResult.filesScanned, 1);
+		assert.equal(workspaceResult.findings.filter(finding => finding.ruleId === 'native.dart.sensitive-logging').length, 2, 'scan.start workspace scanning continues to inspect comment lines as it did before this branch');
+		assert.ok(!workspaceResult.findings.some(finding => finding.ruleId === 'low.unused-variable'), 'file-only rule additions must not appear in workspace scans');
+
+		const fileResult = await scanner.scanFileContent(filePath, source, 'file-only', policy({ supportedExtensions: ['.dart'] }));
+		assert.equal(fileResult.findings.filter(finding => finding.ruleId === 'native.dart.sensitive-logging').length, 1, 'comment stripping is limited to scan.file supplied-content semantics');
 	});
 
 	test('cancels through the existing request cancellation operation and rejects malformed params', async () => {
