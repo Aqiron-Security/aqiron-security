@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { AIService } from '../../ai/services/aiService';
 import { RagWorkspaceService } from '../../rag/ragWorkspaceService';
-import { WorkspaceScanner } from '../../scanner/workspaceScanner';
 import { OrchestratedScanResult, SecurityPipelineEngine } from '../pipeline/pipelineEngine';
 import { PipelineEventBus } from '../../../packages/core/src';
 import { ExecutiveSummaryGenerator } from '../reports/reportGenerator';
@@ -11,11 +10,11 @@ export class SecurityOrchestrator implements vscode.Disposable {
 	private readonly pipeline: SecurityPipelineEngine;
 	private cancellation?: vscode.CancellationTokenSource;
 
-	constructor(nativeScanner: WorkspaceScanner, aiService?: AIService, rag?: RagWorkspaceService, reportSummaryGenerator?: ExecutiveSummaryGenerator) {
+	constructor(aiService?: AIService, rag?: RagWorkspaceService, reportSummaryGenerator?: ExecutiveSummaryGenerator) {
 		void aiService;
 		void rag;
 		void reportSummaryGenerator;
-		this.pipeline = new SecurityPipelineEngine(nativeScanner, this.events);
+		this.pipeline = new SecurityPipelineEngine(this.events);
 	}
 
 	async scanWorkspace(workspaceFolder: vscode.WorkspaceFolder, mode: 'quick' | 'deep' | 'analysis' = 'deep'): Promise<OrchestratedScanResult> {

@@ -9,8 +9,6 @@ import { AqironWebviewProvider } from '../webview/aqironWebviewProvider';
 import { CoreClient } from '../core/coreClient';
 import { CoreScanStartRequest, CoreScanStartResult } from '../../packages/core/src/runtime';
 import { createFinding, UnifiedFinding } from '../../packages/core/src/shared/finding';
-import { scanContent } from '../scanner/rules';
-import { WorkspaceScanner } from '../scanner/workspaceScanner';
 import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/nativeScanner';
 import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
 
@@ -39,7 +37,7 @@ interface AgentProviderHarness {
 }
 
 suite('AI agent scan characterization', () => {
-	test('legacy secret contract detects the seven current patterns with their existing rule IDs', () => {
+	test('legacy secret contract detects the seven current patterns with their existing rule IDs', async () => {
 		const cases: Array<{ file: string; line: string; ruleId: string }> = [
 			{ file: 'config.js', line: 'const api_key = "0123456789abcdef";', ruleId: 'critical.api-key' },
 			{ file: 'config.js', line: 'const aws = "AKIA1234567890ABCDEF";', ruleId: 'critical.api-key' },
@@ -49,10 +47,12 @@ suite('AI agent scan characterization', () => {
 			{ file: 'config.js', line: 'const password = "12345678";', ruleId: 'critical.password' },
 			{ file: 'config.js', line: '-----BEGIN RSA PRIVATE KEY-----', ruleId: 'critical.private-key' },
 		];
-		for (const item of cases) {
-			assert.ok(scanContent(item.file, item.line).some(issue => issue.ruleId === item.ruleId), `${item.ruleId} should be detected for ${item.line}`);
-		}
-		assert.deepEqual(scanContent('config.js', 'const aws = "akia1234567890abcd";').filter(issue => issue.ruleId.startsWith('critical.')), [], 'fixed provider-token patterns remain case-sensitive');
+		assert.deepEqual(cases.map(item => item.ruleId), ['critical.api-key', 'critical.api-key', 'critical.api-key', 'critical.api-key', 'critical.secret', 'critical.password', 'critical.private-key']);
+		const core = await new NativeWorkspaceScanner({} as never).scanFileContent('config.js', cases.map(item => item.line).join('\n'), 'agent-secret-classes', {
+			supportedExtensions: ['.js'], excludedPaths: [], maxFileSizeBytes: null, skipGeneratedFiles: false,
+			skipMinifiedFiles: false, skipCompiledFiles: false, eligible: true, customRules: [],
+		});
+		assert.deepEqual(core.findings.filter(finding => finding.ruleId.startsWith('critical.')).map(finding => finding.ruleId), cases.map(item => item.ruleId));
 	});
 
 	test('Core native file rules provide the deterministic legacy secret contract', async () => {
@@ -159,14 +159,6 @@ suite('AI agent scan characterization', () => {
 			assert.match(result.content, /scanned 0 files and found no hardcoded/);
 			assert.equal(result.stats?.filesScanned, 0);
 		});
-	});
-
-	test('legacy Agent workspace scanner retains its Flutter host gate', async () => {
-		const root = path.resolve(__dirname, '../../../src/test/fixtures/file-scan');
-		const folder: vscode.WorkspaceFolder = { uri: vscode.Uri.file(root), name: 'Non-Flutter fixture', index: 0 };
-		const result = await new WorkspaceScanner({ appendLine: () => undefined } as unknown as vscode.OutputChannel).scanWorkspace(folder);
-		assert.equal(result.filesScanned, 0);
-		assert.deepEqual(result.issues, []);
 	});
 
 	test('Agent workspace scan forwards request-correlated Core progress without fabricating events', async () => {

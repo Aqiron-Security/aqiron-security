@@ -1,6 +1,6 @@
 import * as assert from 'assert';
-import { BetterleaksParser } from '../security/parsers/betterleaksParser';
-import { OsvScannerParser } from '../security/parsers/osvScannerParser';
+import { BetterleaksParser } from '../../packages/core/src/parsers/betterleaksParser';
+import { OsvScannerParser } from '../../packages/core/src/parsers/osvScannerParser';
 
 suite('Security tool parsers', () => {
 	test('redacts Betterleaks secret evidence and preserves location', () => {

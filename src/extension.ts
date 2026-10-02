@@ -5,7 +5,6 @@ import { AIContextSnapshot } from './ai/types/ai';
 import { ScanController } from './commands/scanController';
 import { DiagnosticManager } from './diagnostics/diagnosticManager';
 import { AqironQuickFixProvider } from './providers/quickFixProvider';
-import { WorkspaceScanner } from './scanner/workspaceScanner';
 import { RagWorkspaceService } from './rag/ragWorkspaceService';
 import { isFlutterWorkspace } from './utils/files';
 import { AqironWebviewProvider } from './webview/aqironWebviewProvider';
@@ -20,12 +19,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	setCoreClient(coreClient);
 	const output = vscode.window.createOutputChannel('Aqiron Security');
 	const aiService = new AIService(context);
-	const scanner = new WorkspaceScanner(output);
 	const diagnostics = new DiagnosticManager();
 	const rag = new RagWorkspaceService(context, aiService);
 	const sidebar = new AqironWebviewProvider(context, 'agent', aiService, rag, coreClient);
 	const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-	const controller = new ScanController(scanner, diagnostics, sidebar, statusBar, output, aiService, rag, createAiSummaryGenerator(aiService), coreClient);
+	const controller = new ScanController(diagnostics, sidebar, statusBar, output, aiService, rag, createAiSummaryGenerator(aiService), coreClient);
 
 	statusBar.text = '$(shield) Aqiron Security';
 	statusBar.tooltip = 'Open Aqiron Security';

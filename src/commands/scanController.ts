@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { DiagnosticManager } from '../diagnostics/diagnosticManager';
 import { AqironIssue, AqironScanResult, AqironWorkspaceStats } from '../models/issue';
-import { WorkspaceScanner } from '../scanner/workspaceScanner';
 import { SecurityOrchestrator } from '../security/orchestrator/securityOrchestrator';
 import { SourceLocation } from '../shared/sourceSpan';
 import { Debouncer } from '../utils/debounce';
@@ -31,7 +30,6 @@ export class ScanController implements vscode.Disposable {
 	private readonly pipelineSubscription: vscode.Disposable;
 
 	constructor(
-		private readonly scanner: WorkspaceScanner,
 		private readonly diagnostics: DiagnosticManager,
 		private readonly sidebar: AqironWebviewController,
 		private readonly statusBar: vscode.StatusBarItem,
@@ -41,7 +39,7 @@ export class ScanController implements vscode.Disposable {
 		private readonly reportSummaryGenerator?: ExecutiveSummaryGenerator,
 		private readonly fileScanClient?: Pick<CoreClient, 'fileScan'>,
 	) {
-		this.orchestrator = new SecurityOrchestrator(scanner, aiService, rag, reportSummaryGenerator);
+		this.orchestrator = new SecurityOrchestrator(aiService, rag, reportSummaryGenerator);
 		this.pipelineSubscription = this.orchestrator.events.on((event) => {
 			this.sidebar.onPipelineEvent(event);
 			if (event.type === 'log') {

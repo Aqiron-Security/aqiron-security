@@ -79,8 +79,7 @@ const compiledOutputExtensions = new Set([
 	'.dylib',
 ]);
 
-// These filename globs are part of the existing WorkspaceScanner findFiles selector and
-// remain excluded even when the scanGeneratedFiles setting enables other generated files.
+// These filename globs remain excluded even when scanGeneratedFiles enables other generated files.
 const workspaceExcludedFileNamePatterns = ['*.g.dart', '*.freezed.dart', '*.generated.*', '*.mocks.dart', '*.mock.dart', '*.config.dart'];
 
 export const defaultAqExclusions = [
