@@ -1,18 +1,16 @@
 import { EventEmitter } from 'events';
-import { AIAnalysisContext, AIModel, ChatMessage, StreamChunk } from '../../packages/core/src/shared/ai';
-import { UnifiedFinding } from '../../packages/core/src/shared/finding';
-import { ProjectProfile } from '../../packages/core/src/project/projectProfile';
-import { SecurityContext } from '../../packages/core/src/context/contextTypes';
-import { RagIndexData, RagSearchResult } from '../../packages/core/src/shared/rag';
-import { ScanState, PipelineEvent } from '../../packages/core/src/pipeline/events';
-import { SecurityReportContent } from '../../packages/core/src/reports';
-import { CoreFileScanRequest, CoreFileScanResult } from '../../packages/core/src/shared/fileScan';
-import { CoreProcessEvent, CoreProcessManager } from './coreProcessManager';
-import { CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreReportGenerateRequest } from '../../packages/core/src/runtime';
+import { AIAnalysisContext, AIModel, ChatMessage, StreamChunk } from '../shared/ai';
+import { ProjectProfile } from '../project/projectProfile';
+import { SecurityContext } from '../context/contextTypes';
+import { SecurityReportContent } from '../reports';
+import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
+import { CoreClientTransport, CoreProcessManager } from './coreProcessManager';
+import { CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreReportGenerateRequest, CoreEventMessage } from '../runtime';
 
 export interface CoreClientOptions {
-	extensionVersion: string;
-	restartOnCrash?: boolean;
+	clientVersion: string;
+	runtimePath: string;
+	restartOnCrash: boolean;
 }
 
 function createId(): string {
@@ -20,12 +18,12 @@ function createId(): string {
 }
 
 export class CoreClient extends EventEmitter {
-	private readonly manager: CoreProcessManager;
+	private readonly manager: CoreClientTransport;
 	private ready?: Promise<CoreHandshakeResponse>;
 
-	constructor(options: CoreClientOptions) {
+	constructor(options: CoreClientOptions, transport?: CoreClientTransport) {
 		super();
-		this.manager = new CoreProcessManager({ extensionVersion: options.extensionVersion, restartOnCrash: options.restartOnCrash ?? true });
+		this.manager = transport ?? new CoreProcessManager({ clientVersion: options.clientVersion, runtimePath: options.runtimePath, restartOnCrash: options.restartOnCrash });
 		this.manager.on('log', (message) => this.emit('log', message));
 		this.manager.on('exit', (event) => {
 			this.ready = undefined;
@@ -162,7 +160,7 @@ export class CoreClient extends EventEmitter {
 		const client = this;
 		const queue: Array<StreamChunk | { type: 'done' }> = [];
 		let wake: (() => void) | undefined;
-		const listener = (event: CoreProcessEvent) => {
+		const listener = (event: CoreEventMessage) => {
 			if (event.requestId !== requestId) {
 				return;
 			}

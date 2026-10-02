@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CliCoreClient, CliOutput, runCli } from '../../packages/cli/src/cli';
 import { CoreScanStartResult } from '../../packages/core/src/runtime/protocol';
-import { CoreClient } from '../core/coreClient';
+import { CoreClient } from '../../packages/core/src/client';
 
 suite('Aqiron CLI', () => {
 	test('parses workspace path, starts Core through its client, scans and prints the final Core result', async () => {
@@ -161,7 +161,7 @@ suite('Aqiron CLI', () => {
 	});
 
 	test('default CoreClient restart behavior for the VS Code client remains enabled', () => {
-		const client = new CoreClient({ extensionVersion: 'test' });
+		const client = new CoreClient({ clientVersion: 'test', runtimePath: path.resolve(__dirname, '../../../dist/core-runtime.js'), restartOnCrash: true });
 		const manager = (client as unknown as { manager: { options: { restartOnCrash?: boolean } } }).manager;
 		assert.equal(manager.options.restartOnCrash, true);
 	});

@@ -6,7 +6,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { AqironIssue, AqironScanResult } from '../models/issue';
 import { AqironWebviewProvider } from '../webview/aqironWebviewProvider';
-import { CoreClient } from '../core/coreClient';
+import { CoreClient } from '../../packages/core/src/client';
 import { CoreScanStartRequest, CoreScanStartResult } from '../../packages/core/src/runtime';
 import { createFinding, UnifiedFinding } from '../../packages/core/src/shared/finding';
 import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/nativeScanner';

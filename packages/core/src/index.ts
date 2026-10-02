@@ -12,3 +12,4 @@ export * from './context';
 export * from './rag';
 export * from './analysis';
 export * from './ai';
+export * from './client';

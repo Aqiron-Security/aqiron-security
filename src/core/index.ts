@@ -1,2 +1,1 @@
-export * from './coreClient';
-export * from './coreProcessManager';
+export * from '../../packages/core/src/client';
