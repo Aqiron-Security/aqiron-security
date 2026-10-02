@@ -24,6 +24,8 @@ export interface ResolvedCustomRule {
 	severity: 'Critical' | 'High' | 'Medium' | 'Low';
 	pattern: string;
 	extensions?: string[];
+	/** Omit for the existing case-insensitive custom-rule behavior. */
+	caseSensitive?: boolean;
 }
 
 /** Content is supplied explicitly; Core must not reread filePath for this operation. */

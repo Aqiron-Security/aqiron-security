@@ -561,5 +561,6 @@ function validateFileScanRequest(input: Record<string, unknown>): boolean {
 		&& typeof rule.id === 'string' && rule.id.length > 0
 		&& typeof rule.title === 'string' && typeof rule.message === 'string' && typeof rule.pattern === 'string'
 		&& ['Critical', 'High', 'Medium', 'Low'].includes(String(rule.severity))
+		&& (rule.caseSensitive === undefined || typeof rule.caseSensitive === 'boolean')
 		&& (rule.extensions === undefined || (Array.isArray(rule.extensions) && rule.extensions.every((value) => typeof value === 'string'))));
 }
