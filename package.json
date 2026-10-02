@@ -286,10 +286,12 @@
     "compile-tests": "node scripts/clean-test-output.js && tsc -p . --outDir out",
     "core:build": "node esbuild.js",
     "core:start": "npm run core:build && node dist/core-runtime.js",
+    "cli:build": "node esbuild.js",
+    "cli": "node dist/aqiron-cli.js",
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
-    "lint": "eslint src packages/core/src",
+    "lint": "eslint src packages/core/src packages/cli/src",
     "test": "vscode-test"
   },
   "devDependencies": {

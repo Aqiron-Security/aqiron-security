@@ -17,6 +17,7 @@
 	},
 	"include": [
 		"src/**/*.ts",
+		"packages/cli/src/**/*.ts",
 		"packages/core/src/**/*.ts"
 	],
 	"exclude": [

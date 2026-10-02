@@ -12,6 +12,7 @@ import { CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvi
 
 export interface CoreClientOptions {
 	extensionVersion: string;
+	restartOnCrash?: boolean;
 }
 
 function createId(): string {
@@ -24,7 +25,7 @@ export class CoreClient extends EventEmitter {
 
 	constructor(options: CoreClientOptions) {
 		super();
-		this.manager = new CoreProcessManager({ extensionVersion: options.extensionVersion, restartOnCrash: true });
+		this.manager = new CoreProcessManager({ extensionVersion: options.extensionVersion, restartOnCrash: options.restartOnCrash ?? true });
 		this.manager.on('log', (message) => this.emit('log', message));
 		this.manager.on('exit', (event) => {
 			this.ready = undefined;

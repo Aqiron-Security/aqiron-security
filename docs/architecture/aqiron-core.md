@@ -47,7 +47,7 @@ That does not make every current public-looking API ready for a CLI/Desktop clie
 
 ### VS Code coupling and duplicated paths
 
-- `CoreClient` and `CoreProcessManager` live in `src/core`; the process manager uses Node child processes and extension version. It is a VS Code-host-side launcher/client, not a client-neutral Core API.
+- `CoreClient` and `CoreProcessManager` live in `src/core`; the process manager uses Node child processes and host metadata. The extension uses this Node-only client, and the CLI proof bundles it for headless use. It remains an in-repository seam rather than a separately packaged public client API.
 - `src/extension.ts`, `src/commands/scanController.ts`, `src/webview/aqironWebviewProvider.ts`, `src/views`, `src/providers`, and diagnostics use VS Code APIs and should remain adapters/presentation.
 - Webview types `src/webview/ui/types.ts` contain UI-only values and aggregates (section, zoom, selected threat, chat panel state, setup animation, assets, presentation counts). `WebviewIssue` is a projection of a finding, not the domain finding.
 - Core protocol uses filesystem paths and Node runtime metadata. These are environment-neutral in concept but currently assume a local filesystem/workspace and Node transport.
@@ -138,9 +138,13 @@ sequenceDiagram
 
 VS Code owns command palette and editor commands, active-file/workspace selection, workspace trust interaction, diagnostics/quick fixes, tree/webview presentation, notifications, opening source locations, branch/Git actions, settings UI, and choosing export destinations. It adapts these inputs to Core requests and maps Core events/results to VS Code views. It should not own scanner execution, parser rules, correlation semantics, AI analysis, RAG retrieval or report model generation.
 
-### CLI / CI
+### CLI proof
 
-The future CLI process owns argument parsing, environment/CI detection, exit codes, stdout/stderr formatting, CI annotations, policy thresholds, config-file loading, credential injection from the CI secret provider, artifact destinations and signal-to-cancellation mapping. It sends the same scan/configuration request semantics to Core and writes Core-produced SARIF/JSON/report artifacts. It does not reimplement scanners or finding correlation.
+**Prototype / architecture proof — not a production CLI.** `packages/cli/src/cli.ts` implements only `aqiron scan <workspace> --trust-local-workspace`. It validates a local directory and requires that explicit opt-in before calling the existing `CoreClient.startScan` operation with `scan.start` (`deep`, `trusted: true`). It prints correlated Core pipeline progress and a findings summary, returns zero for a completed scan (even when findings exist), and returns nonzero for invalid input or Core failure. It always stops the Core process after the operation. The option is a prototype user acknowledgment, not production-grade trust or policy handling.
+
+The CLI reuses the existing Node-only `CoreClient` and `CoreProcessManager` in `src/core/`; it does not import VS Code APIs or scanner implementations. The build emits `dist/aqiron-cli.js` beside `dist/core-runtime.js`, matching the process manager's existing runtime-path convention. Run `npm run cli:build`, then `npm run cli -- scan <workspace>` (or `node dist/aqiron-cli.js scan <workspace>`). This is an in-repository proof only: no public package, CI policy/config system, richer trust model, cancellation signal mapping, or production packaging is provided. `CoreClient.restartOnCrash` is optional and defaults to the existing VS Code behavior (`true`); the CLI sets it to `false` so a failed headless run surfaces as an error.
+
+**Future CLI / CI:** the client will own environment and policy configuration, CI annotations, credential sourcing, artifact destinations, and signal-to-cancellation mapping. It will continue to request Core operations rather than implement scanner execution, normalization, correlation, or report generation.
 
 ### Desktop
 
@@ -173,12 +177,12 @@ An investigation aggregate can own hypothesis text, scope/constraints, linked ob
 1. **Current / in-place contract:** `scan.file` now establishes exact-file and in-memory-content semantics without changing `scan.start` or redirecting callers. See [file-scan-contract.md](file-scan-contract.md).
 2. **Near-term / in-place:** inventory duplicate `src/security` vs Core code paths and call sites; identify the active implementation per feature. Add protocol payload validation and typed method/event mapping at the existing IPC seam before exposing more clients. Agree canonical finding/report/configuration contracts and add compatibility/version policy.
 3. **Near-term / adapter cleanup:** make extension host resolve workspace/config/trust/credentials and pass explicit portable options; keep VS Code command and webview contracts in adapters. Route one feature at a time through Core only where this does not change behavior; remove duplication only after usage and tests confirm the Core path is authoritative.
-4. **Future / client proof:** exercise the same Core request semantics through a small CLI/CI adapter and later Desktop shell, while still in this repository if desired. Verify headless filesystem/process/credential adapters and packaging before deciding on a package split.
+4. **Current prototype / future production client:** the minimal CLI proof exercises the existing `scan.start` semantics in this repository. Harden configuration, cancellation, packaging and headless dependencies before treating it as a supported CLI; evaluate a Desktop shell later.
 5. **Future / research capability:** design separate hypothesis/evidence/investigation records and policy/review lifecycle. Keep it out of the current finding model and scanner pipeline until separately specified.
 
 ## Explicitly do not refactor yet
 
-- Do not implement CLI or Desktop.
+- Do not expand the CLI proof into a production CLI or implement Desktop.
 - Do not split the repository or publish `@aqiron/core`.
 - Do not rewrite Core, merge duplicate implementations wholesale, or change which scanner runs.
 - Do not change scanner ordering, modes, parsers, rules, defaults or findings.
