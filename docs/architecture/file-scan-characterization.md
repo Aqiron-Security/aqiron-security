@@ -1,6 +1,6 @@
 # File and Agent Scan Characterization
 
-Status: original characterization baseline. The current-file command and save/realtime path now use `scan.file`; Agent workspace and Agent secret scans remain on their characterized paths. The baseline below records legacy behavior that migration must preserve.
+Status: original characterization baseline. The current-file command and save/realtime path now use `scan.file`; Agent `workspace.scan` now uses Core `scan.start`; Agent `secrets.scan` remains on its characterized legacy path. Historical details below describe the implementation at characterization time where explicitly stated.
 
 ## Runtime call graphs
 
@@ -37,6 +37,8 @@ VS Code onDidSaveTextDocument
 `scanWorkspaceDebounced` still uses the same `Debouncer` instance, so workspace-folder changes and document saves can replace one another while pending. If the controller is already running when the debounced document task reaches `runScan`, the controller schedules a workspace scan and returns; it does not queue that document for a later file scan. Content is read only after that admission check, at debounce execution time. The existing Flutter gate is now represented as resolved `eligible` policy for Core; there is no new trust check, queue, cache, or document generation tracking. Core request timeout/cancellation failures flow through the same `runScan` failure presentation. `WorkspaceScanner.scanDocument` remains for the separate post-fix scan call; the save/realtime path no longer calls it.
 
 ### C. AI-agent workspace scan
+
+**Historical path, now migrated:** this described the implementation before the Agent workspace migration. Current call graph and behavior differences are in [agent-workspace-scan-migration.md](agent-workspace-scan-migration.md).
 
 ```text
 Agent prompt
@@ -76,7 +78,7 @@ No secret-specific scanner is invoked. Secret findings use the same local rule e
 
 | Behavior | Current-file | Realtime | Agent workspace | Agent secret | Core equivalent today |
 |---|---|---|---|---|---|
-| Entry and caller | Command → `ScanController.scanCurrentFile` → `CoreClient.fileScan` → `scan.file` | `onDidSaveTextDocument` → existing controller debounce → `CoreClient.fileScan` → `scan.file` | Agent tool → provider method | Agent tool → provider method | `scan.start` through Core client/runtime for workspace scans |
+| Entry and caller | Command → `ScanController.scanCurrentFile` → `CoreClient.fileScan` → `scan.file` | `onDidSaveTextDocument` → existing controller debounce → `CoreClient.fileScan` → `scan.file` | Agent tool → `CoreClient.startScan` → `scan.start` | Agent tool → provider method | `scan.start` through Core client/runtime for workspace scans |
 | Input model | `TextDocument` buffer | Saved-document event object; latest `getText()` read after debounce and active-run admission | Workspace folder path plus files enumerated by VS Code | Same workspace scan, then rule-ID filter | Workspace root, target path, mode, trust flag; no document-content field |
 | Source bytes | Adapter snapshots `document.getText()`; Core analyzes supplied buffer including unsaved edits | Core receives the latest in-memory text captured when the debounced scan begins; it does not read disk | `fs.readFile` from disk | `fs.readFile` from disk | `scan.file` accepts explicit content; workspace operation remains disk-backed |
 | Workspace/project gate | Supported file, workspace membership, Flutter | Setting + file URI/extension first; Flutter gate in scanner | Flutter gate in scanner | Flutter gate in shared scanner | Core scan accepts workspace paths and does not reproduce the extension's Flutter-only command gate |

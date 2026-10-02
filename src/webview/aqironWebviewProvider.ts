@@ -12,6 +12,8 @@ import { getIssueSkipReason, isFlutterWorkspace } from '../utils/files';
 import { getCounts } from '../views/aqironTreeProvider';
 import { RagWorkspaceService } from '../rag/ragWorkspaceService';
 import { ThreatHistoryService, ThreatSnapshot } from '../security/threatHistoryService';
+import { CoreClient } from '../core/coreClient';
+import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
 
 export type AqironWebviewSection = 'agent' | 'scan' | 'threats' | 'reports' | 'settings' | 'aiAgent';
 export type WorkspaceScanMode = 'quick' | 'deep' | 'analysis';
@@ -159,6 +161,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 	private readonly threatHistory = new ThreatHistoryService();
 	private readonly agentOutput = vscode.window.createOutputChannel('Aqiron Agent Tools');
 	private readonly agentScanner = new WorkspaceScanner(this.agentOutput);
+	private readonly activeAgentScans = new Map<string, string>();
 	private state: WebviewState = {
 		issues: [],
 		zoom: 1,
@@ -206,6 +209,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		private section: AqironWebviewSection,
 		private readonly aiService: AIService,
 		private readonly rag: RagWorkspaceService,
+		private readonly coreClient: CoreClient,
 	) {
 		this.state = {
 			...this.state,
@@ -695,7 +699,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		this.postState();
 		const tool = selectAgentTool(text);
 		if (tool) {
-			const toolResult = await this.runAgentTool(text);
+			const toolResult = await this.runAgentTool(text, nextSession.id);
 			await this.finishAssistantMessage(nextSession.id, assistantMessage.id, toolResult.content, toolResult.commands, toolResult);
 			return;
 		}
@@ -1022,7 +1026,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		return typeof payload === 'string' ? this.state.issues.find((candidate) => candidate.id === payload) : undefined;
 	}
 
-	private async runAgentTool(prompt: string): Promise<AgentToolResult> {
+	private async runAgentTool(prompt: string, sessionId?: string): Promise<AgentToolResult> {
 		const tool = selectAgentTool(prompt);
 		if (!tool) {
 			return unavailableToolResult('AI provider', 'No local Aqiron tool matched this request; route it through the selected AI provider instead.');
@@ -1032,7 +1036,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			case 'secrets.scan':
 				return this.runSecretsScan();
 			case 'workspace.scan':
-				return this.runWorkspaceScan();
+				return this.runWorkspaceScan(sessionId);
 			case 'dependencies.scan':
 				return this.runDependencyInventory();
 			case 'workspace.graph':
@@ -1073,23 +1077,77 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		};
 	}
 
-	private async runWorkspaceScan(): Promise<AgentToolResult> {
+	private async runWorkspaceScan(sessionId?: string): Promise<AgentToolResult> {
 		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 		if (!workspaceFolder) {
 			return unavailableToolResult('Run workspace scan', 'Open a workspace folder before running the workspace scan.');
 		}
-		const result = await this.agentScanner.scanWorkspace(workspaceFolder);
-		return {
-			content: `Workspace scan complete. Scanned ${result.filesScanned} files and found ${result.issues.length} issue${result.issues.length === 1 ? '' : 's'}.`,
-			commands: [{ label: 'Run Aqiron workspace scan', command: 'workspace.scan', status: 'complete' }],
-			issues: result.issues,
-			stats: {
-				filesScanned: result.filesScanned,
-				indexedFiles: result.filesScanned,
-				scanStatus: 'Complete',
-				lastScanDurationMs: result.durationMs,
-			},
+		const workspaceRoot = workspaceFolder.uri.fsPath;
+		if (!isFlutterWorkspace(workspaceRoot)) {
+			return {
+				content: 'Workspace scan complete. Scanned 0 files and found 0 issues.',
+				commands: [{ label: 'Run Aqiron workspace scan', command: 'workspace.scan', status: 'complete' }],
+				issues: [],
+				stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete', lastScanDurationMs: 0 },
+			};
+		}
+		const requestId = `agent-workspace-${createId()}`;
+		const startedAt = Date.now();
+		const listener = (event: { event: string; requestId?: string; payload?: unknown }) => {
+			if (event.requestId !== requestId) {
+				return;
+			}
+			const pipelineEvent = toAgentPipelineEvent(event.payload);
+			if (pipelineEvent) {
+				this.onPipelineEvent(pipelineEvent);
+			}
 		};
+		if (sessionId) {
+			this.activeAgentScans.set(sessionId, requestId);
+		}
+		this.coreClient.on('event', listener);
+		try {
+			this.setScanStatus('Scanning');
+			const result = await this.coreClient.startScan({
+				requestId,
+				workspaceRoot,
+				targetPath: workspaceRoot,
+				mode: 'deep',
+				trusted: vscode.workspace.isTrusted,
+				currentFile: workspaceRoot,
+			});
+			const issues = await findingsToAgentIssues(result.findings);
+			const filesScanned = result.filesScanned ?? 0;
+			return {
+				content: `Workspace scan complete. Scanned ${filesScanned} files and found ${issues.length} issue${issues.length === 1 ? '' : 's'}.`,
+				commands: [{ label: 'Run Aqiron workspace scan', command: 'workspace.scan', status: 'complete' }],
+				issues,
+				stats: {
+					filesScanned,
+					indexedFiles: filesScanned,
+					scanStatus: 'Complete',
+					lastScanDurationMs: result.durationMs ?? Date.now() - startedAt,
+				},
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const cancelled = message.toLowerCase().includes('cancel');
+			const failure = cancelled ? 'Workspace scan cancelled.' : `Workspace scan failed: ${message}`;
+			this.agentOutput.appendLine(`[agent] ${failure}`);
+			if (!cancelled) {
+				void vscode.window.showErrorMessage(`Aqiron Agent workspace scan failed: ${message}`);
+			}
+			return {
+				content: failure,
+				commands: [{ label: 'Run Aqiron workspace scan', command: 'workspace.scan', status: 'unavailable' }],
+				stats: { scanStatus: 'Failed', lastScanDurationMs: Date.now() - startedAt },
+			};
+		} finally {
+			this.coreClient.removeListener('event', listener);
+			if (sessionId && this.activeAgentScans.get(sessionId) === requestId) {
+				this.activeAgentScans.delete(sessionId);
+			}
+		}
 	}
 
 	private async runDependencyInventory(): Promise<AgentToolResult> {
@@ -1340,12 +1398,20 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			return;
 		}
 		this.aiService.cancelGeneration(sessionId);
+		this.cancelAgentWorkspaceScan(sessionId);
 		const chatSessions = markSessionStreaming(this.state.chatSessions.map((session) => session.id === sessionId
 			? { ...session, messages: session.messages.map((message) => message.streaming ? { ...message, streaming: false, content: message.content || 'Generation cancelled.' } : message) }
 			: session), sessionId, false);
 		this.state = { ...this.state, chatSessions };
 		await this.context.workspaceState.update(getChatSessionsKey(), serializeChatSessions(chatSessions));
 		this.postState();
+	}
+
+	private cancelAgentWorkspaceScan(sessionId: string): void {
+		const requestId = this.activeAgentScans.get(sessionId);
+		if (requestId) {
+			void this.coreClient.cancelRequest(requestId).catch(() => undefined);
+		}
 	}
 
 	private async selectIntelligence(payload: unknown): Promise<void> {
@@ -2704,6 +2770,50 @@ function estimateTokenUsage(sessions: readonly ChatSession[]): TokenUsage {
 
 function createId(): string {
 	return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function findingsToAgentIssues(findings: readonly UnifiedFinding[]): Promise<AqironIssue[]> {
+	return await Promise.all(findings.map(async (finding) => findingToIssue(finding, await readFindingLine(finding.file, finding.line))));
+}
+
+async function readFindingLine(file: string, line: number): Promise<string> {
+	try {
+		const content = await fs.readFile(file, 'utf8');
+		return content.split(/\r?\n/)[Math.max(0, line - 1)] ?? '';
+	} catch {
+		return '';
+	}
+}
+
+function toAgentPipelineEvent(value: unknown): PipelineEvent | undefined {
+	if (!value || typeof value !== 'object' || !('type' in value) || typeof value.type !== 'string') {
+		return undefined;
+	}
+	const event = value as PipelineEvent;
+	switch (event.type) {
+		case 'stage':
+		case 'tool':
+		case 'log':
+		case 'complete':
+		case 'cancelled':
+		case 'error':
+			return event;
+		case 'scan.stage.started':
+		case 'scan.stage.progress':
+		case 'scan.stage.completed':
+			return { type: 'stage', stage: event.stage };
+		case 'scanner.started':
+		case 'scanner.completed':
+			return { type: 'tool', tool: event.scanner };
+		case 'scanner.output':
+			return { type: 'log', tool: event.scannerId, message: event.message, timestamp: event.timestamp };
+		case 'scan.failed':
+			return { type: 'error', message: event.message, tool: event.tool };
+		case 'scan.cancelled':
+			return { type: 'cancelled', reason: event.reason };
+		default:
+			return undefined;
+	}
 }
 
 function getRiskStatus(issues: readonly AqironIssue[]): WorkspaceProfile['risk'] {
