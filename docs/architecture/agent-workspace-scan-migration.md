@@ -2,6 +2,29 @@
 
 **Status:** `workspace.scan` is Core-backed through the existing `scan.start` operation. `secrets.scan` remains on its existing `WorkspaceScanner` implementation.
 
+## `secrets.scan` inventory and Core parity decision
+
+**Decision: do not migrate in this change.** Core's available workspace scanner set cannot currently guarantee the legacy Agent secret contract. A Core-only migration would risk losing detectable secrets and changing Agent filtering because the legacy rule IDs and Core scanner rule IDs are not an equivalent set.
+
+### Exact legacy dependencies
+
+- **Entry/selection:** secret-related prompt terms select `secrets.scan` before the general workspace scan. The provider selects `vscode.workspace.workspaceFolders[0]`; no multi-root iteration occurs.
+- **Scope/gate:** `WorkspaceScanner.scanWorkspace` requires a Flutter workspace, enumerates VS Code `findFiles` with `supportedGlob`, then filters file URIs/extensions. The supported extensions are `.dart`, `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.rs`, `.java`, `.c`, `.cpp`, `.h`, `.json`, `.xml`, `.yaml`, `.yml`, `.gradle`, `.rules`.
+- **Exclusions:** VS Code `excludeGlob` omits common build/vendor directories and generated suffixes; per-file `getSkipReason` adds default/configured excluded folders, `.aq` exclusions, generated code policy, minified-content checks and compiled-output extensions.
+- **Size/cache/concurrency:** `scanUri` checks configured `maxFileSizeKB` (default 512 KB), then caches by path + mtime + size. Files run in batches of 50 with `Promise.all` per batch. These affect the old workspace tool's eligible file set and counts, not just performance.
+- **Local secret rules:** `src/scanner/rules.ts` emits `critical.api-key` for generic API/client/access keys and AWS `AKIA…`, Google `AIza…`, and `sk|pk_(live|test)_…` patterns; `critical.secret` for quoted `secret`/`token` assignments; `critical.password` for quoted passwords; and `critical.private-key` for supported PEM private-key headers. Generic assignment expressions use case-insensitive regex flags; the AWS/Google/provider token and PEM patterns have no `i` flag. The local rule catalog applies across its supported language dispatch.
+- **Agent filter:** `isSecretRule` is case-sensitive and accepts only rule-id substrings `secret`, `api-key`, `password`, `private-key`, or `token`. It does not consult finding tags, source tool or evidence.
+- **Projection/presentation:** all matching issues are retained in `AgentToolResult.issues`; the text summary includes the total and at most five path/line locations. Secret findings replace prior secret findings while prior non-secret Agent issues remain (`mergeIssues` dedupes by issue id). No-match text reports scanned file count. Scanner failures propagate to the enclosing Agent message handler, which presents a VS Code error.
+- **Privacy:** summary locations contain paths/lines, not values. Issue `lineText` may hold source text internally, but webview serialization redacts the matched secret source span before client state is posted. Keep this serialization boundary unchanged.
+
+### What Core currently covers and misses
+
+Core's always-present `NativeWorkspaceScanner` only enumerates Dart, Python, XML and Dockerfile targets, and its workspace rule function has one explicit secret rule: `native.dart.hardcoded-secret` for a subset of quoted assignment forms. It does not implement the seven legacy rule patterns or their legacy IDs across the VS Code extension's full supported extension set. Its Core file-only scanner adds custom-rule support but is not the workspace operation used by this Agent flow.
+
+Core can also register Betterleaks, Semgrep and Trivy scanners with secret capability. They may discover additional secrets when their executables/configuration are available, but they are optional, use tool-defined rule IDs/evidence, and do not guarantee the same seven legacy patterns, file scope, `.aq`/configured exclusions, size behavior or Agent filter matches. Betterleaks parser redacts raw evidence and tags findings as secret; however the Agent's established filter does not inspect tags. Scanner availability therefore does not prove parity.
+
+The minimum safe blocker to resolve before migration is a deterministic Core workspace secret capability whose detection coverage and stable IDs can represent the seven legacy patterns across the legacy supported scope (or a separately approved rule-ID/tag-aware Agent filter contract), with explicit workspace policy parity for exclusions and max size. The contract must keep secret material redacted in events/logging and preserve the Agent serializer redaction. Do not solve this by assuming an optional external binary is present or by running Core and the legacy scanner and unioning results.
+
 ## Call paths
 
 Before:
@@ -63,7 +86,7 @@ Custom-rule configuration, VS Code-specific exclusions, generated/minified/compi
 
 ## Remaining implementation boundaries
 
-- `secrets.scan` still calls `agentScanner.scanWorkspace`, filters secret-related rule ids, merges secret findings with existing non-secret state, and caps displayed locations at five. Its serializer continues to redact secret source spans.
+- `secrets.scan` still calls `agentScanner.scanWorkspace`, filters secret-related rule ids, merges secret findings with existing non-secret state, and caps displayed locations at five. Its serializer continues to redact secret source spans. Migration is blocked until the Core secret coverage and scope gaps above are resolved and parity fixtures demonstrate the same behavior.
 - `WorkspaceScanner` and `src/scanner/rules.ts` remain needed by the secret Agent path and other callers. No code was deleted.
 - Core progress forwarding filters by the supplied request id and only maps existing stage, scanner, output, completion, cancellation and failure events. Finding events are not copied into Agent progress state.
 - The adapter sends `vscode.workspace.isTrusted`; Core's current workspace scan does not use that flag to deny or alter scanning. A future trust/policy decision must be implemented explicitly in Core/runtime contracts.
