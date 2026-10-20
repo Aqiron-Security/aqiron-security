@@ -163,4 +163,26 @@ const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'co
 			await manager.stop();
 		}
 	});
+
+	test('stop cancels a scheduled restart when Core has already crashed', async () => {
+		const children: FakeCoreChild[] = [];
+		const restore = installSpawn(() => {
+			const child = new FakeCoreChild();
+			children.push(child);
+			return child;
+		});
+		const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'core-runtime.js', restartOnCrash: true });
+		try {
+			await manager.start();
+			children[0].crash();
+			assert.strictEqual(manager.getState(), 'restarting');
+			await manager.stop();
+			await new Promise(resolve => setTimeout(resolve, 300));
+			assert.strictEqual(children.length, 1);
+			assert.strictEqual(manager.getState(), 'stopped');
+		} finally {
+			restore();
+			await manager.stop();
+		}
+	});
 });

@@ -1,3 +1,5 @@
+import { WorkspaceCustomRule } from './workspaceRules';
+
 /**
  * Client-resolved policy contract for Core workspace scans that need explicit host policy.
  * This describes scan scope only; host eligibility and trust remain separate inputs.
@@ -15,15 +17,7 @@ export interface ResolvedWorkspaceScanPolicy {
 	/** Maximum stat/file size in bytes. The current VS Code workspace policy has no unlimited mode. */
 	maxFileSizeBytes: number;
 	/** Resolved custom rules used by the host scanner, without the raw VS Code configuration object. */
-	customRules: Array<{
-		id: string;
-		title: string;
-		message: string;
-		severity: 'Critical' | 'High' | 'Medium' | 'Low';
-		pattern: string;
-		extensions?: string[];
-		caseSensitive?: boolean;
-	}>;
+	customRules: WorkspaceCustomRule[];
 	skipGeneratedFiles: boolean;
 	skipMinifiedFiles: boolean;
 	skipCompiledFiles: boolean;

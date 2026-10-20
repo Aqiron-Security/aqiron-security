@@ -10,6 +10,7 @@ import { CorrelationResult } from '../correlation/correlationEngine';
 import { SecurityGraph } from '../correlation/relationshipGraph';
 import { ScanTelemetrySnapshot } from '../telemetry';
 import { ResolvedWorkspaceScanPolicy } from '../shared/workspaceScanPolicy';
+import { WorkspaceCustomRule } from '../shared/workspaceRules';
 
 export interface NativeScanResult {
 	findings: UnifiedFinding[];
@@ -18,7 +19,7 @@ export interface NativeScanResult {
 }
 
 export interface NativeScanAdapter {
-	scanWorkspace(workspaceRoot: string, cancellationToken?: CancellationTokenLike, policy?: ResolvedWorkspaceScanPolicy): Promise<NativeScanResult>;
+	scanWorkspace(workspaceRoot: string, cancellationToken?: CancellationTokenLike, policy?: ResolvedWorkspaceScanPolicy, customRules?: WorkspaceCustomRule[]): Promise<NativeScanResult>;
 }
 
 export interface AIAnalysisAdapter {
@@ -37,6 +38,7 @@ export interface CoreScanRequest {
 	targetPath?: string;
 	mode?: ScannerMode;
 	workspacePolicy?: ResolvedWorkspaceScanPolicy;
+	customRules?: WorkspaceCustomRule[];
 	includeExternalScanners?: boolean;
 	emitter: PipelineEmitter;
 	scannerContext: ScannerContext;

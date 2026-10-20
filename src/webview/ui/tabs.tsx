@@ -2,8 +2,9 @@ import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { ChatSession, Severity, WebviewIssue, WebviewState } from './types.js';
 import { Markdown } from './markdown.js';
-import { configuredProviderOptions, providerName } from './providerOptions';
+import { providerName } from './providerOptions';
 import { AqironBadge, AqironButton, AqironIconButton, AqironMetric, AqironSectionHeader, AqironSeverity } from './design/primitives.js';
+import { recommendationChatPayload } from '../../agents/recommendations';
 
 type Post = (command: string, payload?: unknown) => void;
 
@@ -37,26 +38,31 @@ export const AgentTab = memo(function AgentTab({ state, post }: { state: Webview
 				<AqironSectionHeader title="Conversation history" description="Pick up where you left off" />
 				<ChatSessionList state={state} post={post} />
 			</section>
-			<section className="section agent-recommendations-section">
-				<AqironSectionHeader title="Recommended actions" description="Generated from the workspace graph and memory" action={<AqironButton variant="ghost" className="rag-refresh" title="Refresh AI regenerates Smart Suggestions from the current workspace index using the configured AI provider." aria-label="Refresh AI suggestions" onClick={() => post('ragRefreshSuggestions')} disabled={state.rag.building}>Refresh AI</AqironButton>} />
-				<div className="suggestion-list">
-					{state.suggestions.length ? state.suggestions.map((suggestion) => (
-						<motion.div key={suggestion.command} className="suggestion-card agent-suggestion-card" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }}>
-							<div className="suggestion-copy"><strong>{suggestion.title}</strong><Markdown content={suggestion.detail} /></div>
-							<div className="suggestion-actions">
-								<SeverityBadge severity={suggestion.severity} />
-								{suggestion.recommended && <AqironBadge>Recommended</AqironBadge>}
-								<AqironButton variant="secondary" type="button" onClick={() => post('sendChat', { text: suggestion.command, useTaskDefaults: true })}>Run</AqironButton>
-								<AqironButton variant="ghost" type="button" onClick={() => post('sendChat', { text: `Explain ${suggestion.title}`, useTaskDefaults: true })}>Explain</AqironButton>
-							</div>
-						</motion.div>
-					)) : <div className="empty">No suggestions are generated. Build with AI or use Refresh AI after configuring a provider.</div>}
-				</div>
-			</section>
+			<RecommendationsSection state={state} post={post} />
 			<AgentComposer state={state} post={post} />
 		</div>
 	);
 });
+
+export function RecommendationsSection({ state, post }: { state: Pick<WebviewState, 'workspace' | 'rag' | 'suggestions'>; post: Post }): React.ReactElement {
+	return <section className="section agent-recommendations-section">
+		<AqironSectionHeader title="Recommended actions" description="Generated from the workspace graph and memory" action={<AqironButton variant="ghost" className="rag-refresh" title="Refresh AI rebuilds the workspace graph and regenerates recommendations with the configured AI provider." aria-label="Refresh AI suggestions" aria-busy={state.rag.building} onClick={() => post('ragRefreshSuggestions')} disabled={state.rag.building || (Boolean(window.__AQIRON_DESKTOP__) && !state.workspace.root)}><span className={`codicon codicon-refresh${state.rag.building ? ' rag-refresh-spinning' : ''}`} aria-hidden="true" />{state.rag.building ? 'Refreshing…' : 'Refresh AI'}</AqironButton>} />
+		<div className="suggestion-list">
+			{state.rag.suggestionError ? <div className="empty recommendation-error" role="alert">Recommendations could not be refreshed: {state.rag.suggestionError}</div> : null}
+			{state.suggestions.length ? state.suggestions.map((suggestion) => (
+				<motion.div key={suggestion.command} className="suggestion-card agent-suggestion-card" initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }}>
+					<div className="suggestion-copy"><strong>{suggestion.title}</strong>{suggestion.detail ? <Markdown content={suggestion.detail} /> : null}{recommendationMetadataLabel(suggestion.metadata) ? <small className="suggestion-metadata">{recommendationMetadataLabel(suggestion.metadata)}</small> : null}</div>
+					<div className="suggestion-actions">
+						{suggestion.severity ? <SeverityBadge severity={suggestion.severity} /> : null}
+						{suggestion.recommended ? <AqironBadge>Recommended</AqironBadge> : null}
+						<AqironButton variant="secondary" type="button" onClick={() => post('sendChat', recommendationChatPayload(suggestion, 'run'))}>Run</AqironButton>
+						<AqironButton variant="ghost" type="button" onClick={() => post('sendChat', recommendationChatPayload(suggestion, 'explain'))}>Explain</AqironButton>
+					</div>
+				</motion.div>
+			)) : state.rag.suggestionError ? null : <div className="empty">{window.__AQIRON_DESKTOP__ ? 'No recommendations are available for this project yet.' : 'No suggestions are generated. Build with AI or use Refresh AI after configuring a provider.'}</div>}
+		</div>
+	</section>;
+}
 
 export const AgentPanel = memo(function AgentPanel({ state, post }: { state: WebviewState; post: Post }): React.ReactElement {
 	const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -125,7 +131,7 @@ function ChatSessionList({ state, post, compact = false }: { state: WebviewState
 	return (
 		<>
 			<div className={compact ? 'session-list compact' : 'session-list'}>
-				{state.chatSessions.length === 0 ? <div className="empty">Start a prompt below to create your first Aqiron AI Agent session.</div> : state.chatSessions.map((session) => {
+				{state.chatSessions.length === 0 ? <div className="empty">{window.__AQIRON_DESKTOP__ && state.desktopProjectLoading ? 'Loading conversation history…' : 'Start a prompt below to create your first Aqiron AI Agent session.'}</div> : state.chatSessions.map((session) => {
 					const latest = session.messages[session.messages.length - 1];
 					return (
 						<div key={session.id} className={session.id === state.activeChatSessionId ? 'session-card active' : 'session-card'} role="button" tabIndex={0} onClick={() => post('openChatSession', session.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { post('openChatSession', session.id); } }}>
@@ -137,7 +143,7 @@ function ChatSessionList({ state, post, compact = false }: { state: WebviewState
 							<div className={openSessionMenu === session.id ? 'session-options open' : 'session-options'} onClick={(event) => event.stopPropagation()}>
 								<AqironIconButton className="session-option-trigger" aria-label="Session options" onClick={() => setOpenSessionMenu((current) => current === session.id ? undefined : session.id)}><span className="svg-icon" style={iconStyle(state.assets.sessionOptionIcon)} /></AqironIconButton>
 								<div className="session-menu">
-									<button onClick={() => { setOpenSessionMenu(undefined); post('shareChatSession', session.id); }}><span className="svg-icon" style={iconStyle(state.assets.sessionShareIcon)} />Share</button>
+					{!window.__AQIRON_DESKTOP__ ? <button onClick={() => { setOpenSessionMenu(undefined); post('shareChatSession', session.id); }}><span className="svg-icon" style={iconStyle(state.assets.sessionShareIcon)} />Share</button> : null}
 									<button onClick={() => { setOpenSessionMenu(undefined); setRenameSession(session); setRenameTitle(session.title); }}><span className="svg-icon" style={iconStyle(state.assets.sessionRenameIcon)} />Rename</button>
 									<button className="danger-action" onClick={() => { setOpenSessionMenu(undefined); setDeleteSession(session); }}><span className="svg-icon" style={iconStyle(state.assets.sessionDeleteIcon)} />Delete</button>
 								</div>
@@ -292,7 +298,7 @@ function ScanRunningState({ activeStage, activeTool, stages, tools, onCancel }: 
 	const completedStages = stages.filter((stage) => stage.status === 'completed').length;
 	const completedTools = tools.filter((tool) => tool.status === 'completed').length;
 	const progress = activeStage && activeStage.progress > 0 ? activeStage.progress : undefined;
-	return <div className="scan-run-state"><div className="scan-run-heading"><div><span className="aq-status aq-status--info">Scanning</span><h2>{activeStage?.name ?? 'Preparing scan'}</h2><p>{activeTool ? `${activeTool.label} is running.` : completedStages || completedTools ? `${completedStages} stage${completedStages === 1 ? '' : 's'} completed.` : 'Waiting for engine telemetry.'}</p></div><AqironButton variant="danger" onClick={onCancel}><span className="codicon codicon-stop" aria-hidden="true" />Cancel scan</AqironButton></div>{progress !== undefined ? <div className="scan-progress"><div><span>Current stage progress</span><strong>{progress}%</strong></div><div className="scan-progress-track"><span style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} /></div></div> : <div className="scan-indeterminate"><span />Analyzing with the active security engines</div>}<div className="scan-run-meta">{activeTool ? <span><strong>Current scanner</strong>{activeTool.label}</span> : null}{tools.length ? <span><strong>Tools completed</strong>{completedTools} / {tools.length}</span> : null}</div></div>;
+	return <div className="scan-run-state"><div className="scan-run-heading"><div><span className="aq-status aq-status--info">Scanning</span><h2>{activeStage?.name ?? 'Preparing scan'}</h2><p>{activeTool ? `${activeTool.label} is running.` : completedStages || completedTools ? `${completedStages} stage${completedStages === 1 ? '' : 's'} completed.` : 'Waiting for engine telemetry.'}</p></div>{!window.__AQIRON_DESKTOP__ ? <AqironButton variant="danger" onClick={onCancel}><span className="codicon codicon-stop" aria-hidden="true" />Cancel scan</AqironButton> : null}</div>{progress !== undefined ? <div className="scan-progress"><div><span>Current stage progress</span><strong>{progress}%</strong></div><div className="scan-progress-track"><span style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} /></div></div> : <div className="scan-indeterminate"><span />Analyzing with the active security engines</div>}<div className="scan-run-meta">{activeTool ? <span><strong>Current scanner</strong>{activeTool.label}</span> : null}{tools.length ? <span><strong>Tools completed</strong>{completedTools} / {tools.length}</span> : null}</div></div>;
 }
 
 function ScanCompleteState({ state, onRunAgain, post }: { state: WebviewState; onRunAgain: () => void; post: Post }): React.ReactElement {
@@ -643,7 +649,7 @@ function formatTimelineTimestamp(value: string): string {
 export const ReportsTab = memo(function ReportsTab({ state, post }: { state: WebviewState; post: Post }): React.ReactElement {
 	const activeReport = state.threatSnapshots.find((snapshot) => snapshot.id === state.activeThreatSnapshotId);
 	const lastReport = state.pipeline.lastReport;
-	const reportAvailable = Boolean(lastReport?.pdfPath || lastReport?.jsonPath || lastReport?.sarifPath);
+	const reportAvailable = Boolean(lastReport?.pdfPath || lastReport?.jsonPath || lastReport?.sarifPath || lastReport?.artifactsAvailable?.pdf || lastReport?.artifactsAvailable?.json || lastReport?.artifactsAvailable?.sarif);
 	const reportStatus = reportAvailable ? 'Available' : state.threatSnapshots.length ? 'Assessment available' : 'No report yet';
 	return (
 		<div className="tab-page reports-workspace">
@@ -654,10 +660,12 @@ export const ReportsTab = memo(function ReportsTab({ state, post }: { state: Web
 			<section className="reports-assessment">
 				<AqironSectionHeader title="Latest assessment" description={activeReport ? `${activeReport.title} · ${formatThreatTimestamp(activeReport.createdAt)}` : 'Counts and scan context from the current workspace state.'} action={<AqironButton variant="secondary" type="button" onClick={() => post('focus', 'threats')}>View findings</AqironButton>} />
 				<div className="reports-summary-grid"><AqironMetric title="Total findings" value={`${state.counts.total}`} /><AqironMetric title="Critical" value={`${state.counts.critical}`} /><AqironMetric title="High" value={`${state.counts.high}`} /><AqironMetric title="Files scanned" value={`${state.stats.filesScanned}`} />{state.stats.lastScanDurationMs > 0 ? <AqironMetric title="Last scan" value={formatDuration(state.stats.lastScanDurationMs)} /> : null}</div>
+				{lastReport?.executiveSummary && <p className="report-executive-summary">{lastReport.executiveSummary}</p>}
+				{lastReport?.reportData && <details className="report-core-data"><summary>Core report text · {new Date(lastReport.reportData.model.generatedAt).toLocaleString()}</summary><pre>{lastReport.reportData.text}</pre></details>}
 			</section>
 			<section className="reports-outputs">
 				<AqironSectionHeader title="Report outputs" description={reportAvailable ? 'Generated artifacts are ready to export or share.' : 'A report bundle becomes available after a completed scan.'} />
-				<div className="report-format-grid"><ReportFormatCard format="PDF" description="Readable assessment document for review and release evidence." path={lastReport?.pdfPath} onExport={() => post('exportReport', 'pdf')} onRename={() => post('renameReportArtifact', 'pdf')} /><ReportFormatCard format="JSON" description="Structured report data for automation and integrations." path={lastReport?.jsonPath} onExport={() => post('exportReport', 'json')} onRename={() => post('renameReportArtifact', 'json')} /><ReportFormatCard format="SARIF" description="Standardized findings format for code-scanning workflows." path={lastReport?.sarifPath} onExport={() => post('exportReport', 'sarif')} onRename={() => post('renameReportArtifact', 'sarif')} /></div>
+				<div className="report-format-grid"><ReportFormatCard format="PDF" description="Readable assessment document for review and release evidence." path={lastReport?.pdfPath ?? (lastReport?.artifactsAvailable?.pdf ? 'Core report.pdf' : undefined)} onExport={() => post('exportReport', 'pdf')} onRename={() => post('renameReportArtifact', 'pdf')} /><ReportFormatCard format="JSON" description="Structured report data for automation and integrations." path={lastReport?.jsonPath ?? (lastReport?.artifactsAvailable?.json ? 'Core report.json' : undefined)} onExport={() => post('exportReport', 'json')} onRename={() => post('renameReportArtifact', 'json')} /><ReportFormatCard format="SARIF" description="Standardized findings format for code-scanning workflows." path={lastReport?.sarifPath ?? (lastReport?.artifactsAvailable?.sarif ? 'Core report.sarif' : undefined)} onExport={() => post('exportReport', 'sarif')} onRename={() => post('renameReportArtifact', 'sarif')} /></div>
 			</section>
 			<section className="reports-history">
 				<AqironSectionHeader title="Report history" description={state.threatSnapshots.length ? 'Stored assessment snapshots from completed scans.' : 'Completed scan assessments will appear here.'} />
@@ -672,7 +680,7 @@ export const ReportsTab = memo(function ReportsTab({ state, post }: { state: Web
 
 function ReportFormatCard({ format, description, path, onExport, onRename }: { format: string; description: string; path?: string; onExport: () => void; onRename: () => void }): React.ReactElement {
 		const available = Boolean(path);
-		return <article className={`report-format-card ${available ? 'available' : 'unavailable'}`}><div className="report-format-heading"><span className="report-format-icon"><span className={`codicon ${format === 'PDF' ? 'codicon-file-pdf' : format === 'SARIF' ? 'codicon-bracket-dot' : 'codicon-json'}`} aria-hidden="true" /></span><div><strong>{format}</strong><span>{available ? 'Available' : 'Not generated'}</span></div></div><p>{description}</p>{available && path ? <span className="report-artifact-name"><code title={path}>{reportArtifactLabel(path)}</code><AqironIconButton className="report-artifact-rename" aria-label={`Rename ${reportArtifactLabel(path)}`} title={`Rename ${reportArtifactLabel(path)}`} disabled={!available} onClick={onRename}><span className="codicon codicon-edit" aria-hidden="true" /></AqironIconButton></span> : <span className="report-format-helper">Run a scan to generate this artifact.</span>}<AqironButton variant={available ? 'secondary' : 'ghost'} type="button" disabled={!available} onClick={onExport}>{available ? `Export ${format}` : 'Unavailable'}</AqironButton></article>;
+		return <article className={`report-format-card ${available ? 'available' : 'unavailable'}`}><div className="report-format-heading"><span className="report-format-icon"><span className={`codicon ${format === 'PDF' ? 'codicon-file-pdf' : format === 'SARIF' ? 'codicon-bracket-dot' : 'codicon-json'}`} aria-hidden="true" /></span><div><strong>{format}</strong><span>{available ? 'Available' : 'Not generated'}</span></div></div><p>{description}</p>{available && path ? <span className="report-artifact-name"><code title={path}>{reportArtifactLabel(path)}</code>{!window.__AQIRON_DESKTOP__ ? <AqironIconButton className="report-artifact-rename" aria-label={`Rename ${reportArtifactLabel(path)}`} title={`Rename ${reportArtifactLabel(path)}`} disabled={!available} onClick={onRename}><span className="codicon codicon-edit" aria-hidden="true" /></AqironIconButton> : null}</span> : <span className="report-format-helper">Run a scan to generate this artifact.</span>}<AqironButton variant={available ? 'secondary' : 'ghost'} type="button" disabled={!available} onClick={onExport}>{available ? `Export ${format}` : 'Unavailable'}</AqironButton></article>;
 }
 
 function ReportHistoryCard({ snapshot, active, onSelect }: { snapshot: WebviewState['threatSnapshots'][number]; active: boolean; onSelect: () => void }): React.ReactElement {
@@ -739,10 +747,10 @@ function AgentComposer({ state, post, sessionId }: { state: WebviewState; post: 
 		<div className="composer" onClick={(event) => event.stopPropagation()}>
 			<textarea value={text} onClick={closeMenus} onFocus={closeMenus} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} placeholder="Ask Aqiron to analyze, explain, fuzz, patch, or report..." />
 			<div className="composer-footer">
-				<div className="composer-control edge">
+				{!window.__AQIRON_DESKTOP__ ? <div className="composer-control edge">
 					<AqironIconButton className="round" aria-label="Add files and more" onClick={() => post('attachContext')}><span className="svg-icon" style={iconStyle(state.assets.addIcon)} /></AqironIconButton>
 					<span className="tip edge-left">Add files and more</span>
-				</div>
+				</div> : null}
 				<div className={openMenu === 'provider' ? 'provider-pill provider-slot open' : 'provider-pill provider-slot'}>
 					<span className={state.ai.status.connected ? 'provider-dot ok-dot' : 'provider-dot warn-dot'} />
 					<button onClick={() => toggleMenu('provider')}>{selectedProvider?.name ?? 'Provider'}<span className="svg-icon" style={iconStyle(state.assets.chevronDownIcon)} /></button>
@@ -787,12 +795,12 @@ function AgentComposer({ state, post, sessionId }: { state: WebviewState; post: 
 								</div>
 								{state.ai.loadingModels ? <div className="menu-option muted">Loading models...</div> : null}
 								{state.ai.modelError ? <div className="menu-option muted">{state.ai.modelError}</div> : null}
-								{!state.ai.loadingModels && state.ai.filteredModels.length === 0 ? <div className="menu-option muted">No matching models</div> : state.ai.filteredModels.slice(0, 80).map((model) => <button key={model.id} className="menu-option model-option" onClick={() => { post('selectModel', model.id); closeMenus(); }}><span><strong>{model.label}</strong><small>{model.contextWindow ? `${model.contextWindow.toLocaleString()} ctx` : model.family ?? model.providerId}</small></span><span className="option-spacer" />{model.badges.slice(0, 3).map((badge) => <span key={badge} className="model-badge">{badge}</span>)}{model.id === state.ai.selection.model ? <span className="hint">Selected</span> : null}</button>)}
+								{!state.ai.loadingModels && state.ai.filteredModels.length === 0 ? <div className="menu-option muted">{state.ai.providers.some((provider) => provider.hasCredential) ? 'No matching models' : 'Configure an AI provider to load models.'}</div> : state.ai.filteredModels.slice(0, 80).map((model) => <button key={model.id} className="menu-option model-option" onClick={() => { post('selectModel', model.id); closeMenus(); }}><span><strong>{model.label}</strong><small>{model.contextWindow ? `${model.contextWindow.toLocaleString()} ctx` : model.family ?? model.providerId}</small></span><span className="option-spacer" />{model.badges.slice(0, 3).map((badge) => <span key={badge} className="model-badge">{badge}</span>)}{model.id === state.ai.selection.model ? <span className="hint">Selected</span> : null}</button>)}
 							</div>
 						</div>
 					</div>
 				</div>
-				<div className="send-wrap"><AqironButton variant={isStreaming ? 'danger' : 'primary'} className="send" aria-label={isStreaming ? 'Cancel generation' : 'Send'} disabled={!isStreaming && !text.trim()} onClick={isStreaming ? () => post('cancelGeneration', sessionId) : send}>{isStreaming ? 'Stop' : <span className="svg-icon" style={iconStyle(state.assets.upArrowIcon)} />}</AqironButton><span className="tip">{isStreaming ? 'Cancel generation' : 'Send'}</span></div>
+				<div className="send-wrap">{isStreaming && window.__AQIRON_DESKTOP__ ? <AqironButton variant="secondary" className="send" aria-label="Generating response" disabled>Generating…</AqironButton> : <><AqironButton variant={isStreaming ? 'danger' : 'primary'} className="send" aria-label={isStreaming ? 'Cancel generation' : 'Send'} disabled={!isStreaming && (!text.trim() || !state.ai.selection.model || !selectedProvider?.hasCredential)} onClick={isStreaming ? () => post('cancelGeneration', sessionId) : send}>{isStreaming ? 'Stop' : <span className="codicon codicon-arrow-up" aria-hidden="true" />}</AqironButton><span className="tip">{isStreaming ? 'Cancel generation' : 'Send'}</span></>}</div>
 			</div>
 			{settingsOpen ? <AISettingsModal state={state} post={post} onClose={() => setSettingsOpen(false)} /> : null}
 		</div>
@@ -821,7 +829,7 @@ function AISettingsModal({ state, post, onClose }: { state: WebviewState; post: 
 			<div className="chat-modal ai-settings-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
 				<h2>AI Settings</h2>
 				<label>Provider<span>{activeProvider?.name}</span></label>
-				<label>API key<span>{activeProvider?.hasCredential ? 'Saved in SecretStorage' : 'Not saved'}</span></label>
+				<label>API key<span>{activeProvider?.hasCredential ? (window.__AQIRON_DESKTOP__ ? 'Saved in secure OS credential storage' : 'Saved in SecretStorage') : 'Not saved'}</span></label>
 				<label>Temperature<input type="number" min="0" max="2" step="0.1" value={temperature} onChange={(event) => setTemperature(event.target.value)} /></label>
 				<label>Max tokens<input type="number" min="16" step="128" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} /></label>
 				<label>Timeout ms<input type="number" min="5000" step="1000" value={timeoutMs} onChange={(event) => setTimeoutMs(event.target.value)} /></label>
@@ -841,6 +849,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 	const [apiKey, setApiKey] = useState('');
 	const [apiProvider, setApiProvider] = useState<WebviewState['ai']['selection']['provider']>(state.ai.selection.provider);
 	const [deleteApi, setDeleteApi] = useState<WebviewState['ai']['apiCredentials'][number] | undefined>();
+	const [deleteLegacyProvider, setDeleteLegacyProvider] = useState<WebviewState['ai']['selection']['provider'] | undefined>();
 	const [mobSfBaseUrl, setMobSfBaseUrl] = useState(state.mobsf.baseUrl);
 	const [mobSfApiKey, setMobSfApiKey] = useState('');
 	const defaults = state.ai.taskDefaults;
@@ -849,6 +858,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 	const [model, setModel] = useState(defaults.model ?? state.ai.selection.model);
 	const [intelligence, setIntelligence] = useState(defaults.intelligence ?? state.ai.selection.intelligence);
 	const [customRules, setCustomRules] = useState(state.customRules);
+	useEffect(() => { setCustomRules(state.customRules); }, [state.workspace.root, state.customRules]);
 	useEffect(() => {
 		if (!editing) {
 			return;
@@ -885,7 +895,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 		<section className="section settings-panel aq-surface-card">
 				<div className="section-head"><h2>API Management</h2><span>Saved provider credentials</span></div>
 				<div className="api-list">
-					{state.ai.apiCredentials.length === 0 ? <div className="empty">No API keys saved yet.</div> : state.ai.apiCredentials.map((api) => (
+					{state.ai.apiCredentials.length === 0 && !state.ai.providers.some((provider) => provider.hasCredential) ? <div className="empty">No API keys saved yet.</div> : state.ai.apiCredentials.length > 0 ? state.ai.apiCredentials.map((api) => (
 						<div key={api.id} className={api.id === state.ai.settings.activeApiCredentialId ? 'api-row active' : 'api-row'}>
 							<div><strong>{api.name}</strong><span>{providerName(api.providerId)} · {maskApiKey(api.last4)}</span></div>
 							<div className="api-actions">
@@ -894,7 +904,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 								<button className="api-action delete" onClick={() => setDeleteApi(api)}>Delete</button>
 							</div>
 						</div>
-					))}
+					)) : state.ai.providers.filter((provider) => provider.hasCredential).map((provider) => <div key={provider.id} className="api-row"><div><strong>{provider.name}</strong><span>Configured · •••••••• (Core keychain)</span></div><div className="api-actions"><span className="settings-status ok">Configured</span>{provider.id === 'openrouter' ? <button className="api-action delete" onClick={() => setDeleteLegacyProvider(provider.id)}>Delete</button> : null}</div></div>)}
 				</div>
 				<div className="settings-form">
 					<label>Provider<select value={editing?.providerId ?? apiProvider} disabled={Boolean(editing)} onChange={(event) => setApiProvider(event.target.value as WebviewState['ai']['selection']['provider'])}><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="claude">Claude</option><option value="gemini">Gemini</option></select></label>
@@ -907,8 +917,18 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 						<div className="chat-modal delete-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
 							<h2>Delete API key?</h2>
 							<p>This will delete <strong>{deleteApi.name}</strong>.</p>
-							<span>The key will be removed from VS Code SecretStorage and cannot be used by Aqiron until it is added again.</span>
+							<span>{window.__AQIRON_DESKTOP__ ? 'The API key will be removed from this Desktop application’s secure OS credential store and cannot be used until it is added again.' : 'The key will be removed from VS Code SecretStorage and cannot be used by Aqiron until it is added again.'}</span>
 							<div className="modal-actions"><button onClick={() => setDeleteApi(undefined)}>Cancel</button><button className="delete-action" onClick={() => { post('deleteApiCredential', deleteApi.id); setDeleteApi(undefined); }}>Delete</button></div>
+						</div>
+					</div>
+				) : null}
+				{deleteLegacyProvider ? (
+					<div className="modal-backdrop" role="presentation" onClick={() => setDeleteLegacyProvider(undefined)}>
+						<div className="chat-modal delete-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+							<h2>Delete API key?</h2>
+							<p>This will delete the saved <strong>{providerName(deleteLegacyProvider)}</strong> credential.</p>
+							<span>The key will be removed from Core credential storage and cannot be used until it is added again.</span>
+							<div className="modal-actions"><button onClick={() => setDeleteLegacyProvider(undefined)}>Cancel</button><button className="delete-action" onClick={() => { post('deleteLegacyProviderCredential', deleteLegacyProvider); setDeleteLegacyProvider(undefined); }}>Delete</button></div>
 						</div>
 					</div>
 				) : null}
@@ -933,7 +953,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 					<SettingsAiDropdowns state={state} post={post} disabled={useChatDefaults} provider={provider} model={model} intelligence={intelligence} onProvider={(value) => updateTaskDefaults({ provider: value })} onModel={(value) => updateTaskDefaults({ model: value })} onIntelligence={(value) => updateTaskDefaults({ intelligence: value })} />
 				</div>
 				<div className="section-head"><h2>Accessibility</h2><span>Adjust Aqiron text and controls</span></div>
-				<div className="zoom-control"><span>Interface zoom</span><div><button aria-label="Decrease interface zoom" onClick={() => post('setZoom', Math.max(0.85, state.zoom - 0.05))}><span className="codicon codicon-remove" aria-hidden="true" /></button><strong>{Math.round(state.zoom * 100)}%</strong><button aria-label="Increase interface zoom" onClick={() => post('setZoom', Math.min(1.3, state.zoom + 0.05))}><span className="codicon codicon-add" aria-hidden="true" /></button><button onClick={() => post('setZoom', 1)}>Reset</button></div></div>
+				{!window.__AQIRON_DESKTOP__ ? <div className="zoom-control"><span>Interface zoom</span><div><button aria-label="Decrease interface zoom" onClick={() => post('setZoom', Math.max(0.85, state.zoom - 0.05))}><span className="codicon codicon-remove" aria-hidden="true" /></button><strong>{Math.round(state.zoom * 100)}%</strong><button aria-label="Increase interface zoom" onClick={() => post('setZoom', Math.min(1.3, state.zoom + 0.05))}><span className="codicon codicon-add" aria-hidden="true" /></button><button onClick={() => post('setZoom', 1)}>Reset</button></div></div> : null}
 			</section>
 	);
 	const flutterCard = (
@@ -951,7 +971,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 			<aside className="settings-sidebar" aria-label="Settings navigation">
 				<div className="settings-sidebar-head"><strong>Settings</strong><span>Workspace configuration</span></div>
 				<button type="button" aria-current={activeSettingsPanel === 'credentials' ? 'page' : undefined} className={activeSettingsPanel === 'credentials' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('credentials')}><span className="codicon codicon-key" aria-hidden="true" /><span>AI &amp; Credentials</span></button>
-				<button type="button" aria-current={activeSettingsPanel === 'integrations' ? 'page' : undefined} className={activeSettingsPanel === 'integrations' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('integrations')}><span className="codicon codicon-plug" aria-hidden="true" /><span>Integrations</span></button>
+				{!window.__AQIRON_DESKTOP__ ? <button type="button" aria-current={activeSettingsPanel === 'integrations' ? 'page' : undefined} className={activeSettingsPanel === 'integrations' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('integrations')}><span className="codicon codicon-plug" aria-hidden="true" /><span>Integrations</span></button> : null}
 				<button type="button" aria-current={activeSettingsPanel === 'general' ? 'page' : undefined} className={activeSettingsPanel === 'general' ? 'settings-nav active' : 'settings-nav'} onClick={() => setActiveSettingsPanel('general')}><span className="codicon codicon-settings-gear" aria-hidden="true" /><span>General &amp; Accessibility</span></button>
 				<div className={frameworksOpen ? 'settings-nav-group open' : 'settings-nav-group'}>
 					<button type="button" className="settings-nav group-trigger" onClick={() => setFrameworksOpen((value) => !value)} aria-expanded={frameworksOpen}>
@@ -965,7 +985,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 			<div className="settings-content">
 				<div className="settings-content-heading"><span className="eyebrow">AQIRON SETTINGS</span><h1>{activeSettingsPanel === 'credentials' ? 'AI & Credentials' : activeSettingsPanel === 'integrations' ? 'Integrations' : activeSettingsPanel === 'general' ? 'General & Accessibility' : 'Languages & Frameworks'}</h1><p>{activeSettingsPanel === 'credentials' ? 'Manage saved provider credentials and defaults without exposing secret values.' : activeSettingsPanel === 'integrations' ? 'Configure external security tools connected to Aqiron.' : activeSettingsPanel === 'general' ? 'Set AI defaults and adjust interface readability.' : 'Configure framework-specific scanner rules available in this workspace.'}</p></div>
 				{activeSettingsPanel === 'credentials' ? apiManagementCard : null}
-				{activeSettingsPanel === 'integrations' ? mobSfCard : null}
+				{activeSettingsPanel === 'integrations' && !window.__AQIRON_DESKTOP__ ? mobSfCard : null}
 				{activeSettingsPanel === 'general' ? generalCard : null}
 				{activeSettingsPanel === 'flutter' ? flutterCard : null}
 			</div>
@@ -1021,7 +1041,7 @@ function SettingsAiDropdowns({ state, post, disabled, provider, model, intellige
 							</div>
 							{state.ai.loadingModels ? <div className="menu-option muted">Loading models...</div> : null}
 							{state.ai.modelError ? <div className="menu-option muted">{state.ai.modelError}</div> : null}
-							{!state.ai.loadingModels && state.ai.filteredModels.length === 0 ? <div className="menu-option muted">No matching models</div> : state.ai.filteredModels.slice(0, 80).map((item) => <button key={item.id} className="menu-option model-option" onClick={() => { onModel(item.id); closeMenus(); }}><span><strong>{item.label}</strong><small>{item.contextWindow ? `${item.contextWindow.toLocaleString()} ctx` : item.family ?? item.providerId}</small></span><span className="option-spacer" />{item.badges.slice(0, 3).map((badge) => <span key={badge} className="model-badge">{badge}</span>)}{item.id === model ? <span className="hint">Selected</span> : null}</button>)}
+							{!state.ai.loadingModels && state.ai.filteredModels.length === 0 ? <div className="menu-option muted">{state.ai.providers.some((item) => item.hasCredential) ? 'No matching models' : 'Configure an AI provider to load models.'}</div> : state.ai.filteredModels.slice(0, 80).map((item) => <button key={item.id} className="menu-option model-option" onClick={() => { onModel(item.id); closeMenus(); }}><span><strong>{item.label}</strong><small>{item.contextWindow ? `${item.contextWindow.toLocaleString()} ctx` : item.family ?? item.providerId}</small></span><span className="option-spacer" />{item.badges.slice(0, 3).map((badge) => <span key={badge} className="model-badge">{badge}</span>)}{item.id === model ? <span className="hint">Selected</span> : null}</button>)}
 						</div>
 					</div>
 				</div>
@@ -1050,7 +1070,7 @@ function ProviderMenu({ state, post, providerApis, onClose, onSettings, onSelect
 		post('switchProvider', provider);
 		onClose();
 	};
-	const providers = configuredProviderOptions(providerApis);
+	const providers = state.ai.providers.filter((provider) => provider.hasCredential).map(({ id, name }) => ({ id, name }));
 	return (
 		<>
 			<div className="menu-title">Provider</div>
@@ -1088,7 +1108,7 @@ function ThreatDetails({ issue, post }: { issue: WebviewIssue; post: Post }): Re
 			<div className="finding-detail-meta"><span><strong>CWE</strong>{issue.cwe}</span><span><strong>OWASP</strong>{issue.owasp}</span><span><strong>Rule</strong>{issue.ruleId}</span><span><strong>Column</strong>{issue.column}</span></div>
 			<div className="finding-evidence"><div className="finding-detail-block-head"><div><strong>Evidence</strong><span>Captured source context</span></div><AqironBadge tone="brand">{issue.lineText ? 'Source line' : 'Location only'}</AqironBadge></div><pre className="detail-snippet">{codePreview}</pre></div>
 			{issue.tool === 'AI Analysis' && renderAiEvidence(issue.rawEvidence)}
-			<div className="finding-detail-actions"><AqironButton variant="primary" type="button" onClick={() => post('openIssue', issue.id)}><span className="codicon codicon-go-to-file" aria-hidden="true" />Open file</AqironButton><AqironButton variant="secondary" type="button" onClick={() => post('sendChat', { text: `Explain ${issue.title} in ${issue.relativeFile}:${issue.line}` })}>Explain</AqironButton><AqironButton variant="secondary" type="button" onClick={() => post('sendChat', { text: `Fix ${issue.title} in ${issue.relativeFile}:${issue.line}` })}>Fix with AI</AqironButton><AqironButton variant="ghost" type="button" onClick={() => post('exportFinding', issue.id)}>Export</AqironButton><AqironButton variant="ghost" type="button" onClick={() => post('createRuleFromFinding', issue.id)}>Create rule</AqironButton><AqironButton variant="danger" type="button" onClick={() => post('ignoreIssue', issue.id)}>Ignore</AqironButton>
+			<div className="finding-detail-actions"><AqironButton variant="primary" type="button" onClick={() => post('openIssue', issue.id)}><span className="codicon codicon-go-to-file" aria-hidden="true" />Open file</AqironButton><AqironButton variant="secondary" type="button" onClick={() => post('sendChat', { text: `Explain ${issue.title} in ${issue.relativeFile}:${issue.line}` })}>Explain</AqironButton><AqironButton variant="secondary" type="button" onClick={() => post('sendChat', { text: `Fix ${issue.title} in ${issue.relativeFile}:${issue.line}` })}>Fix with AI</AqironButton><AqironButton variant="ghost" type="button" onClick={() => post('exportFinding', issue.id)}>Export</AqironButton>{!window.__AQIRON_DESKTOP__ && <AqironButton variant="ghost" type="button" onClick={() => post('createRuleFromFinding', issue.id)}>Create rule</AqironButton>}<AqironButton variant="danger" type="button" disabled={window.__AQIRON_DESKTOP__} title={window.__AQIRON_DESKTOP__ ? 'Unavailable in Desktop' : undefined} onClick={() => post('ignoreIssue', issue.id)}>Ignore</AqironButton>
 			</div>
 		</div>
 	);
@@ -1288,6 +1308,11 @@ function looksLikeStructuredBlob(value: string): boolean {
 }
 function SeverityBadge({ severity }: { severity: Severity }): React.ReactElement {
 	return <AqironSeverity severity={severity} />;
+}
+
+function recommendationMetadataLabel(metadata?: { ruleId?: string; file?: string; line?: number; category?: string }): string {
+	if (!metadata) { return ''; }
+	return [metadata.category, metadata.ruleId, metadata.file ? `${metadata.file}${metadata.line ? `:${metadata.line}` : ''}` : undefined].filter(Boolean).join(' · ');
 }
 
 function actionDetail(title: string): string {

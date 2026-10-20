@@ -47,6 +47,7 @@ export interface SecurityReportModel {
 
 export interface SecurityReportContent {
 	model: SecurityReportModel;
+	json: unknown;
 	text: string;
 	sarif: unknown;
 	pdf: string;

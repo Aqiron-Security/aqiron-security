@@ -17,6 +17,10 @@
 	},
 	"include": [
 		"src/**/*.ts",
+		"src/**/*.tsx",
+		"apps/desktop/src/**/*.ts",
+		"apps/desktop/**/*.ts",
+		"packages/desktop/src/**/*.ts",
 		"packages/cli/src/**/*.ts",
 		"packages/core/src/**/*.ts"
 	],

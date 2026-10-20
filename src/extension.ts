@@ -67,12 +67,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('aqiron-security.ragAddRegex', () => rag.addFromClipboardOrFile()),
 		vscode.commands.registerCommand('aqiron-security.ragSyncRegexes', () => rag.sync()),
 		vscode.workspace.onDidSaveTextDocument((document) => controller.scanDocumentDebounced(document)),
-		vscode.workspace.onDidChangeWorkspaceFolders(() => { void notifyWorkspaceSupport(); controller.scanWorkspaceDebounced(); }),
+	vscode.workspace.onDidChangeWorkspaceFolders(() => { void syncWorkspaceRulesFromConfiguration(coreClient, output); void notifyWorkspaceSupport(); controller.scanWorkspaceDebounced(); }),
 		{ dispose: () => void coreClient.stop() },
 	);
 
 	void (async () => {
 		await coreClient.start();
+		await syncWorkspaceRulesFromConfiguration(coreClient, output);
 		await aiService.initialize();
 		await aiService.ensureFirstRunConfigured();
 		await sidebar.refreshAiState();
@@ -80,6 +81,32 @@ export function activate(context: vscode.ExtensionContext): void {
 		await notifyWorkspaceSupport();
 	})();
 	output.appendLine('Aqiron Security extension activated.');
+}
+
+async function syncWorkspaceRulesFromConfiguration(coreClient: CoreClient, output: vscode.OutputChannel): Promise<void> {
+	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!workspaceRoot) {
+		return;
+	}
+	const inspected = vscode.workspace.getConfiguration('aqiron-security').inspect<unknown[]>('customRules');
+	if (!inspected || (inspected.globalValue === undefined && inspected.workspaceValue === undefined && inspected.workspaceFolderValue === undefined)) {
+		const shared = await coreClient.getWorkspaceRules(workspaceRoot);
+		if (shared.configured) {
+			await vscode.workspace.getConfiguration('aqiron-security').update('customRules', shared.rules, vscode.ConfigurationTarget.Workspace);
+		}
+		return;
+	}
+	const shared = await coreClient.getWorkspaceRules(workspaceRoot);
+	if (shared.configured) {
+		await vscode.workspace.getConfiguration('aqiron-security').update('customRules', shared.rules, vscode.ConfigurationTarget.Workspace);
+		return;
+	}
+	const configured = vscode.workspace.getConfiguration('aqiron-security').get<unknown[]>('customRules', []);
+	try {
+		await coreClient.setWorkspaceRules(workspaceRoot, configured as never);
+	} catch (error) {
+		output.appendLine(`Could not sync workspace custom rules to Aqiron Core: ${error instanceof Error ? error.message : String(error)}`);
+	}
 }
 
 async function notifyWorkspaceSupport(): Promise<void> {

@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CliCoreClient, CliOutput, runCli } from '../../packages/cli/src/cli';
 import { CoreScanStartResult } from '../../packages/core/src/runtime/protocol';
+import { createJsonReport } from '../../packages/core/src/reports/reportExporters';
 import { CoreClient } from '../../packages/core/src/client';
 
 suite('Aqiron CLI', () => {
@@ -311,6 +312,48 @@ suite('Aqiron CLI', () => {
 		assert.doesNotMatch(result.stdout + result.stderr, /sk-test-secret-value-123456/);
 	});
 
+	test('built CLI JSON and SARIF consume the Core report bundle', function () {
+		this.timeout(60_000);
+		const cliPath = path.resolve(__dirname, '../../../dist/aqiron-cli.js');
+		if (!fs.existsSync(cliPath)) { this.skip(); return; }
+		const fixture = path.resolve(__dirname, '../../../src/test/fixtures/file-scan/flutter');
+		for (const format of ['json', 'sarif'] as const) {
+			const result = childProcess.spawnSync(process.execPath, [cliPath, 'scan', fixture, '--format', format, '--trust-local-workspace'], { encoding: 'utf8', timeout: 50_000, windowsHide: true });
+			assert.equal(result.error, undefined, result.error?.message);
+			assert.equal(result.status, 0, result.stderr);
+			const document = JSON.parse(result.stdout) as { report?: { summary?: { total?: number }; findings?: Array<{ rawEvidence?: unknown }> }; version?: string; runs?: Array<{ results?: unknown[] }> };
+			if (format === 'json') {
+				assert.ok((document.report?.summary?.total ?? 0) > 0);
+				assert.doesNotMatch(result.stdout, /sk-test-secret-value-123456/);
+			} else {
+				assert.equal(document.version, '2.1.0');
+				assert.ok((document.runs?.[0]?.results?.length ?? 0) > 0);
+				assert.doesNotMatch(result.stdout, /sk-test-secret-value-123456/);
+			}
+		}
+	});
+
+	test('built CLI applies Core-owned workspace custom rules without VS Code settings', function () {
+		this.timeout(30_000);
+		const cliPath = path.resolve(__dirname, '../../../dist/aqiron-cli.js');
+		if (!fs.existsSync(cliPath)) { this.skip(); return; }
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-rules-'));
+		try {
+			fs.mkdirSync(path.join(workspace, 'lib'), { recursive: true });
+			fs.writeFileSync(path.join(workspace, 'pubspec.yaml'), 'name: cli_rule_fixture\nflutter:\n');
+			fs.writeFileSync(path.join(workspace, 'lib', 'sample.dart'), 'const cliRuleSentinel = "unsafe_cli_fixture_value";\n');
+			const rulesDirectory = path.join(workspace, '.aqiron-security');
+			fs.mkdirSync(rulesDirectory);
+			fs.writeFileSync(path.join(rulesDirectory, 'custom-rules.json'), JSON.stringify({ version: 1, rules: [{ id: 'cli.test.shared-rule', title: 'CLI shared rule', message: 'Shared Core rule matched.', severity: 'High', pattern: 'unsafe_cli_fixture_value', extensions: ['.dart'] }] }));
+			const result = childProcess.spawnSync(process.execPath, [cliPath, 'scan', workspace, '--format', 'json', '--trust-local-workspace'], { encoding: 'utf8', timeout: 25_000, windowsHide: true });
+			assert.equal(result.error, undefined, result.error?.message);
+			assert.equal(result.status, 0, result.stderr);
+			const document = JSON.parse(result.stdout) as { report: { findings: Array<{ ruleId: string; rawEvidence?: unknown }> } };
+			assert.ok(document.report.findings.some((finding) => finding.ruleId === 'cli.test.shared-rule'));
+			assert.doesNotMatch(result.stdout + result.stderr, /unsafe_cli_fixture_value/);
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
+
 	test('built CLI writes the Core PDF report returned through scan.start', function () {
 		this.timeout(45_000);
 		const cliPath = path.resolve(__dirname, '../../../dist/aqiron-cli.js');
@@ -376,7 +419,7 @@ class FakeCoreClient implements CliCoreClient {
 			correlation,
 			graph,
 			telemetry,
-			report: { sarif: { version: '2.1.0', $schema: 'https://json.schemastore.org/sarif-2.1.0.json', runs: [] }, model: { summary: { total: findings.length }, findings }, pdf: Buffer.concat([Buffer.from('%PDF-1.4\nAqiron report '), Buffer.from([0xe9])]).toString('binary') } as unknown as CoreScanStartResult['report'],
+			report: { sarif: { version: '2.1.0', $schema: 'https://json.schemastore.org/sarif-2.1.0.json', runs: [] }, json: createJsonReport({ summary: { total: findings.length }, findings } as unknown as import('../../packages/core/src/reports/reportModels').SecurityReportModel), model: { summary: { total: findings.length }, findings }, pdf: Buffer.concat([Buffer.from('%PDF-1.4\nAqiron report '), Buffer.from([0xe9])]).toString('binary') } as unknown as CoreScanStartResult['report'],
 			durationMs: 1250,
 		};
 	}

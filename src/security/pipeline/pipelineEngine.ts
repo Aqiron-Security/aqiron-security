@@ -77,7 +77,7 @@ export function forwardCoreScanEvent(event: { requestId?: string; payload?: unkn
 
 async function writeReportBundle(workspaceRoot: string, report: CoreScanResult['report']): Promise<SecurityReportBundle> {
 	const paths = await createReportBundlePaths(workspaceRoot, report.model.generatedAt);
-	await fs.writeFile(paths.jsonPath, JSON.stringify(report.model, null, 2), 'utf8');
+	await fs.writeFile(paths.jsonPath, JSON.stringify(report.json, null, 2), 'utf8');
 	await fs.writeFile(paths.sarifPath, JSON.stringify(report.sarif, null, 2), 'utf8');
 	await fs.writeFile(paths.pdfPath, report.pdf, 'binary');
 	return {
