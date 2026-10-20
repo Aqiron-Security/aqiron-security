@@ -14,6 +14,7 @@ import { AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
 import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
 import { ResolvedWorkspaceScanPolicy } from '../shared/workspaceScanPolicy';
 import { WorkspaceCustomRule } from '../shared/workspaceRules';
+import { HypothesisGenerationResult, HypothesisReviewInput, SecurityHypothesis } from '../hypotheses/contracts';
 
 export const CORE_PROTOCOL_VERSION = 1;
 
@@ -54,6 +55,10 @@ export type CoreMethodParams = {
 	'workspace.agent-sessions.get': { workspaceRoot: string };
 	'workspace.agent-sessions.set': { workspaceRoot: string; sessions: CoreAgentSession[] };
 	'workspace.recommendations.get': { workspaceRoot: string };
+	'hypotheses.generate': { workspaceRoot: string; scanId: string };
+	'hypotheses.list': { workspaceRoot: string; status?: SecurityHypothesis['status']; includeStale?: boolean };
+	'hypotheses.get': { workspaceRoot: string; hypothesisId: string };
+	'hypotheses.review': HypothesisReviewInput;
 	'rag.index': CoreRagIndexRequest;
 	'rag.status': CoreProjectDetectRequest;
 	'rag.query': CoreRagQueryRequest;
@@ -92,6 +97,10 @@ export interface CoreMethodResults {
 	'workspace.agent-sessions.get': { sessions: CoreAgentSession[] };
 	'workspace.agent-sessions.set': { sessions: CoreAgentSession[] };
 	'workspace.recommendations.get': { generated: boolean; suggestions: string[] };
+	'hypotheses.generate': HypothesisGenerationResult;
+	'hypotheses.list': { hypotheses: SecurityHypothesis[]; storeVersion: 1 };
+	'hypotheses.get': { hypothesis?: SecurityHypothesis };
+	'hypotheses.review': { hypothesis: SecurityHypothesis };
 	'rag.index': CoreRagIndexResult;
 	'rag.status': CoreRagStatusResult;
 	'rag.query': CoreRagQueryResult;

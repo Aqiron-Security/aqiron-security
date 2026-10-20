@@ -26,6 +26,9 @@ import { CredentialStore } from '../shared/platform';
 import { WorkspaceRuleStore } from '../shared/workspaceRules';
 import { aiSecretKeys } from '../ai/services/credentialService';
 import { parseRecommendationSourceDetailed } from '../shared/recommendations';
+import { HypothesisStoreService } from '../hypotheses/hypothesisStore';
+import { buildHypothesisSnapshot, generateDeterministicHypotheses } from '../hypotheses/hypothesisEngine';
+import { HypothesisGenerationResult, HypothesisReviewInput, SecurityHypothesis } from '../hypotheses/contracts';
 
 interface CoreRuntimeOptions {
 	coreVersion: string;
@@ -68,6 +71,7 @@ export class CoreRuntime {
 	private readonly scannerManager = new ScannerManager();
 	private readonly nativeScanner: NativeWorkspaceScanner;
 	private readonly workspaceRules = new WorkspaceRuleStore(this.filesystem);
+	private readonly hypotheses = new HypothesisStoreService(this.filesystem);
 	private readonly reportGenerator = new ReportGenerator();
 	private readonly pipeline = new CoreScanService();
 	private readonly events = new PipelineEventBus();
@@ -146,6 +150,19 @@ export class CoreRuntime {
 					return this.ok(message.id, 'workspace.agent-sessions.set', await this.saveWorkspaceAgentSessions(message.params.workspaceRoot, message.params.sessions));
 				case 'workspace.recommendations.get':
 					return this.ok(message.id, 'workspace.recommendations.get', await this.workspaceRecommendations(message.params.workspaceRoot));
+				case 'hypotheses.generate':
+					return this.ok(message.id, 'hypotheses.generate', await this.generateHypotheses(message.params.workspaceRoot, message.params.scanId, source.token));
+				case 'hypotheses.list': {
+					const store = await this.hypotheses.list(this.resolveHypothesisRoot(message.params.workspaceRoot));
+					const selected = store.hypotheses.filter((item) => (!message.params.status || item.status === message.params.status) && (message.params.includeStale || message.params.status === 'stale' || item.status !== 'stale'));
+					return this.ok(message.id, 'hypotheses.list', { hypotheses: selected, storeVersion: store.version });
+				}
+				case 'hypotheses.get': {
+					const store = await this.hypotheses.list(this.resolveHypothesisRoot(message.params.workspaceRoot));
+					return this.ok(message.id, 'hypotheses.get', { hypothesis: store.hypotheses.find((item) => item.id === message.params.hypothesisId) });
+				}
+				case 'hypotheses.review':
+					return this.ok(message.id, 'hypotheses.review', { hypothesis: await this.reviewHypothesis(message.params) });
 				case 'rag.index':
 					return this.ok(message.id, 'rag.index', await this.indexRag(message.params, source.token));
 				case 'rag.status':
@@ -241,6 +258,40 @@ export class CoreRuntime {
 
 	private async detectProject(request: CoreProjectDetectRequest): Promise<ProjectProfile> {
 		return await detectProjectProfile(request.workspaceRoot, this.filesystem, this.projectOptions(request.workspaceRoot));
+	}
+
+	private resolveHypothesisRoot(workspaceRoot: string): string {
+		if (!path.isAbsolute(workspaceRoot) || workspaceRoot.includes('\0')) throw Object.assign(new Error('A canonical absolute workspace root is required.'), { code: 'HYPOTHESIS_INVALID_WORKSPACE' });
+		return path.resolve(workspaceRoot);
+	}
+
+	private async generateHypotheses(workspaceRoot: string, scanId: string, cancellationToken?: CancellationTokenLike): Promise<HypothesisGenerationResult> {
+		const root = this.resolveHypothesisRoot(workspaceRoot);
+		const scan = this.scans.get(scanId)?.result;
+		if (!scan || scan.state.finalState !== 'completed' || normalizeWorkspaceIdentity(scan.state.workspaceRoot) !== normalizeWorkspaceIdentity(root)) {
+			return { status: 'no-evidence', scanId, hypotheses: [], diagnostics: [{ code: 'no-evidence', count: 1, message: 'No completed Core scan evidence is available for this workspace and scan ID.' }] };
+		}
+		if (cancellationToken?.isCancellationRequested) throw new Error('Core request cancelled.');
+		const profile = await detectProjectProfile(root, this.filesystem, this.projectOptions(root));
+		const snapshot = await buildHypothesisSnapshot({
+			workspaceRoot: root, scanId, findings: scan.findings, relationships: scan.correlation?.relationships ?? [],
+			profile, filesystem: this.filesystem, capturedAt: scan.state.completedAt, cancelled: () => Boolean(cancellationToken?.isCancellationRequested),
+		});
+		if (cancellationToken?.isCancellationRequested) throw new Error('Core request cancelled.');
+		if (snapshot.findings.length === 0) {
+			await this.hypotheses.mergeGeneration(root, snapshot, [], () => Boolean(cancellationToken?.isCancellationRequested));
+			return { status: 'no-evidence', scanId, snapshotId: snapshot.id, hypotheses: [], diagnostics: [{ code: 'no-evidence', count: 1, message: 'The completed scan has no current findings with verified in-workspace source spans.' }] };
+		}
+		const candidates = generateDeterministicHypotheses(snapshot);
+		const store = await this.hypotheses.mergeGeneration(root, snapshot, candidates, () => Boolean(cancellationToken?.isCancellationRequested));
+		const generated = candidates.map((candidate) => store.hypotheses.find((item) => item.id === candidate.id) ?? candidate);
+		return { status: 'generated', scanId, snapshotId: snapshot.id, hypotheses: generated, diagnostics: candidates.length ? [] : [{ code: 'no-supported-rule', count: 1, message: 'Current verified evidence did not satisfy an allowlisted deterministic hypothesis rule.' }] };
+	}
+
+	private async reviewHypothesis(input: HypothesisReviewInput): Promise<SecurityHypothesis> {
+		const root = this.resolveHypothesisRoot(input.workspaceRoot);
+		const hypothesis = await this.hypotheses.review(root, input);
+		return hypothesis;
 	}
 
 	private async workspaceThreatHistory(workspaceRoot: string): Promise<CoreMethodResults['workspace.threat-history.get']> {
@@ -766,7 +817,7 @@ private async credentialsStatus(key: string): Promise<CoreCredentialsStatusResul
 	private mapErrorCode(error: unknown): string {
 		if (typeof error === 'object' && error && 'code' in error && typeof (error as { code?: unknown }).code === 'string') {
 			const code = (error as { code: string }).code;
-			if (code === 'CREDENTIAL_STORE_UNAVAILABLE') {
+			if (code.startsWith('HYPOTHESIS_') || code === 'CREDENTIAL_STORE_UNAVAILABLE') {
 				return code;
 			}
 		}
@@ -829,6 +880,7 @@ const CORE_METHODS = new Set<string>([
 	'workspace.rules.get', 'workspace.rules.set',
 	'workspace.threat-history.get', 'workspace.threat-history.delete',
 	'workspace.agent-sessions.get', 'workspace.agent-sessions.set', 'workspace.recommendations.get', 'workspace.reports.get',
+	'hypotheses.generate', 'hypotheses.list', 'hypotheses.get', 'hypotheses.review',
 	'scan.start', 'scan.file', 'scan.cancel', 'scan.status', 'ai.providers', 'ai.models', 'ai.chat',
 	'ai.cancel', 'ai.review', 'ai.vulnerabilityAnalysis', 'report.generate',
 	'credentials.status', 'credentials.set', 'credentials.delete', 'credentials.exists',
@@ -855,6 +907,10 @@ function validateRequest(value: unknown): value is CoreRequestMessage {
 		case 'core.cancel': return optionalString('requestId');
 		case 'project.detect': case 'project.profile': case 'rag.status': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('currentFile');
 		case 'workspace.rules.get': case 'workspace.threat-history.get': case 'workspace.agent-sessions.get': case 'workspace.recommendations.get': case 'workspace.reports.get': return string('workspaceRoot');
+		case 'hypotheses.generate': return string('workspaceRoot') && string('scanId') && path.isAbsolute(String(input.workspaceRoot));
+		case 'hypotheses.list': return string('workspaceRoot') && path.isAbsolute(String(input.workspaceRoot)) && (input.status === undefined || ['proposed', 'investigating', 'validated', 'rejected', 'dismissed', 'stale', 'unsubstantiated'].includes(String(input.status))) && (input.includeStale === undefined || typeof input.includeStale === 'boolean');
+		case 'hypotheses.get': return string('workspaceRoot') && path.isAbsolute(String(input.workspaceRoot)) && string('hypothesisId') && String(input.hypothesisId).length <= 80;
+		case 'hypotheses.review': return string('workspaceRoot') && path.isAbsolute(String(input.workspaceRoot)) && string('hypothesisId') && String(input.hypothesisId).length <= 80 && ['investigate', 'validate', 'reject', 'dismiss', 'reopen'].includes(String(input.action)) && (input.note === undefined || typeof input.note === 'string' && input.note.length <= 500) && (input.evidenceRefs === undefined || Array.isArray(input.evidenceRefs) && input.evidenceRefs.length <= 20 && input.evidenceRefs.every((item) => typeof item === 'string' && item.length <= 200));
 		case 'workspace.threat-history.delete': return string('workspaceRoot') && string('snapshotId');
 		case 'workspace.agent-sessions.set': return string('workspaceRoot') && Array.isArray(input.sessions) && input.sessions.every(isAgentSession);
 		case 'workspace.rules.set': return string('workspaceRoot') && Array.isArray(input.rules) && validateRuleList(input.rules);
@@ -898,6 +954,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingFile(error: unknown): boolean {
 	return isRecord(error) && error.code === 'ENOENT';
+}
+
+function normalizeWorkspaceIdentity(root: string): string {
+	const resolved = path.resolve(root);
+	return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 function isAgentSession(value: unknown): value is CoreAgentSession {

@@ -43,6 +43,16 @@ suite('Host-neutral Core client', () => {
 		assert.deepEqual(transport.cancelledIds, ['cancel-this-request']);
 	});
 
+	test('exposes typed hypothesis methods through the shared Core transport', async () => {
+		const transport = new RecordingTransport();
+		const client = new CoreClient({ clientVersion: 'test-client', runtimePath, restartOnCrash: false }, transport);
+		await client.generateHypotheses({ workspaceRoot: path.resolve('.'), scanId: 'scan-known' });
+		await client.listHypotheses({ workspaceRoot: path.resolve('.'), status: 'proposed' });
+		await client.getHypothesis({ workspaceRoot: path.resolve('.'), hypothesisId: 'hyp:test' });
+		await client.reviewHypothesis({ workspaceRoot: path.resolve('.'), hypothesisId: 'hyp:test', action: 'investigate' });
+		assert.deepEqual(transport.methods, ['hypotheses.generate', 'hypotheses.list', 'hypotheses.get', 'hypotheses.review']);
+	});
+
 	test('the host-neutral client has no VS Code or scanner implementation dependencies', () => {
 		const clientRoot = path.resolve(__dirname, '../../../packages/core/src/client');
 		const sources = ['coreClient.ts', 'coreProcessManager.ts', 'index.ts'].map((file) => fsSyncRead(path.join(clientRoot, file))).join('\n');
@@ -55,9 +65,11 @@ suite('Host-neutral Core client', () => {
 
 class RecordingTransport implements CoreClientTransport {
 	readonly cancelledIds: string[] = [];
+	readonly methods: CoreMethod[] = [];
 	async start() { return { protocolVersion: 1, coreVersion: 'test', status: 'compatible' as const }; }
 	async stop(): Promise<void> {}
 	async request<K extends CoreMethod>(_method: K, _params: CoreMethodParams[K], _timeoutMs?: number, _requestId?: string): Promise<CoreResultFor<K>> {
+		this.methods.push(_method);
 		return { cancelled: true } as CoreResultFor<K>;
 	}
 	async cancel(requestId: string) { this.cancelledIds.push(requestId); return { cancelled: true, requestId }; }

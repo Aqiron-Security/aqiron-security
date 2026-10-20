@@ -7,6 +7,8 @@ import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
 import { CoreClientTransport, CoreProcessManager } from './coreProcessManager';
 import { CoreAgentSession, CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreReportGenerateRequest, CoreEventMessage, CoreMethodResults } from '../runtime';
 import { WorkspaceCustomRule } from '../shared/workspaceRules';
+import { HypothesisReviewInput, SecurityHypothesis } from '../hypotheses/contracts';
+import { HypothesisGenerationResult } from '../hypotheses/contracts';
 
 export interface CoreClientOptions {
 	clientVersion: string;
@@ -100,6 +102,27 @@ export class CoreClient extends EventEmitter {
 	async getWorkspaceRecommendations(workspaceRoot: string): Promise<CoreMethodResults['workspace.recommendations.get']> {
 		await this.start();
 		return await this.manager.request('workspace.recommendations.get', { workspaceRoot });
+	}
+
+	async generateHypotheses(request: { workspaceRoot: string; scanId: string; requestId?: string }): Promise<HypothesisGenerationResult> {
+		await this.start();
+		const requestId = request.requestId ?? createId();
+		return await this.manager.request('hypotheses.generate', { workspaceRoot: request.workspaceRoot, scanId: request.scanId }, 120_000, requestId);
+	}
+
+	async listHypotheses(request: { workspaceRoot: string; status?: SecurityHypothesis['status']; includeStale?: boolean }): Promise<CoreMethodResults['hypotheses.list']> {
+		await this.start();
+		return await this.manager.request('hypotheses.list', request);
+	}
+
+	async getHypothesis(request: { workspaceRoot: string; hypothesisId: string }): Promise<CoreMethodResults['hypotheses.get']> {
+		await this.start();
+		return await this.manager.request('hypotheses.get', request);
+	}
+
+	async reviewHypothesis(request: HypothesisReviewInput): Promise<CoreMethodResults['hypotheses.review']> {
+		await this.start();
+		return await this.manager.request('hypotheses.review', request);
 	}
 
 	async indexRag(request: CoreRagIndexRequest): Promise<CoreRagIndexResult> {

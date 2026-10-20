@@ -62,6 +62,12 @@ export function createNodeFileSystem(): FileSystem {
 		rename: async (oldPath: string, newPath: string): Promise<void> => {
 			await renameAsync(oldPath, newPath);
 		},
+		unlink: async (file: string): Promise<void> => {
+			await fs.promises.unlink(file);
+		},
+		rmdir: async (directory: string): Promise<void> => {
+			await fs.promises.rmdir(directory);
+		},
 		exists: async (file: string): Promise<boolean> => {
 			try {
 				await accessAsync(file);

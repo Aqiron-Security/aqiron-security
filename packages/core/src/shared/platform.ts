@@ -9,6 +9,9 @@ export interface FileSystem {
 	stat(path: string): Promise<{ isFile(): boolean; isDirectory(): boolean; size: number; mtimeMs: number }>;
 	access(path: string): Promise<void>;
 	rename(oldPath: string, newPath: string): Promise<void>;
+	/** Optional file cleanup capability for stores that need recoverable replacement on Windows. */
+	unlink?(path: string): Promise<void>;
+	rmdir?(path: string): Promise<void>;
 	exists(path: string): Promise<boolean>;
 }
 
