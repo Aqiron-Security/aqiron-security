@@ -2,8 +2,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CoreClient } from '../../core/src/client';
 import { CoreScanStartResult } from '../../core/src/runtime/protocol';
-import { createJsonReport } from '../../core/src/reports/reportExporters';
-import { SecurityReportModel } from '../../core/src/reports/reportModels';
 
 export interface CliOutput { write(text: string): void; }
 export interface CliEvent { event: string; requestId?: string; payload?: unknown; }
@@ -127,7 +125,7 @@ function renderResult(format: Format, result: CoreScanStartResult): string {
 	if (format === 'pdf') { return result.report.pdf; }
 	if (format === 'sarif') { return `${JSON.stringify(result.report.sarif, null, 2)}\n`; }
 	if (format === 'json') {
-		return `${JSON.stringify({ schemaVersion: 1, scan: { scanId: result.scanId, mode: result.state.mode, filesScanned: result.filesScanned ?? null, durationMs: result.durationMs ?? null }, report: createJsonReport(result.report.model as SecurityReportModel) }, null, 2)}\n`;
+		return `${JSON.stringify({ schemaVersion: 1, scan: { scanId: result.scanId, mode: result.state.mode, filesScanned: result.filesScanned ?? null, durationMs: result.durationMs ?? null }, report: result.report.json }, null, 2)}\n`;
 	}
 	const counts = countSeverities(result);
 	return `\nFindings: ${result.findings.length}\nCritical: ${counts.Critical}\nHigh:     ${counts.High}\nMedium:   ${counts.Medium}\nLow:      ${counts.Low}\nDuration: ${((result.durationMs ?? 0) / 1000).toFixed(1)}s\n`;

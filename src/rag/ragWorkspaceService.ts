@@ -7,6 +7,7 @@ import { RagIndexService } from './ragIndexService';
 import { runRagBenchmark } from './ragBenchmark';
 import { RegexSignal } from './types';
 import { defaultAqExclusions, isFlutterWorkspace } from '../utils/files';
+import { parseRecommendationSource } from '../agents/recommendations';
 
 export class RagWorkspaceService implements vscode.Disposable {
 	readonly index = new RagIndexService();
@@ -24,9 +25,10 @@ export class RagWorkspaceService implements vscode.Disposable {
 		if (!root) {return [];}
 		try {
 			const text = await fs.readFile(path.join(root, '.aqiron-security', 'suggestions.md'), 'utf8');
-			return text.split(/\r?\n/).map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim()).filter((line) => line.length > 12).slice(0, 5);
-		} catch {
-			return [];
+			return text.trim() ? [text] : [];
+		} catch (error) {
+			if (isMissingFile(error)) {return [];}
+			throw error;
 		}
 	}
 
@@ -142,14 +144,20 @@ export class RagWorkspaceService implements vscode.Disposable {
 		let text = '';
 		for await (const chunk of this.aiService.chat({
 			sessionId: `rag-suggestions-${Date.now()}`,
-			text: `Generate up to five concise, actionable Aqiron security workspace suggestions from these detected signals. Do not repeat secrets: ${signals.slice(0, 40).map((signal) => `${signal.category}:${signal.provider}:${signal.file}`).join(', ')}`,
+			text: `Return only a JSON array of up to five actionable Aqiron security recommendations. Each item must have title and detail; include severity (Critical, High, Medium, or Low), recommended (boolean), command, and metadata fields ruleId/file/line/category only when known. Do not include analysis, reasoning, or introductory text. Do not repeat secrets. Signals: ${signals.slice(0, 40).map((signal) => `${signal.category}:${signal.provider}:${signal.file}`).join(', ')}`,
 			history: [], model: state.selection.model, intelligence: 'Medium', context,
 		})) {
 			if (chunk.type === 'error') {throw new Error(chunk.error ?? 'AI suggestion generation failed.');}
 			if (chunk.type === 'token') {text += chunk.content ?? '';}
 		}
-		await fs.writeFile(path.join(root, '.aqiron-security', 'suggestions.md'), text || 'No suggestions were generated.', 'utf8');
+		const recommendations = parseRecommendationSource(text);
+		if (recommendations.length === 0) {throw new Error('The AI provider returned no valid recommendations. Existing recommendations were preserved.');}
+		await fs.writeFile(path.join(root, '.aqiron-security', 'suggestions.md'), JSON.stringify(recommendations, null, 2), 'utf8');
 	}
+}
+
+function isMissingFile(error: unknown): boolean {
+	return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT');
 }
 
 async function ensureAqFile(root: string): Promise<void> {

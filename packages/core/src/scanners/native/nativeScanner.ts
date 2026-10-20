@@ -4,6 +4,7 @@ import { CancellationTokenLike } from '../../shared/cancellation';
 import { FileSystem } from '../../shared/platform';
 import { CoreFileScanResult, ResolvedFileScanPolicy } from '../../shared/fileScan';
 import { ResolvedWorkspaceScanPolicy } from '../../shared/workspaceScanPolicy';
+import { WorkspaceCustomRule } from '../../shared/workspaceRules';
 
 export interface NativeRuleScanResult {
 	findings: UnifiedFinding[];
@@ -51,7 +52,7 @@ export class NativeWorkspaceScanner {
 		return { scanId, filePath, state: 'completed', findings, filesScanned: 1, findingCount: findings.length, durationMs: Date.now() - startedAt };
 	}
 
-	async scanWorkspace(root: string, token?: CancellationTokenLike, policy?: ResolvedWorkspaceScanPolicy): Promise<NativeRuleScanResult> {
+	async scanWorkspace(root: string, token?: CancellationTokenLike, policy?: ResolvedWorkspaceScanPolicy, coreRules: WorkspaceCustomRule[] = []): Promise<NativeRuleScanResult> {
 		const startedAt = Date.now();
 		const files = policy
 			? await collectPolicyFiles(root, root, this.filesystem, token, policy)
@@ -82,6 +83,10 @@ export class NativeWorkspaceScanner {
 					findings.push(...result.findings.map(withWorkspaceSecretIdentity));
 				} else {
 					findings.push(...scanFile(file, content));
+					if (coreRules.length) {
+						const rules = compileCustomRules(file, coreRules);
+						content.split(/\r?\n/).forEach((line, index) => findings.push(...scanCustomRuleLine(file, line, index, rules)));
+					}
 				}
 				filesScanned += 1;
 			} catch {

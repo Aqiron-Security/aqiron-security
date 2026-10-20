@@ -12,5 +12,6 @@ export * from './services/providerRegistry';
 export * from './services/modelManager';
 export * from './services/streamingService';
 export * from './services/aiService';
+export * from './services/chatGenerationPolicy';
 export * from './analysis/aiVulnerabilityAnalysis';
 export * from './analysis/aiReview';

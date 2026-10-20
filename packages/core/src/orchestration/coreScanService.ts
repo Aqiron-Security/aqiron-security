@@ -36,7 +36,7 @@ export class CoreScanService {
 			emit({ type: 'stage', stage: { name: 'Preparing', status: 'running', progress: 10, startedAt: new Date().toISOString() } });
 
 			const native = request.nativeScanner
-				? await request.nativeScanner.scanWorkspace(request.workspaceRoot, request.cancellationToken, request.workspacePolicy)
+				? await request.nativeScanner.scanWorkspace(request.workspaceRoot, request.cancellationToken, request.workspacePolicy, request.customRules)
 				: { findings: [], filesScanned: 0, durationMs: 0 };
 			const nativeFindings = native.findings ?? [];
 			throwIfCancelled(request.cancellationToken);

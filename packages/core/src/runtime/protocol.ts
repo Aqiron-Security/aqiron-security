@@ -1,4 +1,4 @@
-import { AIAnalysisContext, AIModel, ChatMessage, ProviderConnectionStatus } from '../shared/ai';
+import { AIAnalysisContext, AIModel, AISettings, ChatMessage, ProviderConnectionStatus } from '../shared/ai';
 import { CancellationTokenLike } from '../shared/cancellation';
 import { ProjectProfile } from '../project/projectProfile';
 import { SecurityContext } from '../context/contextTypes';
@@ -13,6 +13,7 @@ import { ScannerResult } from '../shared/scanner';
 import { AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
 import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
 import { ResolvedWorkspaceScanPolicy } from '../shared/workspaceScanPolicy';
+import { WorkspaceCustomRule } from '../shared/workspaceRules';
 
 export const CORE_PROTOCOL_VERSION = 1;
 
@@ -45,6 +46,14 @@ export type CoreMethodParams = {
 	'core.cancel': { requestId?: string };
 	'project.detect': CoreProjectDetectRequest;
 	'project.profile': CoreProjectProfileRequest;
+	'workspace.rules.get': { workspaceRoot: string };
+	'workspace.rules.set': { workspaceRoot: string; rules: WorkspaceCustomRule[] };
+	'workspace.threat-history.get': { workspaceRoot: string };
+	'workspace.threat-history.delete': { workspaceRoot: string; snapshotId: string };
+	'workspace.reports.get': { workspaceRoot: string };
+	'workspace.agent-sessions.get': { workspaceRoot: string };
+	'workspace.agent-sessions.set': { workspaceRoot: string; sessions: CoreAgentSession[] };
+	'workspace.recommendations.get': { workspaceRoot: string };
 	'rag.index': CoreRagIndexRequest;
 	'rag.status': CoreProjectDetectRequest;
 	'rag.query': CoreRagQueryRequest;
@@ -75,6 +84,14 @@ export interface CoreMethodResults {
 	'core.cancel': { cancelled: boolean; requestId?: string };
 	'project.detect': ProjectProfile;
 	'project.profile': CoreProjectProfileResult;
+	'workspace.rules.get': { rules: WorkspaceCustomRule[]; configured: boolean };
+	'workspace.rules.set': { rules: WorkspaceCustomRule[] };
+	'workspace.threat-history.get': { snapshots: Array<{ id: string; title: string; createdAt: string; filesScanned: number; executiveSummary?: string; issues: unknown[] }> };
+	'workspace.threat-history.delete': { snapshots: Array<{ id: string; title: string; createdAt: string; filesScanned: number; executiveSummary?: string; issues: unknown[] }> };
+	'workspace.reports.get': { directory?: string; jsonPath?: string; sarifPath?: string; pdfPath?: string; sizes?: { json?: number; sarif?: number; pdf?: number }; modifiedAt?: string };
+	'workspace.agent-sessions.get': { sessions: CoreAgentSession[] };
+	'workspace.agent-sessions.set': { sessions: CoreAgentSession[] };
+	'workspace.recommendations.get': { generated: boolean; suggestions: string[] };
 	'rag.index': CoreRagIndexResult;
 	'rag.status': CoreRagStatusResult;
 	'rag.query': CoreRagQueryResult;
@@ -173,6 +190,18 @@ export interface CoreRagStatusResult {
 	updatedAt?: string;
 	fileCount: number;
 	chunkCount: number;
+	aiSuggestionsGenerated?: boolean;
+}
+
+export interface CoreAgentSession {
+	id: string;
+	title: string;
+	createdAt: string;
+	updatedAt: string;
+	model: string;
+	intelligence: string;
+	streaming?: boolean;
+	messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: string; streaming?: boolean; commands?: unknown[] }>;
 }
 
 export interface CoreRagQueryRequest {
@@ -194,6 +223,7 @@ export interface CoreScanStartRequest {
 	currentFile?: string;
 	/** Explicit scan policy resolved by the client; omitted requests retain existing Core defaults. */
 	workspacePolicy?: ResolvedWorkspaceScanPolicy;
+	customRules?: WorkspaceCustomRule[];
 	/** Defaults to true. False runs Core's deterministic native scanner without optional external tools. */
 	includeExternalScanners?: boolean;
 }
@@ -219,6 +249,9 @@ export interface CoreScanStatusResult {
 
 export interface CoreAiProvidersResult {
 	providers: string[];
+	configuredProviders?: Array<{ id: string; configured: boolean }>;
+	credentialSummaries?: Array<{ id: string; name: string; providerId: string; last4: string; createdAt: string; updatedAt: string }>;
+	settings?: AISettings;
 }
 
 export interface CoreAiModelsRequest {
@@ -232,6 +265,7 @@ export interface CoreAiModelsResult {
 
 export interface CoreAiChatRequest {
 	sessionId: string;
+	providerId?: string;
 	text: string;
 	history: ChatMessage[];
 	model: string;

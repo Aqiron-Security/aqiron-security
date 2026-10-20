@@ -25,6 +25,8 @@ export interface AIModel {
 		completion: number;
 		request?: number;
 	};
+	/** Provider-declared request parameters; populated only when the provider supplies this metadata. */
+	supportedParameters?: string[];
 	badges: AIModelBadge[];
 	capabilities: AIModelCapability[];
 }
@@ -45,7 +47,21 @@ export interface ChatRequest {
 	stream: boolean;
 	timeoutMs: number;
 	retries: number;
+	openRouterReasoning?: OpenRouterReasoningOptions;
+	includeUsage?: boolean;
 	abortSignal?: AbortSignal;
+}
+
+export interface OpenRouterReasoningOptions {
+	enabled?: boolean;
+	max_tokens?: number;
+	effort?: 'low' | 'medium' | 'high';
+}
+
+export interface ProviderCompletionMetadata {
+	reasoningPresent?: boolean;
+	reasoningCharacters?: number;
+	completionTokens?: number;
 }
 
 export interface StreamChunk {
@@ -53,6 +69,7 @@ export interface StreamChunk {
 	content?: string;
 	finishReason?: string;
 	usage?: TokenUsage;
+	providerCompletion?: ProviderCompletionMetadata;
 	error?: string;
 }
 

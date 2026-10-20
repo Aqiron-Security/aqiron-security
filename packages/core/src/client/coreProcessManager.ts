@@ -65,8 +65,10 @@ export class CoreProcessManager extends EventEmitter implements CoreClientTransp
 		this.expectedShutdown = false;
 		this.buffer = '';
 		const runtimePath = path.resolve(this.options.runtimePath);
-		this.child = childProcess.spawn(process.execPath, [runtimePath], {
-			cwd: path.dirname(runtimePath),
+		const args = [runtimePath];
+		const cwd = path.dirname(runtimePath);
+		this.child = childProcess.spawn(process.execPath, args, {
+			cwd,
 			env: { ...process.env, AQIRON_CORE_VERSION: this.options.clientVersion },
 			stdio: ['pipe', 'pipe', 'pipe'],
 			windowsHide: true,
@@ -112,13 +114,15 @@ export class CoreProcessManager extends EventEmitter implements CoreClientTransp
 	}
 
 	async stop(): Promise<void> {
-		if (!this.child) {
-			return;
-		}
 		this.expectedShutdown = true;
 		if (this.restartTimer) {
 			clearTimeout(this.restartTimer);
 			this.restartTimer = undefined;
+		}
+		if (!this.child) {
+			this.started = false;
+			this.state = 'stopped';
+			return;
 		}
 		try {
 			await this.request('core.shutdown', {});

@@ -55,9 +55,10 @@ export interface WorkspaceStats {
 export interface Suggestion {
 	title: string;
 	detail: string;
-	severity: Severity;
-	recommended: boolean;
+	severity?: Severity;
+	recommended?: boolean;
 	command: string;
+	metadata?: { ruleId?: string; file?: string; line?: number; category?: string };
 }
 
 export interface AgentMemory {
@@ -172,6 +173,9 @@ export interface PipelineTool {
 export interface WebviewState {
 	section: Section;
 	setupDone: boolean;
+	/** Desktop-only project selection state. */
+	desktopProjectLoading?: boolean;
+	desktopProjectError?: string;
 	workspace: WorkspaceProfile;
 	branches: string[];
 	stats: WorkspaceStats;
@@ -204,7 +208,14 @@ export interface WebviewState {
 			jsonPath?: string;
 			sarifPath?: string;
 			pdfPath?: string;
+			sizes?: { pdf?: number; json?: number; sarif?: number };
+			modifiedAt?: string;
 			executiveSummary?: string;
+			artifactsAvailable?: { pdf: boolean; json: boolean; sarif: boolean };
+			reportData?: {
+				model: { generatedAt: string; executiveSummary: string; summary: Counts };
+				text: string;
+			};
 		};
 	};
 	assets: Record<string, string>;
@@ -214,6 +225,7 @@ export interface WebviewState {
 		withAi: boolean;
 		suggestionsGenerated: boolean;
 		suggestions: string[];
+		suggestionError?: string;
 		restricted: boolean;
 		backend: 'faiss' | 'local';
 	};
@@ -228,7 +240,7 @@ export interface ThreatSnapshot {
 	issues: WebviewIssue[];
 }
 
-export interface VsCodeApi {
+export interface WebviewHostApi {
 	postMessage(message: { command: string; payload?: unknown }): void;
 }
 

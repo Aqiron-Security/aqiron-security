@@ -1,10 +1,10 @@
-import { AIAnalysisContext, AIAnalysisRequest, AIContextSnapshot, AIModel, AIModelFilter, AIProviderCredential, AIProviderId, AISettings, AITaskDefaults, AIWebviewState, ChatMessage, ChatRequest, ProviderConnectionStatus, StreamChunk, defaultAISettings, defaultModelFilter } from '../../shared/ai';
-import { normalizeProviderError, AITransport } from '../utils/request';
+import { AIAnalysisContext, AIAnalysisRequest, AIContextSnapshot, AIModel, AIModelFilter, AIProviderCredential, AIProviderId, AISettings, AITaskDefaults, AIWebviewState, ChatMessage, ChatRequest, OpenRouterReasoningOptions, ProviderConnectionStatus, StreamChunk, defaultAISettings, defaultModelFilter } from '../../shared/ai';
+import { normalizeProviderError, AITransport, OpenRouterRejectedRequest } from '../utils/request';
 import { aiSecretKeys, CredentialService } from './credentialService';
 import { ModelManager } from './modelManager';
 import { ProviderRegistry } from './providerRegistry';
 import { StreamingService } from './streamingService';
-import { OpenRouterProvider } from '../providers/openrouterProvider';
+import { OpenRouterProvider, OpenRouterResponseDiagnostics } from '../providers/openrouterProvider';
 import { OpenAIProvider } from '../providers/openaiProvider';
 import { ClaudeProvider } from '../providers/claudeProvider';
 import { GeminiProvider } from '../providers/geminiProvider';
@@ -14,6 +14,8 @@ import { CredentialStore } from '../../shared/platform';
 export interface AIServiceOptions {
 	credentialStore: CredentialStore;
 	transport: AITransport;
+	onOpenRouterDiagnostics?: (diagnostics: OpenRouterResponseDiagnostics) => void;
+	onOpenRouterRequestRejected?: (diagnostics: OpenRouterRejectedRequest) => void;
 }
 
 export interface AIChatInput {
@@ -23,6 +25,9 @@ export interface AIChatInput {
 	model: string;
 	intelligence: string;
 	context: AIContextSnapshot;
+	maxTokens?: number;
+	openRouterReasoning?: OpenRouterReasoningOptions;
+	includeUsage?: boolean;
 }
 
 export class AIService {
@@ -43,7 +48,7 @@ export class AIService {
 	constructor(opts: AIServiceOptions) {
 		this.credentials = new CredentialService(opts.credentialStore);
 		this.registry = new ProviderRegistry(this.credentials);
-		this.registry.register(new OpenRouterProvider(this.credentials, opts.transport));
+		this.registry.register(new OpenRouterProvider(this.credentials, opts.transport, opts.onOpenRouterDiagnostics, opts.onOpenRouterRequestRejected));
 		this.registry.register(new OpenAIProvider(this.credentials, opts.transport));
 		this.registry.register(new ClaudeProvider(this.credentials, opts.transport));
 		this.registry.register(new GeminiProvider(this.credentials, opts.transport));
@@ -52,6 +57,11 @@ export class AIService {
 	}
 
 	async initialize(): Promise<void> {
+		await this.prepare();
+		await this.refreshModels(false);
+	}
+
+	async prepare(): Promise<void> {
 		this.settings = await this.credentials.getJson(aiSecretKeys.settings, defaultAISettings);
 		if ((this.settings as unknown as { selectedProvider?: string }).selectedProvider === 'ollama') {
 			const { ollamaEndpoint: _ollamaEndpoint, ...migrated } = this.settings as AISettings & { ollamaEndpoint?: string };
@@ -62,7 +72,10 @@ export class AIService {
 			await this.saveSettings(withoutLegacyOllama);
 		}
 		await this.registry.initialize();
-		await this.refreshModels(false);
+	}
+
+	async reloadSettings(): Promise<void> {
+		this.settings = await this.credentials.getJson(aiSecretKeys.settings, defaultAISettings);
 	}
 
 	async refreshModels(force: boolean): Promise<void> {
@@ -110,7 +123,9 @@ export class AIService {
 			model: selectedModel,
 			messages: this.buildMessages(input),
 			temperature: this.settings.temperature,
-			maxTokens: this.settings.maxTokens,
+			maxTokens: input.maxTokens ?? this.settings.maxTokens,
+			openRouterReasoning: input.openRouterReasoning,
+			includeUsage: input.includeUsage,
 			stream: this.settings.streaming,
 			timeoutMs: this.settings.timeoutMs,
 			retries: this.settings.retries,

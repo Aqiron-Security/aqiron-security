@@ -1,7 +1,11 @@
 import React, { Suspense, lazy, memo, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Section, VsCodeApi, WebviewState } from './types.js';
+import { Section, WebviewHostApi, WebviewState } from './types.js';
 import { AqironBadge, AqironButton, AqironIconButton, AqironSectionHeader } from './design/primitives.js';
+
+declare global {
+	interface Window { __AQIRON_DESKTOP__?: boolean; }
+}
 
 const AgentTab = lazy(async () => ({ default: (await import('./tabs.js')).AgentTab }));
 const AgentPanel = lazy(async () => ({ default: (await import('./tabs.js')).AgentPanel }));
@@ -12,10 +16,10 @@ const SettingsTab = lazy(async () => ({ default: (await import('./tabs.js')).Set
 
 interface Props {
 	initialState: WebviewState;
-	vscode: VsCodeApi;
+	hostApi: WebviewHostApi;
 }
 
-export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
+export function AqironApp({ initialState, hostApi }: Props): React.ReactElement {
 	const [state, setState] = useState(initialState);
 
 	useEffect(() => {
@@ -25,11 +29,11 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 			}
 		};
 		window.addEventListener('message', listener);
-		vscode.postMessage({ command: 'ready' });
+		hostApi.postMessage({ command: 'ready' });
 		return () => window.removeEventListener('message', listener);
-	}, [vscode]);
+	}, [hostApi]);
 
-	const post = (command: string, payload?: unknown) => vscode.postMessage({ command, payload });
+	const post = (command: string, payload?: unknown) => hostApi.postMessage({ command, payload });
 	const active = state.section;
 	const orb = getOrbState(state);
 	const primaryDestinations: Array<{ id: Section; label: string }> = [
@@ -40,7 +44,7 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 	];
 
 	return (
-		<div className="aq-shell" style={{ '--aq-zoom': state.zoom } as React.CSSProperties}>
+		<div className={window.__AQIRON_DESKTOP__ ? 'aq-shell desktop-shell' : 'aq-shell'} style={{ '--aq-zoom': state.zoom } as React.CSSProperties}>
 			<div className="aq-bg" style={{ backgroundImage: `url("${sanitizeAssetUrl(state.assets.bg)}")` }} />
 			<div className="aq-grid" />
 			<main className={active === 'agent' || active === 'aiAgent' ? 'aq-content has-composer' : 'aq-content'}>
@@ -48,6 +52,7 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 					<DashboardHero state={state} />
 					<div className="orb-actions">
 						<span className={`aq-status ${getScanStatusTone(state.stats.scanStatus)}`} aria-label={`Scan status: ${state.stats.scanStatus}`}>{state.stats.scanStatus}</span>
+						{window.__AQIRON_DESKTOP__ && <AqironButton type="button" variant="secondary" onClick={() => post('selectWorkspace')}>{state.workspace.root ? 'Change project' : 'Select project'}</AqironButton>}
 						<AqironIconButton className="top-settings" aria-label="Open settings" onClick={() => post('focus', 'settings')}><span className="codicon codicon-settings-gear" aria-hidden="true" /></AqironIconButton>
 						<div className="orb-wrap">
 						<button className={`security-orb ${orb}`} aria-label="Security summary" />
@@ -83,25 +88,25 @@ export function AqironApp({ initialState, vscode }: Props): React.ReactElement {
 					</Suspense>
 				</div>
 			</main>
-			{!state.rag.ready && active !== 'settings' && <WorkspaceOnboarding state={state} post={post} />}
+			{((window.__AQIRON_DESKTOP__ && !state.workspace.root) || (!window.__AQIRON_DESKTOP__ && !state.rag.ready)) && active !== 'settings' && <WorkspaceOnboarding state={state} post={post} />}
 		</div>
 	);
 }
 
 const DashboardHero = memo(function DashboardHero({ state }: { state: WebviewState }): React.ReactElement {
 	return (
-		<section className="hero-panel">
+		<section className={window.__AQIRON_DESKTOP__ ? 'hero-panel desktop-project-hero' : 'hero-panel'}>
 			<div className="brandline">
 				<img src={sanitizeAssetUrl(state.assets.logo)} alt="" />
 				<div>
-					<div className="eyebrow">{state.workspace.name}</div>
-					<h1>Aqiron Security</h1>
+					<div className="eyebrow">{window.__AQIRON_DESKTOP__ ? 'Project' : state.workspace.name}</div>
+					<h1>{window.__AQIRON_DESKTOP__ ? state.workspace.name : 'Aqiron Security'}</h1>
 				</div>
 			</div>
-			<div className="hero-pills">
-				<span>{state.workspace.types[0] ?? 'Workspace'}</span>
-				<span>{state.workspace.backend}</span>
-				<span>{state.workspace.risk}</span>
+			<div className="hero-pills desktop-status-cluster" aria-label="Project and security status">
+				<span className="desktop-status-item"><span className="desktop-status-label">Profile</span><strong>{state.workspace.types[0] ?? 'Workspace'}</strong></span>
+				<span className="desktop-status-item desktop-core-status" data-ready={state.workspace.status === 'Ready' ? 'true' : 'false'}><span className="desktop-status-indicator" aria-hidden="true" /><span className="desktop-status-label">Core</span><strong>{state.workspace.backend}</strong></span>
+				<span className="desktop-status-item desktop-posture-status" data-posture={state.workspace.risk.toLowerCase()}><span className="desktop-status-label">Posture</span><strong>{state.workspace.risk}</strong></span>
 			</div>
 		</section>
 	);
@@ -139,6 +144,16 @@ function InitializationOverlay({ state, post }: { state: WebviewState; post: (co
 function WorkspaceOnboarding({ state, post }: { state: WebviewState; post: (command: string, payload?: unknown) => void }): React.ReactElement {
 	const [withAi, setWithAi] = useState(true);
 	const hasWorkspace = Boolean(state.workspace.root && state.workspace.status !== 'No workspace');
+	if (window.__AQIRON_DESKTOP__) {
+		return <motion.div className="workspace-onboarding" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+			<section className="workspace-card aq-surface-panel" aria-label="Select a project">
+				<div className="workspace-card-top"><div className="workspace-brand"><img src={sanitizeAssetUrl(state.assets.logo)} alt="Aqiron Security" /><AqironBadge tone="brand">AQIRON SECURITY</AqironBadge></div></div>
+				<AqironSectionHeader title="Select a project" description="Choose a project folder to connect Aqiron Core and start a security scan." />
+				<div className="workspace-context"><div className="workspace-context-heading"><span className="codicon codicon-folder" aria-hidden="true" /><strong>Project folder</strong></div><strong className="workspace-context-name">{state.desktopProjectLoading ? state.workspace.name : 'No project selected'}</strong><span className="workspace-context-empty" role={state.desktopProjectError ? 'alert' : 'status'}>{state.desktopProjectError ?? (state.desktopProjectLoading ? 'Aqiron Core is detecting and profiling this project…' : 'Your project path is selected by the desktop host.')}</span></div>
+				<div className="workspace-card-footer"><span className="workspace-footer-note">{state.desktopProjectLoading ? 'Connecting to Aqiron Core…' : 'Aqiron Core will detect the project after selection.'}</span><AqironButton type="button" variant="primary" disabled={state.desktopProjectLoading} onClick={() => post('selectWorkspace')}><span className="codicon codicon-folder-opened" aria-hidden="true" />{state.desktopProjectLoading ? 'Detecting…' : 'Select project'}</AqironButton></div>
+			</section>
+		</motion.div>;
+	}
 	return <motion.div className="workspace-onboarding" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
 		<section className="workspace-card aq-surface-panel" aria-label="Workspace setup">
 			<div className="workspace-card-top">

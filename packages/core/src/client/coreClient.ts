@@ -5,7 +5,8 @@ import { SecurityContext } from '../context/contextTypes';
 import { SecurityReportContent } from '../reports';
 import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
 import { CoreClientTransport, CoreProcessManager } from './coreProcessManager';
-import { CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreReportGenerateRequest, CoreEventMessage } from '../runtime';
+import { CoreAgentSession, CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreReportGenerateRequest, CoreEventMessage, CoreMethodResults } from '../runtime';
+import { WorkspaceCustomRule } from '../shared/workspaceRules';
 
 export interface CoreClientOptions {
 	clientVersion: string;
@@ -59,6 +60,46 @@ export class CoreClient extends EventEmitter {
 	async profileProject(request: CoreProjectDetectRequest): Promise<CoreProjectProfileResult> {
 		await this.start();
 		return await this.manager.request('project.profile', request);
+	}
+
+	async getWorkspaceRules(workspaceRoot: string): Promise<{ rules: WorkspaceCustomRule[]; configured: boolean }> {
+		await this.start();
+		return await this.manager.request('workspace.rules.get', { workspaceRoot });
+	}
+
+	async setWorkspaceRules(workspaceRoot: string, rules: WorkspaceCustomRule[]): Promise<{ rules: WorkspaceCustomRule[] }> {
+		await this.start();
+		return await this.manager.request('workspace.rules.set', { workspaceRoot, rules });
+	}
+
+	async getThreatHistory(workspaceRoot: string): Promise<CoreMethodResults['workspace.threat-history.get']> {
+		await this.start();
+		return await this.manager.request('workspace.threat-history.get', { workspaceRoot });
+	}
+
+	async deleteThreatSnapshot(workspaceRoot: string, snapshotId: string): Promise<CoreMethodResults['workspace.threat-history.delete']> {
+		await this.start();
+		return await this.manager.request('workspace.threat-history.delete', { workspaceRoot, snapshotId });
+	}
+
+	async getWorkspaceReports(workspaceRoot: string): Promise<CoreMethodResults['workspace.reports.get']> {
+		await this.start();
+		return await this.manager.request('workspace.reports.get', { workspaceRoot });
+	}
+
+	async getAgentSessions(workspaceRoot: string): Promise<CoreAgentSession[]> {
+		await this.start();
+		return (await this.manager.request('workspace.agent-sessions.get', { workspaceRoot })).sessions;
+	}
+
+	async setAgentSessions(workspaceRoot: string, sessions: CoreAgentSession[]): Promise<CoreAgentSession[]> {
+		await this.start();
+		return (await this.manager.request('workspace.agent-sessions.set', { workspaceRoot, sessions })).sessions;
+	}
+
+	async getWorkspaceRecommendations(workspaceRoot: string): Promise<CoreMethodResults['workspace.recommendations.get']> {
+		await this.start();
+		return await this.manager.request('workspace.recommendations.get', { workspaceRoot });
 	}
 
 	async indexRag(request: CoreRagIndexRequest): Promise<CoreRagIndexResult> {
@@ -118,6 +159,11 @@ export class CoreClient extends EventEmitter {
 		const pending = this.createEventStream(`ai.completed`, request.sessionId);
 		const task = this.manager.request('ai.chat', request, undefined, `ai-chat-${request.sessionId}`);
 		yield* pending.stream(task);
+	}
+
+	async cancelAi(sessionId: string): Promise<{ cancelled: true }> {
+		await this.start();
+		return await this.manager.request('ai.cancel', { sessionId });
 	}
 
 	async *review(request: CoreAiReviewRequest): AsyncGenerator<StreamChunk> {

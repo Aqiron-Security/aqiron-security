@@ -213,6 +213,7 @@ export class ScanController implements vscode.Disposable {
 			throw new Error('Core file scanning is unavailable.');
 		}
 		const request: CoreFileScanRequest = {
+			workspaceRoot,
 			filePath: document.uri.fsPath,
 			content,
 			policy: resolveFileScanPolicy(document.uri.fsPath, content, eligible),

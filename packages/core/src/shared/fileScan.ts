@@ -30,6 +30,7 @@ export interface ResolvedCustomRule {
 
 /** Content is supplied explicitly; Core must not reread filePath for this operation. */
 export interface CoreFileScanRequest {
+	workspaceRoot?: string;
 	filePath: string;
 	content: string;
 	policy: ResolvedFileScanPolicy;

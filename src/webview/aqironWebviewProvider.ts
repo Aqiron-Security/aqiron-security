@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { AIService } from '../ai/services/aiService';
+import { getCoreClient } from '../core/coreClientSingleton';
 import { AIProviderId, AISettings, AITaskDefaults, AIWebviewState as ProductionAiWebviewState, defaultAISettings, defaultModelFilter } from '../ai/types/ai';
 import { normalizeProviderError } from '../ai/utils/request';
 import { AqironIssue, AqironSeverity, AqironWorkspaceStats, severityOrder } from '../models/issue';
@@ -13,6 +14,7 @@ import { RagWorkspaceService } from '../rag/ragWorkspaceService';
 import { ThreatHistoryService, ThreatSnapshot } from '../security/threatHistoryService';
 import { CoreClient } from '../../packages/core/src/client';
 import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
+import { buildWorkspaceRecommendations } from '../agents/recommendations';
 
 export type AqironWebviewSection = 'agent' | 'scan' | 'threats' | 'reports' | 'settings' | 'aiAgent';
 export type WorkspaceScanMode = 'quick' | 'deep' | 'analysis';
@@ -34,7 +36,7 @@ interface WebviewState {
 	mobsf: MobSfSettingsState;
 	customRules: string;
 	pipeline: WebviewPipelineState;
-	rag: { ready: boolean; building: boolean; withAi: boolean; suggestionsGenerated: boolean; suggestions: string[]; restricted: boolean; backend: 'faiss' | 'local' };
+	rag: { ready: boolean; building: boolean; withAi: boolean; suggestionsGenerated: boolean; suggestions: string[]; suggestionError?: string; restricted: boolean; backend: 'faiss' | 'local' };
 }
 
 interface MobSfSettingsState {
@@ -153,6 +155,7 @@ export interface AqironWebviewController {
 }
 
 export class AqironWebviewProvider implements vscode.WebviewViewProvider, AqironWebviewController {
+	private sessionHydration?: Promise<void>;
 	private view?: { webview: vscode.Webview };
 	private panel?: vscode.WebviewPanel;
 	private agentPanel?: vscode.WebviewPanel;
@@ -214,6 +217,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			zoom: clamp(this.context.workspaceState.get<number>('aqiron.security.zoom', 1), 0.85, 1.3),
 			chatSessions: this.context.workspaceState.get<ChatSession[]>(getChatSessionsKey(), []),
 		};
+		this.sessionHydration = this.hydrateChatSessions();
 		void this.refreshAiState();
 	}
 
@@ -649,12 +653,51 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 	private async refreshRagState(): Promise<void> {
 		const ready = await this.rag.hasWorkspaceIndex();
 		const data = this.rag.index.getData();
-		const suggestions = ready ? await this.rag.getSuggestions() : [];
-		this.state = { ...this.state, rag: { ...this.state.rag, ready, building: false, suggestionsGenerated: ready && data.manifest.aiSuggestionsGenerated, suggestions, restricted: !vscode.workspace.isTrusted, backend: this.rag.index.getVectorBackend() } };
+		let suggestions: string[] = [];
+		let suggestionError: string | undefined;
+		if (ready) {
+			try { suggestions = await this.rag.getSuggestions(); }
+			catch (error) { suggestionError = error instanceof Error ? error.message : String(error); }
+		}
+		this.state = { ...this.state, rag: { ...this.state.rag, ready, building: false, suggestionsGenerated: ready && data.manifest.aiSuggestionsGenerated, suggestions, suggestionError, restricted: !vscode.workspace.isTrusted, backend: this.rag.index.getVectorBackend() } };
 		this.postState();
 	}
 
+	private async hydrateChatSessions(workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath): Promise<void> {
+		const key = workspaceRoot ? `aqiron.chat.sessions.${workspaceRoot}` : 'aqiron.chat.sessions.global';
+		const legacy = this.context.workspaceState.get<ChatSession[]>(key, []);
+		let sessions = legacy;
+		if (workspaceRoot) {
+			try {
+				const stored = await this.coreClient.getAgentSessions(workspaceRoot) as ChatSession[];
+				const merged = mergeChatSessionHistory(stored, legacy);
+				if (merged.length !== stored.length || merged.some((session, index) => session.id !== stored[index]?.id || session.updatedAt !== stored[index]?.updatedAt)) {
+					sessions = await this.coreClient.setAgentSessions(workspaceRoot, serializeChatSessions(merged)) as ChatSession[];
+				} else {
+					sessions = stored;
+				}
+			} catch (error) {
+				this.agentOutput.appendLine(`Unable to load shared agent history: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		if ((vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? undefined) === workspaceRoot) {
+			this.state = { ...this.state, chatSessions: sessions, activeChatSessionId: this.state.activeChatSessionId && sessions.some((session) => session.id === this.state.activeChatSessionId) ? this.state.activeChatSessionId : sessions[0]?.id };
+			this.postState();
+		}
+	}
+
+	private async persistChatSessions(sessions: ChatSession[]): Promise<void> {
+		const safe = serializeChatSessions(sessions);
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		await this.context.workspaceState.update(getChatSessionsKey(), safe);
+		if (root) {
+			try { await this.coreClient.setAgentSessions(root, safe); }
+			catch (error) { this.agentOutput.appendLine(`Unable to persist shared agent history: ${error instanceof Error ? error.message : String(error)}`); }
+		}
+	}
+
 	private async sendChat(payload: unknown): Promise<void> {
+		await this.sessionHydration;
 		await this.refreshAiState();
 		const text = getPayloadText(payload);
 		if (!text) {
@@ -737,7 +780,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		} finally {
 			const latest = this.state.chatSessions;
 			this.state = { ...this.state, chatSessions: markSessionStreaming(latest, nextSession.id, false), tokenUsage: estimateTokenUsage(latest) };
-			await this.context.workspaceState.update(getChatSessionsKey(), serializeChatSessions(this.state.chatSessions));
+			await this.persistChatSessions(this.state.chatSessions);
 			this.postState();
 		}
 		await this.refreshAiState();
@@ -772,7 +815,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 				status: toolResult?.stats?.scanStatus === 'Scanning' ? 'Indexing' : this.state.workspace.status,
 			},
 		};
-		await this.context.workspaceState.update(getChatSessionsKey(), serializeChatSessions(chatSessions));
+		await this.persistChatSessions(chatSessions);
 		this.postState();
 	}
 
@@ -837,7 +880,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		}
 		const chatSessions = this.state.chatSessions.map((session) => session.id === sessionId ? { ...session, title: nextTitle, updatedAt: new Date().toISOString() } : session).sort(sortSessions);
 		this.state = { ...this.state, chatSessions };
-		await this.context.workspaceState.update(getChatSessionsKey(), serializeChatSessions(chatSessions));
+		await this.persistChatSessions(chatSessions);
 		this.postState();
 	}
 
@@ -853,7 +896,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			activeChatSessionId: this.state.activeChatSessionId === sessionId ? chatSessions[0]?.id : this.state.activeChatSessionId,
 			tokenUsage: estimateTokenUsage(chatSessions),
 		};
-		await this.context.workspaceState.update(getChatSessionsKey(), serializeChatSessions(chatSessions));
+		await this.persistChatSessions(chatSessions);
 		this.postState();
 	}
 
@@ -1407,6 +1450,10 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 				throw new Error('Custom rules must be a JSON array.');
 			}
 			const rules = parsed.map(normalizeCustomRuleForSettings);
+			const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+			if (workspaceRoot) {
+				await getCoreClient().setWorkspaceRules(workspaceRoot, rules as never);
+			}
 			await vscode.workspace.getConfiguration('aqiron-security').update('customRules', rules, vscode.ConfigurationTarget.Workspace);
 			this.state = { ...this.state, customRules: formatCustomRules(rules) };
 			this.postState();
@@ -1442,7 +1489,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			? { ...session, messages: session.messages.map((message) => message.streaming ? { ...message, streaming: false, content: message.content || 'Generation cancelled.' } : message) }
 			: session), sessionId, false);
 		this.state = { ...this.state, chatSessions };
-		await this.context.workspaceState.update(getChatSessionsKey(), serializeChatSessions(chatSessions));
+		await this.persistChatSessions(chatSessions);
 		this.postState();
 	}
 
@@ -1539,6 +1586,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		}
 
 		const root = workspaceFolder.uri.fsPath;
+		await this.hydrateChatSessions(root);
 		if (!isFlutterWorkspace(root)) {
 			this.state = {
 				...this.state,
@@ -1670,7 +1718,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			stats: this.state.stats,
 			counts,
 			issues,
-			suggestions: this.state.rag.suggestionsGenerated ? buildSuggestions(issues, this.state.workspace.types, this.state.rag.suggestions) : [],
+			suggestions: this.state.rag.suggestionsGenerated ? buildWorkspaceRecommendations(issues, this.state.rag.suggestions) : [],
 			rag: this.state.rag,
 			selectedThreatId: this.state.selectedThreatId ?? issues[0]?.id,
 			threatSnapshots: this.state.threatSnapshots.map((snapshot) => ({ ...snapshot, issues: snapshot.issues.map(serializeIssue) })),
@@ -1949,51 +1997,6 @@ function clamp(value: number, min: number, max: number): number {
 	return Math.max(min, Math.min(max, value));
 }
 
-function buildSuggestions(issues: readonly SerializableIssue[], projectTypes: readonly string[], aiSuggestions: readonly string[] = []): unknown[] {
-	const suggestions: Array<{ title: string; detail: string; severity: AqironSeverity; recommended: boolean; command: string }> = aiSuggestions.map((detail, index) => ({
-		title: `AI workspace suggestion ${index + 1}`,
-		detail,
-		severity: 'Medium' as const,
-		recommended: index === 0,
-		command: `Investigate: ${detail}`,
-	}));
-	suggestions.push(...issues.slice(0, 4).map((issue) => ({
-		title: issue.title,
-		detail: issue.message,
-		severity: issue.severity,
-		recommended: issue.severity === 'Critical' || issue.severity === 'High',
-		command: `Investigate ${issue.relativeFile}:${issue.line}`,
-	})));
-
-	if (projectTypes.includes('Flutter')) {
-		suggestions.push({
-			title: 'Run Flutter APK security audit',
-			detail: 'Build release APK, upload to MobSF, correlate manifest and Dart findings.',
-			severity: 'High',
-			recommended: true,
-			command: 'Flutter MobSF audit',
-		});
-	}
-
-	if (projectTypes.includes('Node.js') || projectTypes.includes('React')) {
-		suggestions.push({
-			title: 'Do fuzzing on API endpoints',
-			detail: 'Discover route handlers and generate boundary-case payloads for local endpoints.',
-			severity: 'Medium',
-			recommended: issues.length > 0,
-			command: 'Fuzz APIs',
-		});
-	}
-
-	return suggestions.length > 0 ? suggestions : [{
-		title: 'Run a deep baseline audit',
-		detail: 'No immediate critical patterns are indexed yet. Start a deep scan to build project intelligence.',
-		severity: 'Low',
-		recommended: true,
-		command: 'Deep scan',
-	}];
-}
-
 async function detectProjectTypes(root: string): Promise<string[]> {
 	const checks: Array<[string, string[]]> = [
 		['Flutter', ['pubspec.yaml', 'lib/main.dart']],
@@ -2106,6 +2109,15 @@ function getGitPromptDisabledKey(root: string): string {
 function getChatSessionsKey(): string {
 	const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? 'global';
 	return `aqiron.chat.sessions.${root}`;
+}
+
+function mergeChatSessionHistory(shared: readonly ChatSession[], legacy: readonly ChatSession[]): ChatSession[] {
+	const byId = new Map<string, ChatSession>();
+	for (const session of [...legacy, ...shared]) {
+		const current = byId.get(session.id);
+		if (!current || session.updatedAt.localeCompare(current.updatedAt) >= 0) byId.set(session.id, session);
+	}
+	return [...byId.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 function getCurrentFileName(): string {

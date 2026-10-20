@@ -31,11 +31,11 @@ export class ReportGenerator {
 			graph,
 			telemetry,
 		};
-		void createJsonReport(model);
+		const json = createJsonReport(model);
 		const sarif = createSarifReport(findings);
 		const pdf = createPdfReport(model, workspaceRoot, reportContext);
-		const text = createTextReport({ model, text: executiveSummary, sarif, pdf });
-		return { model, text, sarif, pdf };
+		const text = createTextReport({ model, json, text: executiveSummary, sarif, pdf });
+		return { model, json, text, sarif, pdf };
 	}
 }
 

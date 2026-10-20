@@ -24,7 +24,7 @@ export class RagIndexService {
 	async hasIndex(root: string): Promise<boolean> {
 		try {
 			await this.deps.filesystem.access(indexPath(root));
-			if (this.data.manifest.updatedAt === '') {
+			if (this.data.manifest.updatedAt === '' || !this.root || path.resolve(this.root) !== path.resolve(root)) {
 				await this.load(root);
 			}
 			return true;

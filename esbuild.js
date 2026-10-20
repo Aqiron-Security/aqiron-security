@@ -73,6 +73,19 @@ async function main() {
 		logLevel: 'silent',
 		plugins: [esbuildProblemMatcherPlugin],
 	});
+	const desktopBridgeCtx = await esbuild.context({
+		entryPoints: ['packages/desktop/src/main.ts'],
+		bundle: true,
+		format: 'cjs',
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'node',
+		outfile: 'dist/aqiron-desktop-bridge.js',
+		external: ['keytar'],
+		logLevel: 'silent',
+		plugins: [esbuildProblemMatcherPlugin],
+	});
 	const webviewCtx = await esbuild.context({
 		entryPoints: [
 			'src/webview/ui/index.tsx'
@@ -95,10 +108,10 @@ async function main() {
 		],
 	});
 	if (watch) {
-		await Promise.all([extensionCtx.watch(), runtimeCtx.watch(), cliCtx.watch(), webviewCtx.watch()]);
+		await Promise.all([extensionCtx.watch(), runtimeCtx.watch(), cliCtx.watch(), desktopBridgeCtx.watch(), webviewCtx.watch()]);
 	} else {
-		await Promise.all([extensionCtx.rebuild(), runtimeCtx.rebuild(), cliCtx.rebuild(), webviewCtx.rebuild()]);
-		await Promise.all([extensionCtx.dispose(), runtimeCtx.dispose(), cliCtx.dispose(), webviewCtx.dispose()]);
+		await Promise.all([extensionCtx.rebuild(), runtimeCtx.rebuild(), cliCtx.rebuild(), desktopBridgeCtx.rebuild(), webviewCtx.rebuild()]);
+		await Promise.all([extensionCtx.dispose(), runtimeCtx.dispose(), cliCtx.dispose(), desktopBridgeCtx.dispose(), webviewCtx.dispose()]);
 	}
 }
 
