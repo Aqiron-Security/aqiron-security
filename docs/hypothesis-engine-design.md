@@ -258,4 +258,39 @@ Acceptance means every evidence reference resolves against its snapshot; unsuppo
 
 **Phase 4 — Calibration and lifecycle expansion:** use a labeled fixture corpus to calibrate bands; consider report presentation and a separately validated finding-creation flow. Automated scans, code execution, active verification, or finding mutation remain out of scope until separately designed and authorized.
 
-**Explicit boundaries for this pass:** no production code, protocol behavior, persistence, recommendation behavior, UI, shared Ignore capability, scan orchestration, project selection, Desktop window behavior, branch, or commit changes. This file is the sole intended addition.
+**Explicit boundaries for the original audit pass:** no production code, protocol behavior, persistence, recommendation behavior, UI, shared Ignore capability, scan orchestration, project selection, Desktop window behavior, branch, or commit changes. The audit pass added only this design document.
+
+## Phase 1 implementation decisions (2026-10-20)
+
+The reviewed Phase 1 decisions are: hypotheses remain provisional and separate from findings; AI is disabled; generation never starts scans, invokes project code, runs commands, or edits source; confidence is limited to low/moderate/high with deterministic factors; human validation does not create or mutate a finding; missing evidence is an explicit no-evidence result; and errors preserve stored hypotheses and triage.
+
+Implementation uses only completed scan results retained in the current `CoreRuntime` process and requires an explicit `scanId` scoped to the normalized workspace root. Persisted `.aqiron-security/threats.json` is not used because it is legacy `AqironIssue` history, not the current Core `UnifiedFinding`/correlation snapshot. If the process restarted or scan ID/root do not match, generation returns `no-evidence`; Phase 1 does not add a competing scan-history parser or make scan results persistent.
+
+New protocol operations are `hypotheses.generate`, `hypotheses.list`, `hypotheses.get`, and `hypotheses.review`; `CoreClient` exposes matching typed methods. The protocol remains version 1. Generation's only candidate rule is a low-confidence, falsifiable malware-to-mobile-artifact attribution question, requiring two existing findings, both source spans verified against current in-workspace files, and an actual `malware-to-artifact` relationship. Other existing correlation types are not used because their implementation depends on tag co-occurrence, same-file placement, dependency presence, or the coarse `attack-path` heuristic and cannot support a stronger first-release claim. A completed scan with findings that meet no allowlisted rule returns `no-supported-rule` and persists no speculative candidate.
+
+Snapshots persist only ID/scan/time/fingerprint metadata. Hypothesis evidence stores project-relative paths, line ranges, finding/rule/relationship references, source hashes, and provenance; source excerpt text and `rawEvidence` are discarded. The existing filesystem abstraction did not replace an existing target reliably on Windows in focused tests. `FileSystem` now has optional `unlink` and `rmdir`; the hypothesis store writes a unique temporary sibling, moves an existing target to a unique backup, renames the temp into place, rolls back on replacement failure, and recovers a backup if a process stopped while the target was absent. Per-workspace process-local queues plus an atomic lock directory serialize Core writers across processes; locks time out after 15 seconds and locks older than two minutes are reclaimed. This is recoverable replacement but has a brief target-absent window for other processes; the adapter has no single-call cross-platform replace or fsync primitive. Root normalization uses `path.resolve`; physical symlink canonicalization is not available through the existing adapter. Corrupt or unsupported stores return `HYPOTHESIS_STORE_INVALID` and are preserved. Validation requires a current evidence reference and stores the reviewer-selected reference IDs, but remains a reviewer assertion; no finding is created or linked in this phase.
+
+The implemented confidence table is deliberately conservative:
+
+| Conditions | Band |
+| --- | --- |
+| Any stale evidence, any explicit contradiction, or no verified source-span evidence | low |
+| Verified source span + multiple source families + an explicit non-heuristic relationship, with no stale/contradictory evidence | moderate |
+| All other combinations, including unknown preconditions or heuristic-only relationships | low |
+| high | Not emitted in V1; no current relationship contract proves the required exploit path/reachability |
+
+The only emitted candidate uses a heuristic relation and therefore remains `low`, regardless of severity. `ThreatCorrelationEngine` relation weights are discarded from hypothesis evidence and never interpreted as probabilities. `hypotheses.list` and review re-read cited source spans and mark nonterminal proposals stale when their current content hashes differ. A new scan with no trustworthy in-workspace findings also records an empty snapshot so earlier open hypotheses become stale. Generation rejects a completed scan older than the latest persisted hypothesis snapshot, using the scan completion timestamp retained in `ScanState`.
+
+No AI, scanner, RAG, or project-code execution is called from hypothesis generation. The profile is obtained through the bounded read-only project detector. Desktop bridge allowlists, CLI, all UIs, reports, existing findings, recommendations, and credential behavior remain outside this phase.
+
+## Corrective patch addendum (2026-10-21)
+
+This addendum supersedes the earlier Phase 1 implementation paragraph where it describes scan-time hashes, freshness transitions, path canonicalization, and stale-lock reclamation.
+
+The Phase 1 corrective patch fails closed when scan-time source identity is unavailable. The existing `UnifiedFinding` and retained `ScanStateRecord` carry locations but no scanner-observed source hash, so runtime generation currently produces an explicit no-evidence outcome instead of hashing later workspace contents and attributing them to the scan. The snapshot builder accepts a scan-time range-hash map only for callers that can provide that provenance; Core runtime does not synthesize one.
+
+Hypothesis storage and source evidence now require `realpath`, non-following `lstat`, regular-file checks, physical workspace canonicalization, and exclusive creation for temporary/lock-owner files. Symlinked `.aqiron-security` directories, store artifacts, lock paths, and source-path components are rejected. Validation and path operations remain separate calls through the current path-based filesystem abstraction; an attacker able to race mutations in the workspace may still exploit a TOCTOU window. The implementation does not claim descriptor-relative or race-free filesystem confinement. When required filesystem capabilities are missing, hypothesis storage fails closed.
+
+Review state and evidence freshness are separate: `status: validated` records the human decision, while `evidenceFreshness: stale` and stale evidence references indicate that its source changed or disappeared. List/get/review preserve the historical decision and expose stale freshness; validating again requires a current hypothesis and current evidence. The evidence hash covers the complete canonicalized inclusive line span (LF-normalized) and spans are limited to 20 lines.
+
+Cross-process lock directories contain an exclusively created owner record with the process ID and random token. A lock with a live owner is never reclaimed based on age; a lock with a confirmed-dead owner can be renamed for recovery. Locks with missing or unreadable owner records are not reclaimed automatically; they time out for manual recovery. PID reuse or an indeterminate liveness result fails safe by leaving the lock unavailable until timeout/manual recovery. The path-based adapter still cannot make lock-directory validation immune to a hostile concurrent filesystem mutation.

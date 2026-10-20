@@ -28,7 +28,7 @@ import { aiSecretKeys } from '../ai/services/credentialService';
 import { parseRecommendationSourceDetailed } from '../shared/recommendations';
 import { HypothesisStoreService } from '../hypotheses/hypothesisStore';
 import { buildHypothesisSnapshot, generateDeterministicHypotheses } from '../hypotheses/hypothesisEngine';
-import { HypothesisGenerationResult, HypothesisReviewInput, SecurityHypothesis } from '../hypotheses/contracts';
+import { HypothesisGenerationResult, HypothesisReviewInput, HypothesisReviewResult, SecurityHypothesis } from '../hypotheses/contracts';
 
 interface CoreRuntimeOptions {
 	coreVersion: string;
@@ -162,7 +162,7 @@ export class CoreRuntime {
 					return this.ok(message.id, 'hypotheses.get', { hypothesis: store.hypotheses.find((item) => item.id === message.params.hypothesisId) });
 				}
 				case 'hypotheses.review':
-					return this.ok(message.id, 'hypotheses.review', { hypothesis: await this.reviewHypothesis(message.params) });
+					return this.ok(message.id, 'hypotheses.review', await this.reviewHypothesis(message.params));
 				case 'rag.index':
 					return this.ok(message.id, 'rag.index', await this.indexRag(message.params, source.token));
 				case 'rag.status':
@@ -288,10 +288,9 @@ export class CoreRuntime {
 		return { status: 'generated', scanId, snapshotId: snapshot.id, hypotheses: generated, diagnostics: candidates.length ? [] : [{ code: 'no-supported-rule', count: 1, message: 'Current verified evidence did not satisfy an allowlisted deterministic hypothesis rule.' }] };
 	}
 
-	private async reviewHypothesis(input: HypothesisReviewInput): Promise<SecurityHypothesis> {
+	private async reviewHypothesis(input: HypothesisReviewInput): Promise<HypothesisReviewResult> {
 		const root = this.resolveHypothesisRoot(input.workspaceRoot);
-		const hypothesis = await this.hypotheses.review(root, input);
-		return hypothesis;
+		return await this.hypotheses.review(root, input);
 	}
 
 	private async workspaceThreatHistory(workspaceRoot: string): Promise<CoreMethodResults['workspace.threat-history.get']> {

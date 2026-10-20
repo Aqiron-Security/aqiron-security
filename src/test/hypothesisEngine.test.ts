@@ -1,11 +1,12 @@
 import { strict as assert } from 'assert';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { spawn } from 'node:child_process';
 import { CorrelatedRelationship } from '../../packages/core/src/correlation/correlationEngine';
 import { createFinding } from '../../packages/core/src/findings/finding';
 import { createEmptyProjectProfile } from '../../packages/core/src/project/projectProfile';
 import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
-import { buildHypothesisSnapshot, generateDeterministicHypotheses, safeRelativePath, validateEvidenceReference } from '../../packages/core/src/hypotheses/hypothesisEngine';
+import { buildHypothesisSnapshot, generateDeterministicHypotheses, hashSourceSpan, safeRelativePath, validateEvidenceReference } from '../../packages/core/src/hypotheses/hypothesisEngine';
 import { HypothesisStoreError, HypothesisStoreService, transition } from '../../packages/core/src/hypotheses/hypothesisStore';
 import { FileSystem } from '../../packages/core/src/shared/platform';
 import { AITransport } from '../../packages/core/src/ai/utils/request';
@@ -22,7 +23,7 @@ suite('Core deterministic hypothesis engine', () => {
 				createFinding({ title: 'Mobile artifact signal', description: 'Artifact flagged', severity: 'Low', cwe: [], owasp: [], file: path.join(root, 'src', 'mobile.apk'), line: 1, column: 1, sourceTool: 'Trivy', ruleId: 'trivy.artifact', confidence: 'Low', remediation: 'Review', tags: ['artifact'], rawEvidence: { secret: 'do-not-persist' } }),
 			];
 			const relation: CorrelatedRelationship = { sourceId: findings[0].id, targetId: findings[1].id, type: 'malware-to-artifact', weight: 0.75, reason: 'filename/tag heuristic' };
-			const input = { workspaceRoot: root, scanId: 'scan-a', findings, relationships: [relation], profile: createEmptyProjectProfile(root), filesystem: createFileSystem() };
+			const input = { workspaceRoot: root, scanId: 'scan-a', findings, relationships: [relation], profile: createEmptyProjectProfile(root), filesystem: createFileSystem(), scanSourceHashes: { 'src/indicator.txt:1-1': hashSourceSpan('malware-indicator\n', 1, 1), 'src/mobile.apk:1-1': hashSourceSpan('artifact-signature\n', 1, 1) } };
 			const first = await buildHypothesisSnapshot(input);
 			const second = await buildHypothesisSnapshot(input);
 			assert.equal(first.id, second.id);
@@ -50,7 +51,8 @@ suite('Core deterministic hypothesis engine', () => {
 		try {
 			await fs.writeFile(path.join(root, 'file.ts'), 'const safe = true;\n');
 			const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file: path.join(root, 'file.ts'), line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.rule', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
-			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: 'scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createFileSystem() });
+			const source = 'const safe = true;\n';
+			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: 'scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createFileSystem(), scanSourceHashes: { 'file.ts:1-1': hashSourceSpan(source, 1, 1) } });
 			const reference = snapshot.evidence.find((item) => item.kind === 'finding')!;
 			assert.equal(validateEvidenceReference(snapshot, { ...reference, id: 'finding:fabricated' }), false);
 			assert.equal(safeRelativePath(root, '../outside.ts'), undefined);
@@ -87,11 +89,48 @@ suite('Core deterministic hypothesis engine', () => {
 			await service.mergeGeneration(root, testSnapshot(root), [hypothesis], () => false);
 			await assert.rejects(service.review(root, { workspaceRoot: root, hypothesisId: hypothesis.id, action: 'validate' }), /requires at least one current/);
 			const validated = await service.review(root, { workspaceRoot: root, hypothesisId: hypothesis.id, action: 'validate', evidenceRefs: [hypothesis.evidence[0].id] });
-			assert.equal(validated.status, 'validated');
-			assert.equal(validated.review?.action, 'validate');
-			assert.deepEqual(validated.review?.evidenceRefs, [hypothesis.evidence[0].id]);
-			assert.equal('finding' in validated, false);
+			assert.equal(validated.applied, true);
+			assert.equal(validated.hypothesis.status, 'validated');
+			assert.equal(validated.hypothesis.review?.action, 'validate');
+			assert.deepEqual(validated.hypothesis.review?.evidenceRefs, [hypothesis.evidence[0].id]);
+			assert.equal('finding' in validated.hypothesis, false);
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('retains validation history while exposing changed and deleted evidence as stale', async () => {
+		for (const remove of [false, true]) {
+			const root = await testRoot(remove ? 'validated-deleted' : 'validated-changed');
+			try {
+				const source = 'const observed = true;\n';
+				const file = path.join(root, 'src.ts');
+				await fs.writeFile(file, source);
+				const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file, line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.rule', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+				const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: 'scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createFileSystem(), scanSourceHashes: { 'src.ts:1-1': hashSourceSpan(source, 1, 1) } });
+				const span = snapshot.evidence.find((ref) => ref.kind === 'source-span')!;
+				const hypothesis = { ...testHypothesis(), evidence: [span], snapshotId: snapshot.id };
+				const store = new HypothesisStoreService(createFileSystem());
+				await store.mergeGeneration(root, snapshot, [hypothesis], () => false);
+				await store.review(root, { workspaceRoot: root, hypothesisId: hypothesis.id, action: 'validate', evidenceRefs: [span.id] });
+				if (remove) { await fs.unlink(file); } else { await fs.writeFile(file, 'const observed = false;\n'); }
+				const listed = (await store.list(root)).hypotheses[0];
+				assert.equal(listed.status, 'validated');
+				assert.equal(listed.evidenceFreshness, 'stale');
+				assert.equal(listed.evidence[0].freshness, 'stale');
+				assert.equal(listed.review?.action, 'validate');
+				const reviewed = await store.review(root, { workspaceRoot: root, hypothesisId: hypothesis.id, action: 'validate', evidenceRefs: [span.id] });
+				assert.equal(reviewed.applied, false);
+				assert.equal(reviewed.diagnostic, 'stale-evidence');
+				assert.equal(reviewed.hypothesis.evidenceFreshness, 'stale');
+				const runtime = new CoreRuntime({ coreVersion: 'test' });
+				const listedResponse = await runtime.handle({ id: 'hyp-stale-list', type: 'request', method: 'hypotheses.list', params: { workspaceRoot: root, status: 'validated' } }, () => undefined);
+				assert.equal(((listedResponse.result as { hypotheses: SecurityHypothesis[] }).hypotheses[0]).evidenceFreshness, 'stale');
+				const fetchedResponse = await runtime.handle({ id: 'hyp-stale-get', type: 'request', method: 'hypotheses.get', params: { workspaceRoot: root, hypothesisId: hypothesis.id } }, () => undefined);
+				assert.equal((fetchedResponse.result as { hypothesis: SecurityHypothesis }).hypothesis.evidenceFreshness, 'stale');
+				const reviewResponse = await runtime.handle({ id: 'hyp-stale-review', type: 'request', method: 'hypotheses.review', params: { workspaceRoot: root, hypothesisId: hypothesis.id, action: 'validate', evidenceRefs: [span.id] } }, () => undefined);
+				assert.equal((reviewResponse.result as { applied: boolean; diagnostic: string; hypothesis: SecurityHypothesis }).applied, false);
+				assert.equal((reviewResponse.result as { applied: boolean; diagnostic: string; hypothesis: SecurityHypothesis }).diagnostic, 'stale-evidence');
+			} finally { await fs.rm(root, { recursive: true, force: true }); }
+		}
 	});
 
 	test('persists atomically, preserves triage on regeneration, serializes concurrent updates, and protects corrupt stores', async () => {
@@ -185,13 +224,143 @@ suite('Core deterministic hypothesis engine', () => {
 			const response = await runtime.handle({ id: 'hyp-runtime-candidate', type: 'request', method: 'hypotheses.generate', params: { workspaceRoot: root, scanId } }, () => undefined);
 			assert.equal(response.success, true, response.error?.message);
 			const result = response.result as { status: string; hypotheses: Array<{ status: string; confidence: { band: string } }> };
-			assert.equal(result.status, 'generated');
-			assert.equal(result.hypotheses.length, 1);
-			assert.equal(result.hypotheses[0].status, 'proposed');
-			assert.equal(result.hypotheses[0].confidence.band, 'low');
+			assert.equal(result.status, 'no-evidence');
+			assert.equal(result.hypotheses.length, 0);
 			const persisted = await fs.readFile(path.join(root, '.aqiron-security', 'hypotheses.json'), 'utf8');
 			assert.ok(!persisted.includes('never-store'));
 			assert.equal(aiCalls, 0);
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('fails closed when source changes after scan completion because scan-time hashes are unavailable', async () => {
+		const root = await testRoot('scan-source-change');
+		try {
+			const file = path.join(root, 'src', 'indicator.txt');
+			await fs.mkdir(path.dirname(file), { recursive: true });
+			await fs.writeFile(file, 'before scan evidence\n');
+			const finding = createFinding({ title: 'Malware indicator', description: 'Indicator matched', severity: 'High', cwe: [], owasp: [], file, line: 1, column: 1, sourceTool: 'MobSF', ruleId: 'mobsf.indicator', confidence: 'Medium', remediation: 'Review', tags: ['malware'], rawEvidence: {} });
+			const runtime = new CoreRuntime({ coreVersion: 'test' });
+			const scanId = 'scan-source-change';
+			const internal = runtime as unknown as { scans: Map<string, { result: { state: { finalState: string; workspaceRoot: string; completedAt: string }; findings: typeof finding[]; correlation: { relationships: CorrelatedRelationship[] } } }> };
+			internal.scans.set(scanId, { result: { state: { finalState: 'completed', workspaceRoot: root, completedAt: '2026-10-20T00:00:00.000Z' }, findings: [finding], correlation: { relationships: [] } } });
+			await fs.writeFile(file, 'after scan evidence\n');
+			const response = await runtime.handle({ id: 'hyp-scan-source-change', type: 'request', method: 'hypotheses.generate', params: { workspaceRoot: root, scanId } }, () => undefined);
+			assert.equal(response.success, true);
+			assert.equal((response.result as { status: string }).status, 'no-evidence');
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('rejects symlinked store, backup, lock, and source paths', async () => {
+		const root = await testRoot('symlink');
+		const outside = await testRoot('symlink-outside');
+		try {
+			if (process.platform === 'win32') {
+				const outsideStore = path.join(outside, 'hypotheses.json');
+				await fs.writeFile(outsideStore, '{"external":true}');
+				const storeDirectory = path.join(root, '.aqiron-security');
+				await fs.mkdir(storeDirectory);
+				await assert.rejects(new HypothesisStoreService(createFileSystem({ symlinkPaths: [storeDirectory] })).list(root));
+				const backupPath = path.join(storeDirectory, 'hypotheses.json.1.abc.bak');
+				await assert.rejects(fs.lstat(backupPath));
+				await assert.doesNotReject(new HypothesisStoreService(createFileSystem({ symlinkPaths: [backupPath] })).list(root));
+				const lockPath = `${path.join(storeDirectory, 'hypotheses.json')}.lock`;
+				await fs.mkdir(lockPath);
+				await assert.rejects(new HypothesisStoreService(createFileSystem({ symlinkPaths: [lockPath] })).list(root));
+				await fs.rm(lockPath, { recursive: true, force: true });
+				await fs.mkdir(path.join(root, 'linked-source'));
+				const source = path.join(root, 'linked-source', 'external.ts');
+				await fs.writeFile(source, 'const outside = true;\n');
+				const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file: source, line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.rule', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+				const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: 'scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createFileSystem({ symlinkPaths: [path.join(root, 'linked-source')] }), scanSourceHashes: { 'linked-source/external.ts:1-1': hashSourceSpan('const outside = true;\n', 1, 1) } });
+				assert.equal(snapshot.findings.length, 0);
+				assert.equal(await fs.readFile(outsideStore, 'utf8'), '{"external":true}');
+				return;
+			}
+			const service = new HypothesisStoreService(createFileSystem());
+			const outsideStore = path.join(outside, 'hypotheses.json');
+			await fs.writeFile(outsideStore, '{"external":true}');
+			await fs.symlink(outside, path.join(root, '.aqiron-security'), 'dir');
+			await assert.rejects(service.list(root));
+			assert.equal(await fs.readFile(outsideStore, 'utf8'), '{"external":true}');
+			await fs.unlink(path.join(root, '.aqiron-security'));
+			await fs.mkdir(path.join(root, '.aqiron-security'));
+			const tempSymlink = path.join(root, '.aqiron-security', 'hypotheses.json.attack.tmp');
+			await fs.symlink(outsideStore, tempSymlink);
+			await assert.rejects(createFileSystem().writeFileExclusive!(tempSymlink, 'overwrite', 'utf8'));
+			assert.equal(await fs.readFile(outsideStore, 'utf8'), '{"external":true}');
+			await fs.symlink(outside, path.join(root, '.aqiron-security', 'hypotheses.json.1.abc.bak'), 'dir');
+			assert.equal((await service.list(root)).hypotheses.length, 0);
+			await fs.symlink(outside, `${path.join(root, '.aqiron-security', 'hypotheses.json')}.lock`, 'dir');
+			await assert.rejects(service.list(root));
+			await fs.writeFile(path.join(outside, 'external.ts'), 'const outside = true;\n');
+			const linkedDir = path.join(root, 'linked-source');
+			await fs.symlink(outside, linkedDir, 'dir');
+			const source = path.join(linkedDir, 'external.ts');
+			const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file: source, line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.rule', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: 'scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createFileSystem(), scanSourceHashes: { 'linked-source/external.ts:1-1': hashSourceSpan('const outside = true;\n', 1, 1) } });
+			assert.equal(snapshot.findings.length, 0);
+		} finally { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); }
+	});
+
+	test('rehashes the complete canonical span, including content beyond 2,000 characters', async () => {
+		const root = await testRoot('full-span');
+		try {
+			const initial = `${'A'.repeat(2500)}\n`;
+			const file = path.join(root, 'long.txt');
+			await fs.writeFile(file, initial);
+			const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file, line: 1, column: 1, endLine: 1, sourceTool: 'Aqiron', ruleId: 'test.rule', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: 'scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createFileSystem(), scanSourceHashes: { 'long.txt:1-1': hashSourceSpan(initial, 1, 1) } });
+			const hypothesis = { ...testHypothesis(), evidence: [snapshot.evidence.find((ref) => ref.kind === 'source-span')!], snapshotId: snapshot.id };
+			const store = new HypothesisStoreService(createFileSystem());
+			await store.mergeGeneration(root, snapshot, [hypothesis], () => false);
+			await fs.writeFile(file, `${'A'.repeat(2200)}B${'A'.repeat(299)}\n`);
+			assert.equal((await store.list(root)).hypotheses[0].status, 'stale');
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('protects a live cross-process lock even when its directory timestamp is older than two minutes', async () => {
+		const root = await testRoot('live-cross-process-lock');
+		await fs.mkdir(path.join(root, '.aqiron-security'), { recursive: true });
+		const worker = spawn(process.execPath, [path.join(__dirname, 'hypothesisStoreWorker.js'), 'hold-lock', root], { stdio: ['pipe', 'pipe', 'pipe'] });
+		try {
+			await new Promise<void>((resolve, reject) => {
+				worker.stdout.setEncoding('utf8');
+				worker.stdout.on('data', (chunk: string) => { if (chunk.includes('ready')) { resolve(); } });
+				worker.once('error', reject);
+				worker.stderr.on('data', (chunk) => reject(new Error(String(chunk))));
+			});
+			let completed = false;
+			const operation = new HypothesisStoreService(createFileSystem()).list(root).then(() => { completed = true; });
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			assert.equal(completed, false);
+			worker.stdin.write('\n');
+			await operation;
+			assert.equal(completed, true);
+		} finally { worker.kill(); await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('recovers a genuinely dead cross-process lock and preserves concurrent triage updates', async () => {
+		const root = await testRoot('dead-cross-process-lock');
+		try {
+			await fs.mkdir(path.join(root, '.aqiron-security'), { recursive: true });
+			const lockPath = `${path.join(root, '.aqiron-security', 'hypotheses.json')}.lock`;
+			await fs.mkdir(lockPath);
+			await fs.writeFile(path.join(lockPath, 'owner.json'), JSON.stringify({ pid: 2_147_483_647, token: 'dead-owner' }));
+			const old = new Date(Date.now() - 180_000);
+			await fs.utimes(lockPath, old, old);
+			const service = new HypothesisStoreService(createFileSystem());
+			assert.equal((await service.list(root)).hypotheses.length, 0);
+			const first = { ...testHypothesis(), id: 'hyp:process-a' };
+			const second = { ...testHypothesis(), id: 'hyp:process-b' };
+			await service.mergeGeneration(root, testSnapshot(root), [first, second], () => false);
+			const worker = spawn(process.execPath, [path.join(__dirname, 'hypothesisStoreWorker.js'), 'review', root, first.id, 'dismiss'], { stdio: ['ignore', 'pipe', 'pipe'] });
+			await Promise.all([
+				new Promise<void>((resolve, reject) => { worker.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`worker exited ${code}`))); worker.stderr.on('data', (chunk) => reject(new Error(String(chunk)))); }),
+				service.review(root, { workspaceRoot: root, hypothesisId: second.id, action: 'dismiss' }),
+			]);
+			const reloaded = await service.list(root);
+			assert.equal(reloaded.hypotheses.find((item) => item.id === first.id)?.status, 'dismissed');
+			assert.equal(reloaded.hypotheses.find((item) => item.id === second.id)?.status, 'dismissed');
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 });
@@ -204,14 +373,17 @@ function testHypothesis(): SecurityHypothesis {
 	return { id: 'hyp:test', title: 'Test hypothesis', description: 'Does the observed indicator belong to the artifact?', asset: { kind: 'project', id: 'src' }, evidence: [ref], rationale: 'Evidence summary.', confidence: { band: 'low', factors: [], policyVersion: 1 }, assumptions: [], contradictions: [], verificationSteps: ['Review the evidence manually.'], status: 'proposed', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', snapshotId: 'snapshot:test', relatedFindingIds: ['test'], relatedRuleIds: ['rule.test'], relatedHypothesisIds: [] };
 }
 function testSnapshot(root: string): HypothesisSnapshot { return { id: 'snapshot:test', workspaceRoot: root, scanId: 'scan:test', capturedAt: '2026-01-01T00:00:00.000Z', fingerprint: 'a'.repeat(64), profile: createEmptyProjectProfile(root), evidence: [], findings: [], relationships: [] }; }
-function createFileSystem(options: { failRenameAt?: number } = {}): FileSystem {
+function createFileSystem(options: { failRenameAt?: number; symlinkPaths?: string[] } = {}): FileSystem {
 	let renameCount = 0;
 	return {
 		readFile: nodeReadFile,
 		writeFile: async (file, contents, encoding) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, contents, encoding); },
+		writeFileExclusive: async (file, contents, encoding) => { await fs.writeFile(file, contents, { encoding, flag: 'wx' }); },
 		mkdir: async (directory, options) => { await fs.mkdir(directory, options); },
 		readdir: async (directory, options) => await fs.readdir(directory, options as any) as any,
 		stat: async (file) => { const stat = await fs.stat(file); return { isFile: () => stat.isFile(), isDirectory: () => stat.isDirectory(), size: stat.size, mtimeMs: stat.mtimeMs }; },
+		lstat: async (file) => { if (options.symlinkPaths?.some((item) => path.resolve(item).toLowerCase() === path.resolve(file).toLowerCase())) {return { isFile: () => false, isDirectory: () => false, isSymbolicLink: () => true, size: 0, mtimeMs: 0 };} const stat = await fs.lstat(file); return { isFile: () => stat.isFile(), isDirectory: () => stat.isDirectory(), isSymbolicLink: () => stat.isSymbolicLink(), size: stat.size, mtimeMs: stat.mtimeMs }; },
+		realpath: async (file) => await fs.realpath(file),
 		access: async (file) => { await fs.access(file); },
 		rename: async (oldPath, newPath) => { renameCount += 1; if (options.failRenameAt === renameCount) {throw new Error('simulated replacement failure');} await fs.rename(oldPath, newPath); },
 		unlink: async (file) => { await fs.unlink(file); },

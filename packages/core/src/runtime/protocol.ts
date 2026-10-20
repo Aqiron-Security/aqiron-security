@@ -14,7 +14,7 @@ import { AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
 import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
 import { ResolvedWorkspaceScanPolicy } from '../shared/workspaceScanPolicy';
 import { WorkspaceCustomRule } from '../shared/workspaceRules';
-import { HypothesisGenerationResult, HypothesisReviewInput, SecurityHypothesis } from '../hypotheses/contracts';
+import { HypothesisGenerationResult, HypothesisReviewInput, HypothesisReviewResult, SecurityHypothesis } from '../hypotheses/contracts';
 
 export const CORE_PROTOCOL_VERSION = 1;
 
@@ -100,7 +100,7 @@ export interface CoreMethodResults {
 	'hypotheses.generate': HypothesisGenerationResult;
 	'hypotheses.list': { hypotheses: SecurityHypothesis[]; storeVersion: 1 };
 	'hypotheses.get': { hypothesis?: SecurityHypothesis };
-	'hypotheses.review': { hypothesis: SecurityHypothesis };
+	'hypotheses.review': HypothesisReviewResult;
 	'rag.index': CoreRagIndexResult;
 	'rag.status': CoreRagStatusResult;
 	'rag.query': CoreRagQueryResult;

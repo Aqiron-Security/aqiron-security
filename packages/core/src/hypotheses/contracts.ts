@@ -45,6 +45,8 @@ export interface SecurityHypothesis {
 	impact?: string;
 	verificationSteps: string[];
 	status: HypothesisStatus;
+	/** Current evidence state. A validated status records reviewer history and can coexist with stale evidence. */
+	evidenceFreshness?: 'current' | 'stale';
 	createdAt: string;
 	updatedAt: string;
 	snapshotId: string;
@@ -87,6 +89,12 @@ export interface HypothesisReviewInput {
 	action: HypothesisTriageAction;
 	note?: string;
 	evidenceRefs?: string[];
+}
+
+export interface HypothesisReviewResult {
+	hypothesis: SecurityHypothesis;
+	applied: boolean;
+	diagnostic?: 'stale-evidence';
 }
 
 export interface HypothesisStore {

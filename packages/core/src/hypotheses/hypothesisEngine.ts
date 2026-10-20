@@ -8,7 +8,8 @@ import { ConfidenceFactor, HypothesisEvidenceRef, HypothesisSnapshot, SecurityHy
 
 const MAX_FINDINGS = 500;
 const MAX_RELATIONSHIPS = 1000;
-const MAX_LINE_BYTES = 2_000;
+const MAX_SPAN_LINES = 20;
+const MAX_SOURCE_FILE_BYTES = 10_000_000;
 
 export async function buildHypothesisSnapshot(input: {
 	workspaceRoot: string;
@@ -17,10 +18,12 @@ export async function buildHypothesisSnapshot(input: {
 	relationships: readonly CorrelatedRelationship[];
 	profile: ProjectProfile;
 	filesystem: FileSystem;
+	/** Content hashes captured by the scanner at scan time, keyed by relative path and inclusive line range. */
+	scanSourceHashes?: Readonly<Record<string, string>>;
 	capturedAt?: string;
 	cancelled?: () => boolean;
 }): Promise<HypothesisSnapshot> {
-	const root = path.resolve(input.workspaceRoot);
+	const root = await physicalWorkspaceRoot(input.workspaceRoot, input.filesystem);
 	const findings: UnifiedFinding[] = [];
 	const refs: HypothesisEvidenceRef[] = [];
 	const findingIds = new Set<string>();
@@ -29,15 +32,19 @@ export async function buildHypothesisSnapshot(input: {
 		if (!finding || typeof finding.id !== 'string' || !finding.id || findingIds.has(finding.id)) {continue;}
 		const relative = findingPath(root, finding.file);
 		if (!relative || !Number.isInteger(finding.line) || finding.line < 1) {continue;}
+		if (!input.scanSourceHashes) {continue;}
 		const abs = path.resolve(root, relative);
+		if (!await isSafeWorkspaceFile(root, relative, input.filesystem)) {continue;}
+		try { const stat = await input.filesystem.stat(abs); if (!stat.isFile() || stat.size > MAX_SOURCE_FILE_BYTES) {continue;} } catch { continue; }
 		let content: string;
 		try { content = await input.filesystem.readFile(abs, 'utf8'); } catch { continue; }
 		const lines = content.split(/\r?\n/);
 		if (finding.line > lines.length) {continue;}
 		const endLine = finding.endLine ?? finding.line;
-		if (!Number.isInteger(endLine) || endLine < finding.line || endLine > lines.length) {continue;}
-		const excerpt = lines.slice(finding.line - 1, Math.min(endLine, finding.line + 2)).join('\n').slice(0, MAX_LINE_BYTES);
-		const hash = sha256(excerpt);
+		if (!Number.isInteger(endLine) || endLine < finding.line || endLine > lines.length || endLine - finding.line + 1 > MAX_SPAN_LINES) {continue;}
+		let hash: string;
+		try { hash = hashSourceSpan(content, finding.line, endLine); } catch { continue; }
+		if (input.scanSourceHashes[`${relative}:${finding.line}-${endLine}`] !== hash) {continue;}
 		const sourceRef: HypothesisEvidenceRef = {
 			id: `span:${relative}:${finding.line}-${endLine}:${hash.slice(0, 16)}`,
 			kind: 'source-span', source: 'Core filesystem snapshot', file: relative,
@@ -79,6 +86,41 @@ export function safeRelativePath(root: string, input: string): string | undefine
 	const relative = path.relative(root, absolute);
 	if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {return undefined;}
 	return relative.split(path.sep).join('/');
+}
+
+/** Canonical source-span hashing: inclusive one-based lines, LF-normalized, complete span. */
+export function hashSourceSpan(content: string, startLine: number, endLine: number): string {
+	const lines = content.split(/\r\n|\n|\r/);
+	if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine || endLine > lines.length || endLine - startLine + 1 > MAX_SPAN_LINES) {throw new Error('Invalid or oversized source span.');}
+	const span = lines.slice(startLine - 1, endLine).join('\n');
+	if (Buffer.byteLength(span, 'utf8') > 64_000) {throw new Error('Source span exceeds the 64 KB evidence limit.');}
+	return sha256(span);
+}
+
+async function physicalWorkspaceRoot(root: string, filesystem: FileSystem): Promise<string> {
+	if (!filesystem.realpath || !filesystem.lstat) {throw new Error('Hypothesis generation requires filesystem realpath and lstat support.');}
+	const resolved = await filesystem.realpath(path.resolve(root));
+	const stat = await filesystem.lstat(resolved);
+	if (stat.isSymbolicLink() || !stat.isDirectory()) {throw new Error('Hypothesis workspace root is not a physical directory.');}
+	return resolved;
+}
+
+async function isSafeWorkspaceFile(root: string, relative: string, filesystem: FileSystem): Promise<boolean> {
+	if (!filesystem.lstat || !filesystem.realpath) {return false;}
+	const parts = relative.split('/');
+	let current = root;
+	for (const part of parts) {
+		current = path.join(current, part);
+		let stat: Awaited<ReturnType<NonNullable<FileSystem['lstat']>>>;
+		try { stat = await filesystem.lstat(current); } catch { return false; }
+		if (stat.isSymbolicLink()) {return false;}
+	}
+	try {
+		const actual = await filesystem.realpath(current);
+		const rel = path.relative(root, actual);
+		const stat = await filesystem.lstat(actual);
+		return stat.isFile() && Boolean(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+	} catch { return false; }
 }
 
 function findingPath(root: string, input: string): string | undefined {
@@ -147,7 +189,7 @@ export function generateDeterministicHypotheses(snapshot: HypothesisSnapshot): S
 			assumptions: ['The correlation engine matched the intended mobile artifact.'],
 			contradictions: [], impact: 'If attribution is confirmed, the artifact may require malware triage.',
 			verificationSteps: ['Review the cited scanner evidence and inspect the artifact with an approved malware analysis workflow.'],
-			status: 'proposed', createdAt: snapshot.capturedAt, updatedAt: snapshot.capturedAt, snapshotId: snapshot.id,
+			status: 'proposed', evidenceFreshness: 'current', createdAt: snapshot.capturedAt, updatedAt: snapshot.capturedAt, snapshotId: snapshot.id,
 			relatedFindingIds: [source.id, target.id].sort(), relatedRuleIds: [...new Set([source.ruleId, target.ruleId])].sort(), relatedHypothesisIds: [],
 		});
 	}

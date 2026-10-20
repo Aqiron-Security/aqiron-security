@@ -46,6 +46,9 @@ export function createNodeFileSystem(): FileSystem {
 			await mkdirAsync(path.dirname(file), { recursive: true });
 			await writeFileAsync(file, contents, encoding as BufferEncoding | undefined);
 		},
+		writeFileExclusive: async (file: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void> => {
+			await fs.promises.writeFile(file, contents, { encoding: encoding as BufferEncoding | undefined, flag: 'wx' });
+		},
 		mkdir: async (directory: string, options?: { recursive?: boolean }): Promise<void> => {
 			await mkdirAsync(directory, options);
 		},
@@ -56,6 +59,11 @@ export function createNodeFileSystem(): FileSystem {
 			const stat = await statAsync(file);
 			return { isFile: () => stat.isFile(), isDirectory: () => stat.isDirectory(), size: stat.size, mtimeMs: stat.mtimeMs };
 		},
+		lstat: async (file: string) => {
+			const stat = await fs.promises.lstat(file);
+			return { isFile: () => stat.isFile(), isDirectory: () => stat.isDirectory(), isSymbolicLink: () => stat.isSymbolicLink(), size: stat.size, mtimeMs: stat.mtimeMs };
+		},
+		realpath: async (file: string) => await fs.promises.realpath(file),
 		access: async (file: string): Promise<void> => {
 			await accessAsync(file);
 		},

@@ -4,9 +4,15 @@ export interface FileSystem {
 	readFile(path: string, encoding: BufferEncoding): Promise<string>;
 	readFile(path: string): Promise<Uint8Array>;
 	writeFile(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
+	/** Create a new file only if the path does not already exist. */
+	writeFileExclusive?(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
 	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
 	readdir(path: string, options?: { withFileTypes?: boolean }): Promise<Array<string | { name: string; isDirectory(): boolean; isFile(): boolean }>>;
 	stat(path: string): Promise<{ isFile(): boolean; isDirectory(): boolean; size: number; mtimeMs: number }>;
+	/** Non-following metadata lookup; required by security-sensitive workspace stores. */
+	lstat?(path: string): Promise<{ isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean; size: number; mtimeMs: number }>;
+	/** Physical path lookup; required by security-sensitive workspace stores. */
+	realpath?(path: string): Promise<string>;
 	access(path: string): Promise<void>;
 	rename(oldPath: string, newPath: string): Promise<void>;
 	/** Optional file cleanup capability for stores that need recoverable replacement on Windows. */

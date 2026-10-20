@@ -1,7 +1,8 @@
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import { FileSystem } from '../shared/platform';
-import { HypothesisReviewInput, HypothesisSnapshot, HypothesisStatus, HypothesisStore, SecurityHypothesis } from './contracts';
+import { HypothesisReviewInput, HypothesisReviewResult, HypothesisSnapshot, HypothesisStatus, HypothesisStore, SecurityHypothesis } from './contracts';
+import { hashSourceSpan } from './hypothesisEngine';
 
 const MAX_HYPOTHESES = 500;
 const MAX_SNAPSHOTS = 20;
@@ -17,18 +18,18 @@ export class HypothesisStoreService {
 	constructor(private readonly filesystem: FileSystem) {}
 
 	async list(root: string): Promise<HypothesisStore> {
-		return await withWorkspaceLock(root, this.filesystem, async () => {
-			const store = await this.read(root);
-			const refreshed = await this.markChangedEvidenceStale(root, store);
-			if (refreshed !== store) {await this.write(root, refreshed);}
+		return await withWorkspaceLock(root, this.filesystem, async (safeRoot) => {
+			const store = await this.read(safeRoot);
+			const refreshed = await this.markChangedEvidenceStale(safeRoot, store);
+			if (refreshed !== store) {await this.write(safeRoot, refreshed);}
 			return refreshed;
 		});
 	}
 
 	async mergeGeneration(root: string, snapshot: HypothesisSnapshot, candidates: SecurityHypothesis[], cancelled: () => boolean): Promise<HypothesisStore> {
-		return await withWorkspaceLock(root, this.filesystem, async () => {
+		return await withWorkspaceLock(root, this.filesystem, async (safeRoot) => {
 			if (cancelled()) {throw new Error('Core request cancelled.');}
-			const current = await this.read(root);
+			const current = await this.read(safeRoot);
 			const latestSnapshot = current.snapshots[0];
 			if (latestSnapshot && Date.parse(snapshot.capturedAt) < Date.parse(latestSnapshot.capturedAt)) {
 				throw Object.assign(new Error('This completed scan is older than the latest hypothesis snapshot. Refresh from the current scan before generating again.'), { code: 'HYPOTHESIS_STALE_GENERATION' });
@@ -50,19 +51,20 @@ export class HypothesisStoreService {
 			const next: HypothesisStore = { version: 1, scoringPolicyVersion: 1, updatedAt: new Date().toISOString(), hypotheses, snapshots };
 			validateStore(next);
 			if (cancelled()) {throw new Error('Core request cancelled.');}
-			await this.write(root, next);
+			await this.write(safeRoot, next);
 			return next;
 		});
 	}
 
-	async review(root: string, input: HypothesisReviewInput, now = new Date().toISOString()): Promise<SecurityHypothesis> {
-		return await withWorkspaceLock(root, this.filesystem, async () => {
-			const original = await this.read(root);
-			const store = await this.markChangedEvidenceStale(root, original);
-			if (store !== original) {await this.write(root, store);}
+	async review(root: string, input: HypothesisReviewInput, now = new Date().toISOString()): Promise<HypothesisReviewResult> {
+		return await withWorkspaceLock(root, this.filesystem, async (safeRoot) => {
+			const original = await this.read(safeRoot);
+			const store = await this.markChangedEvidenceStale(safeRoot, original);
+			if (store !== original) {await this.write(safeRoot, store);}
 			const index = store.hypotheses.findIndex((hypothesis) => hypothesis.id === input.hypothesisId);
 			if (index < 0) {throw Object.assign(new Error('Hypothesis was not found in this workspace.'), { code: 'HYPOTHESIS_NOT_FOUND' });}
 			const hypothesis = store.hypotheses[index];
+			if (hypothesis.evidenceFreshness === 'stale' || hypothesis.status === 'stale') {return { hypothesis, applied: false, diagnostic: 'stale-evidence' };}
 			const nextStatus = transition(hypothesis.status, input.action);
 			if (input.action === 'validate' && (!Array.isArray(input.evidenceRefs) || input.evidenceRefs.length === 0 || !input.evidenceRefs.some((id) => hypothesis.evidence.some((ref) => ref.id === id && ref.freshness === 'current')))) {
 				throw Object.assign(new Error('Validation requires at least one current supporting evidence reference.'), { code: 'HYPOTHESIS_EVIDENCE_REQUIRED' });
@@ -72,24 +74,25 @@ export class HypothesisStoreService {
 			}
 			const updated: SecurityHypothesis = { ...hypothesis, status: nextStatus, updatedAt: now, review: { at: now, action: input.action, ...(input.note ? { note: input.note.slice(0, 500) } : {}), ...(input.evidenceRefs?.length ? { evidenceRefs: [...new Set(input.evidenceRefs)].slice(0, 20) } : {}) } };
 			const hypotheses = [...store.hypotheses]; hypotheses[index] = updated;
-			await this.write(root, { ...store, updatedAt: now, hypotheses });
-			return updated;
+			await this.write(safeRoot, { ...store, updatedAt: now, hypotheses });
+			return { hypothesis: updated, applied: true };
 		});
 	}
 
 	private async markChangedEvidenceStale(root: string, store: HypothesisStore): Promise<HypothesisStore> {
 		let changed = false;
 		const hypotheses = await Promise.all(store.hypotheses.map(async (hypothesis) => {
-			if (!['proposed', 'investigating', 'dismissed'].includes(hypothesis.status)) {return hypothesis;}
-			for (const ref of hypothesis.evidence.filter((item) => item.kind === 'source-span')) {
-				if (!ref.file || !ref.contentHash || !Number.isInteger(ref.startLine) || !Number.isInteger(ref.endLine) || ref.startLine! < 1) { changed = true; return { ...hypothesis, status: 'stale' as const, updatedAt: new Date().toISOString() }; }
+			if (!['proposed', 'investigating', 'dismissed', 'validated', 'rejected'].includes(hypothesis.status) || hypothesis.evidenceFreshness === 'stale') {return hypothesis;}
+			for (const ref of hypothesis.evidence.filter((item) => item.kind === 'source-span' && item.freshness === 'current')) {
+				if (!ref.file || !ref.contentHash || !Number.isInteger(ref.startLine) || !Number.isInteger(ref.endLine) || ref.startLine! < 1) { changed = true; return staleEvidence(hypothesis); }
 				let content: string;
+				if (!await isSafeStoreRelativeFile(root, ref.file, this.filesystem)) { changed = true; return staleEvidence(hypothesis); }
+				try { const stat = await this.filesystem.stat(path.resolve(root, ref.file)); if (!stat.isFile() || stat.size > 10_000_000) { changed = true; return staleEvidence(hypothesis); } } catch { changed = true; return staleEvidence(hypothesis); }
 				try { content = await this.filesystem.readFile(path.resolve(root, ref.file), 'utf8'); }
-				catch { changed = true; return { ...hypothesis, status: 'stale' as const, updatedAt: new Date().toISOString() }; }
-				const lines = content.split(/\r?\n/);
-				if (ref.endLine! > lines.length) { changed = true; return { ...hypothesis, status: 'stale' as const, updatedAt: new Date().toISOString() }; }
-				const excerpt = lines.slice(ref.startLine! - 1, Math.min(ref.endLine!, ref.startLine! + 2)).join('\n').slice(0, 2_000);
-				if (crypto.createHash('sha256').update(excerpt).digest('hex') !== ref.contentHash) { changed = true; return { ...hypothesis, status: 'stale' as const, updatedAt: new Date().toISOString() }; }
+				catch { changed = true; return staleEvidence(hypothesis); }
+				let currentHash: string;
+				try { currentHash = hashSourceSpan(content, ref.startLine!, ref.endLine!); } catch { changed = true; return staleEvidence(hypothesis); }
+				if (currentHash !== ref.contentHash) { changed = true; return staleEvidence(hypothesis); }
 			}
 			return hypothesis;
 		}));
@@ -98,7 +101,9 @@ export class HypothesisStoreService {
 
 	private async read(root: string): Promise<HypothesisStore> {
 		const file = storePath(root);
+		await assertSafeStoreTarget(root, file, this.filesystem, true);
 		await this.recoverBackup(file);
+		await assertSafeStoreTarget(root, file, this.filesystem, true);
 		let raw: string;
 		try { raw = await this.filesystem.readFile(file, 'utf8'); }
 		catch (error) { if (isMissing(error)) {return emptyStore();} throw error; }
@@ -111,12 +116,15 @@ export class HypothesisStoreService {
 
 	private async write(root: string, store: HypothesisStore): Promise<void> {
 		const directory = path.dirname(storePath(root));
-		await this.filesystem.mkdir(directory, { recursive: true });
+		await assertSafeStoreDirectory(root, directory, this.filesystem, true);
 		const target = storePath(root);
+		await assertSafeStoreTarget(root, target, this.filesystem, true);
 		const temporary = `${target}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
 		const serialized = JSON.stringify(store, null, 2);
 		if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_CHARS) {throw new HypothesisStoreError('Hypothesis store exceeds the 5 MB safety limit; existing data was preserved.');}
-		await this.filesystem.writeFile(temporary, serialized, 'utf8');
+		if (!this.filesystem.writeFileExclusive) {throw new HypothesisStoreError('Filesystem exclusive-create support is required for safe hypothesis persistence.');}
+		await this.filesystem.writeFileExclusive(temporary, serialized, 'utf8');
+		await assertSafeStoreTarget(root, temporary, this.filesystem, false);
 		if (!(await this.filesystem.exists(target))) {
 			await this.filesystem.rename(temporary, target);
 			return;
@@ -138,8 +146,14 @@ export class HypothesisStoreService {
 		let entries: Array<string | { name: string }>;
 		try { entries = await this.filesystem.readdir(path.dirname(target)); } catch { return; }
 		const prefix = `${path.basename(target)}.`;
-		const backups = entries.map((entry) => typeof entry === 'string' ? entry : entry.name).filter((name) => name.startsWith(prefix) && name.endsWith('.bak')).sort();
-		if (backups.length > 0) {await this.filesystem.rename(path.join(path.dirname(target), backups[backups.length - 1]), target);}
+		const backups = entries.map((entry) => typeof entry === 'string' ? entry : entry.name).filter((name) => name.startsWith(prefix) && name.endsWith('.bak')).sort().reverse();
+		for (const backupName of backups) {
+			const backup = path.join(path.dirname(target), backupName);
+			try { await assertSafeStoreTarget(path.dirname(path.dirname(target)), backup, this.filesystem, false); }
+			catch { continue; }
+			await this.filesystem.rename(backup, target);
+			return;
+		}
 	}
 }
 
@@ -155,7 +169,7 @@ export function transition(status: HypothesisStatus, action: HypothesisReviewInp
 }
 
 function preserveReview(previous: SecurityHypothesis, candidate: SecurityHypothesis): SecurityHypothesis {
-	if (previous.status === 'validated' || previous.status === 'rejected') {return previous;}
+	if (previous.status === 'validated' || previous.status === 'rejected') {return { ...candidate, status: previous.status, createdAt: previous.createdAt, review: previous.review, evidenceFreshness: 'current' };}
 	if (previous.status === 'dismissed' || previous.status === 'investigating') {return { ...candidate, status: previous.status, createdAt: previous.createdAt, review: previous.review };}
 	if (previous.status === 'stale') {
 		const restoredStatus = previous.review?.action === 'dismiss' ? 'dismissed' : previous.review?.action === 'investigate' ? 'investigating' : candidate.status;
@@ -166,8 +180,15 @@ function preserveReview(previous: SecurityHypothesis, candidate: SecurityHypothe
 
 function emptyStore(): HypothesisStore { return { version: 1, scoringPolicyVersion: 1, updatedAt: '', hypotheses: [], snapshots: [] }; }
 function storePath(root: string): string { return path.join(path.resolve(root), '.aqiron-security', 'hypotheses.json'); }
-async function withWorkspaceLock<T>(root: string, filesystem: FileSystem, task: () => Promise<T>): Promise<T> {
-	const resolvedRoot = path.resolve(root);
+function staleEvidence(hypothesis: SecurityHypothesis): SecurityHypothesis {
+	const historical = hypothesis.status === 'validated' || hypothesis.status === 'rejected';
+	return { ...hypothesis, evidenceFreshness: 'stale', evidence: hypothesis.evidence.map((ref) => ({ ...ref, freshness: 'stale' })), updatedAt: new Date().toISOString(), ...(!historical ? { status: 'stale' as const } : {}) };
+}
+async function withWorkspaceLock<T>(root: string, filesystem: FileSystem, task: (safeRoot: string) => Promise<T>): Promise<T> {
+	const safeRoot = await physicalWorkspaceRoot(root, filesystem);
+	const directory = path.join(safeRoot, '.aqiron-security');
+	await assertSafeStoreDirectory(safeRoot, directory, filesystem, true);
+	const resolvedRoot = safeRoot;
 	const key = process.platform === 'win32' ? resolvedRoot.toLowerCase() : resolvedRoot;
 	const previous = locks.get(key) ?? Promise.resolve();
 	let release!: () => void;
@@ -177,27 +198,63 @@ async function withWorkspaceLock<T>(root: string, filesystem: FileSystem, task: 
 	await previous;
 	let releaseFileLock: (() => Promise<void>) | undefined;
 	try {
-		await filesystem.mkdir(path.dirname(storePath(root)), { recursive: true });
-		releaseFileLock = await acquireWorkspaceLock(path.resolve(root), filesystem);
-		return await task();
+		await assertSafeStoreDirectory(safeRoot, directory, filesystem, false);
+		releaseFileLock = await acquireWorkspaceLock(safeRoot, filesystem);
+		return await task(safeRoot);
 	}
 	finally { await releaseFileLock?.(); release(); if (locks.get(key) === queued) {locks.delete(key);} }
 }
 async function acquireWorkspaceLock(root: string, filesystem: FileSystem): Promise<() => Promise<void>> {
 	const lockPath = `${storePath(root)}.lock`;
 	const deadline = Date.now() + 15_000;
+	const token = crypto.randomBytes(16).toString('hex');
+	if (!filesystem.writeFileExclusive || !filesystem.unlink || !filesystem.rmdir || !filesystem.lstat || !filesystem.realpath) {throw new HypothesisStoreError('Hypothesis locks require exclusive create, lstat, realpath, unlink and rmdir filesystem support.');}
 	while (Date.now() < deadline) {
+		let createdLock = false;
 		try {
+			await assertSafeStoreTarget(root, storePath(root), filesystem, true);
 			await filesystem.mkdir(lockPath);
-			return async () => { try { await filesystem.rmdir?.(lockPath); } catch { /* stale-lock recovery handles interrupted releases */ } };
+			createdLock = true;
+			const lockStat = await filesystem.lstat!(lockPath);
+			if (lockStat.isSymbolicLink() || !lockStat.isDirectory() || !samePhysicalPath(await filesystem.realpath!(lockPath), lockPath)) {throw new HypothesisStoreError('Hypothesis lock path is not a safe workspace directory.');}
+			const ownerPath = path.join(lockPath, 'owner.json');
+			if (!filesystem.writeFileExclusive) {throw new Error('Filesystem exclusive-create support is required for lock ownership.');}
+			await filesystem.writeFileExclusive(ownerPath, JSON.stringify({ pid: process.pid, token }), 'utf8');
+			await assertRegularLockOwner(ownerPath, filesystem);
+			return async () => {
+				try {
+				const lockStat = await filesystem.lstat!(lockPath);
+				if (lockStat.isSymbolicLink() || !lockStat.isDirectory() || !samePhysicalPath(await filesystem.realpath!(lockPath), lockPath)) {return;}
+				await assertRegularLockOwner(ownerPath, filesystem);
+					const owner = JSON.parse(await filesystem.readFile(ownerPath, 'utf8')) as { token?: unknown };
+					if (owner.token === token) { await filesystem.unlink!(ownerPath); await filesystem.rmdir!(lockPath); }
+				} catch { /* ownership changed or storage is unavailable; never remove another owner's lock */ }
+			};
 		} catch (error) {
+			if (createdLock) {
+				try {
+					const lockStat = await filesystem.lstat!(lockPath);
+					if (lockStat.isSymbolicLink() || !lockStat.isDirectory() || !samePhysicalPath(await filesystem.realpath!(lockPath), lockPath)) {throw new Error('Lock path changed during acquisition.');}
+					const ownerPath = path.join(lockPath, 'owner.json');
+					try { await assertRegularLockOwner(ownerPath, filesystem); const owner = JSON.parse(await filesystem.readFile(ownerPath, 'utf8')) as { token?: unknown }; if (owner.token === token) { await filesystem.unlink!(ownerPath); } } catch (cleanupError) { if (!isMissing(cleanupError)) { throw cleanupError; } }
+					await filesystem.rmdir!(lockPath);
+				} catch { /* leave uncertain ownership untouched */ }
+			}
 			if (!isAlreadyExists(error)) {throw error;}
 			try {
-				const stat = await filesystem.stat(lockPath);
-				if (Date.now() - stat.mtimeMs > 120_000) {
+				if (!filesystem.lstat) {throw new Error('Filesystem lstat support is required for lock ownership.');}
+				const lockStat = await filesystem.lstat(lockPath);
+			if (lockStat.isSymbolicLink() || !lockStat.isDirectory() || !samePhysicalPath(await filesystem.realpath!(lockPath), lockPath)) {throw new Error('Hypothesis lock path is not a real directory.');}
+				const ownerPath = path.join(lockPath, 'owner.json');
+				let owner: { pid?: unknown; token?: unknown } | undefined;
+				try { await assertRegularLockOwner(ownerPath, filesystem); }
+				catch (ownerStatError) { if (!isMissing(ownerStatError)) { throw ownerStatError; } }
+				try { owner = JSON.parse(await filesystem.readFile(ownerPath, 'utf8')) as { pid?: unknown; token?: unknown }; } catch (ownerError) { if (!isMissing(ownerError)) { throw ownerError; } }
+				const staleOwner = Boolean(owner && Number.isInteger(owner.pid) && Number(owner.pid) > 0 && !isProcessAlive(owner.pid));
+				if (staleOwner) {
 					const stale = `${lockPath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.stale`;
 					await filesystem.rename(lockPath, stale);
-					try { await filesystem.rmdir?.(stale); } catch { /* an empty stale lock may be cleaned on a later pass */ }
+					try { await filesystem.unlink!(path.join(stale, 'owner.json')); await filesystem.rmdir!(stale); } catch { /* recovery cleanup is retried on the next pass */ }
 					continue;
 				}
 			} catch (inspectError) {
@@ -208,8 +265,68 @@ async function acquireWorkspaceLock(root: string, filesystem: FileSystem): Promi
 	}
 	throw Object.assign(new Error(`Hypothesis store is locked by another Core process: ${lockPath}`), { code: 'HYPOTHESIS_STORE_LOCKED' });
 }
+async function assertRegularLockOwner(ownerPath: string, filesystem: FileSystem): Promise<void> {
+	if (!filesystem.lstat || !filesystem.realpath) {throw new Error('Filesystem lstat/realpath support is required for hypothesis lock ownership.');}
+	const stat = await filesystem.lstat(ownerPath);
+	if (stat.isSymbolicLink() || !stat.isFile() || !samePhysicalPath(await filesystem.realpath(ownerPath), ownerPath)) {throw new Error('Hypothesis lock owner must be a regular file.');}
+}
+function samePhysicalPath(left: string, right: string): boolean {
+	const a = path.resolve(left), b = path.resolve(right);
+	return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+function isProcessAlive(pid: unknown): boolean {
+	if (!Number.isInteger(pid) || Number(pid) <= 0) {return false;}
+	try { process.kill(Number(pid), 0); return true; }
+	catch (error) { return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code !== 'ESRCH'); }
+}
 function isMissing(error: unknown): boolean { return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ENOENT'); }
 function isAlreadyExists(error: unknown): boolean { return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'EEXIST'); }
+async function physicalWorkspaceRoot(root: string, filesystem: FileSystem): Promise<string> {
+	if (!path.isAbsolute(root) || !filesystem.realpath || !filesystem.lstat) {throw new HypothesisStoreError('Hypothesis storage requires an absolute workspace and filesystem realpath/lstat support.');}
+	const actual = await filesystem.realpath(path.resolve(root));
+	const stat = await filesystem.lstat(actual);
+	if (!stat.isDirectory() || stat.isSymbolicLink()) {throw new HypothesisStoreError('Hypothesis workspace root must resolve to a physical directory.');}
+	return actual;
+}
+async function assertSafeStoreDirectory(root: string, directory: string, filesystem: FileSystem, create: boolean): Promise<void> {
+	if (!filesystem.lstat || !filesystem.realpath) {throw new HypothesisStoreError('Hypothesis storage requires filesystem realpath/lstat support; refusing unsafe access.');}
+	if (path.dirname(directory) !== root || path.basename(directory) !== '.aqiron-security') {throw new HypothesisStoreError('Hypothesis store directory escapes the workspace.');}
+	try {
+		let stat = await filesystem.lstat(directory);
+		if (stat.isSymbolicLink() || !stat.isDirectory()) {throw new HypothesisStoreError('The .aqiron-security path must be a real directory, not a symlink.');}
+	} catch (error) {
+		if (!isMissing(error) || !create) {throw error;}
+		await filesystem.mkdir(directory);
+		const stat = await filesystem.lstat(directory);
+		if (stat.isSymbolicLink() || !stat.isDirectory()) {throw new HypothesisStoreError('The .aqiron-security path changed during creation.');}
+	}
+	const actual = await filesystem.realpath(directory);
+	if (!samePhysicalPath(path.dirname(actual), root) || path.basename(actual).toLowerCase() !== '.aqiron-security') {throw new HypothesisStoreError('The .aqiron-security directory resolves outside the workspace.');}
+}
+async function assertSafeStoreTarget(root: string, target: string, filesystem: FileSystem, allowMissing: boolean): Promise<void> {
+	await assertSafeStoreDirectory(root, path.dirname(target), filesystem, false);
+	if (!filesystem.lstat || !filesystem.realpath) {throw new HypothesisStoreError('Hypothesis storage requires filesystem realpath/lstat support.');}
+	try {
+		const stat = await filesystem.lstat(target);
+		if (stat.isSymbolicLink() || !stat.isFile()) {throw new HypothesisStoreError('Hypothesis store artifacts must be regular files, not symlinks.');}
+		if (!samePhysicalPath(await filesystem.realpath(target), target)) {throw new HypothesisStoreError('Hypothesis store artifact resolves outside its expected workspace path.');}
+	} catch (error) { if (!allowMissing || !isMissing(error)) {throw error;} }
+}
+async function isSafeStoreRelativeFile(root: string, relative: string, filesystem: FileSystem): Promise<boolean> {
+	if (!filesystem.lstat || !filesystem.realpath || !relative || path.isAbsolute(relative) || relative.includes('\\') || relative.split('/').some((part) => !part || part === '..')) {return false;}
+	let current = root;
+	for (const part of relative.split('/')) {
+		current = path.join(current, part);
+		try { const stat = await filesystem.lstat(current); if (stat.isSymbolicLink()) {return false;} }
+		catch { return false; }
+	}
+	try {
+		const actual = await filesystem.realpath(current);
+		const rel = path.relative(root, actual);
+		const stat = await filesystem.lstat(actual);
+		return stat.isFile() && Boolean(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+	} catch { return false; }
+}
 function isStore(value: unknown): value is HypothesisStore {
 	if (!isRecord(value) || value.version !== 1 || value.scoringPolicyVersion !== 1 || (value.updatedAt !== '' && !isTimestamp(value.updatedAt)) || !Array.isArray(value.hypotheses) || !Array.isArray(value.snapshots) || value.hypotheses.length > MAX_HYPOTHESES || value.snapshots.length > MAX_SNAPSHOTS) {return false;}
 	if (Object.keys(value).some((key) => !['version','scoringPolicyVersion','updatedAt','hypotheses','snapshots'].includes(key))) {return false;}
@@ -226,8 +343,9 @@ function isHypothesis(value: unknown): value is SecurityHypothesis {
 		|| !Array.isArray(value.contradictions) || value.contradictions.length > 20
 		|| !isStringList(value.assumptions, 10, 500) || !isStringList(value.verificationSteps, 10, 500)
 		|| !isAsset(value.asset) || !isConfidence(value.confidence)) {return false;}
-	const allowedKeys = new Set(['id','title','description','weakness','attackPath','asset','evidence','rationale','confidence','assumptions','contradictions','impact','verificationSteps','status','createdAt','updatedAt','snapshotId','relatedFindingIds','relatedRuleIds','relatedHypothesisIds','review']);
+	const allowedKeys = new Set(['id','title','description','weakness','attackPath','asset','evidence','rationale','confidence','assumptions','contradictions','impact','verificationSteps','status','evidenceFreshness','createdAt','updatedAt','snapshotId','relatedFindingIds','relatedRuleIds','relatedHypothesisIds','review']);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key))) {return false;}
+	if (value.evidenceFreshness !== undefined && !['current','stale'].includes(String(value.evidenceFreshness))) {return false;}
 	if (![...value.evidence, ...value.contradictions].every(isEvidenceRef)) {return false;}
 	if (value.review !== undefined && !isReview(value.review)) {return false;}
 	const idLists = [value.relatedFindingIds, value.relatedRuleIds, value.relatedHypothesisIds];
