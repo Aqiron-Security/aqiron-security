@@ -3,6 +3,10 @@ import { CancellationTokenLike } from './cancellation';
 export interface FileSystem {
 	readFile(path: string, encoding: BufferEncoding): Promise<string>;
 	readFile(path: string): Promise<Uint8Array>;
+	/** Read and decode a file with an adapter-enforced byte ceiling (including concurrent growth). */
+	readFileBounded?(path: string, maxBytes: number, encoding: BufferEncoding): Promise<string>;
+	/** Read raw bytes with an adapter-enforced byte ceiling; errors may expose bytesRead including the overflow probe. */
+	readFileBoundedBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
 	writeFile(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
 	/** Create a new file only if the path does not already exist. */
 	writeFileExclusive?(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;

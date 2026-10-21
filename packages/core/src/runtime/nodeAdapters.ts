@@ -12,6 +12,29 @@ const statAsync = promisify(fs.stat);
 const accessAsync = promisify(fs.access);
 const renameAsync = promisify(fs.rename);
 
+async function readRawBounded(file: string, maxBytes: number): Promise<Uint8Array> {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {throw new RangeError('A non-negative bounded-read limit is required.');}
+	const handle = await fs.promises.open(file, 'r');
+	let total = 0;
+	try {
+		const initial = await handle.stat();
+		if (initial.size > maxBytes) {throw Object.assign(new Error(`File exceeds the ${maxBytes}-byte read limit.`), { code: 'FILE_TOO_LARGE', bytesRead: 0 });}
+		const chunks: Buffer[] = [];
+		while (total <= maxBytes) {
+			const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - total));
+			const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+			if (bytesRead === 0) {break;}
+			total += bytesRead;
+			if (total > maxBytes) {throw Object.assign(new Error(`File exceeds the ${maxBytes}-byte read limit.`), { code: 'FILE_TOO_LARGE', bytesRead: total });}
+			chunks.push(chunk.subarray(0, bytesRead));
+		}
+		return Buffer.concat(chunks, total);
+	} catch (error) {
+		if (error && typeof error === 'object') {Object.assign(error, { bytesRead: total });}
+		throw error;
+	} finally { await handle.close(); }
+}
+
 export function createNodeLogger(scope = 'aqiron-core'): Logger {
 	return {
 		debug(message: string, meta?: unknown): void {
@@ -42,6 +65,8 @@ export function createNodeFileSystem(): FileSystem {
 			}
 			return new Uint8Array(await readFileAsync(file));
 		}) as FileSystem['readFile'],
+		readFileBoundedBytes: readRawBounded,
+		readFileBounded: async (file: string, maxBytes: number, encoding: BufferEncoding): Promise<string> => Buffer.from(await readRawBounded(file, maxBytes)).toString(encoding),
 		writeFile: async (file: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void> => {
 			await mkdirAsync(path.dirname(file), { recursive: true });
 			await writeFileAsync(file, contents, encoding as BufferEncoding | undefined);

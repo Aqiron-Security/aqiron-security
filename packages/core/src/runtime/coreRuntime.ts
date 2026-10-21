@@ -28,7 +28,8 @@ import { aiSecretKeys } from '../ai/services/credentialService';
 import { parseRecommendationSourceDetailed } from '../shared/recommendations';
 import { HypothesisStoreService } from '../hypotheses/hypothesisStore';
 import { buildHypothesisSnapshot, generateDeterministicHypotheses } from '../hypotheses/hypothesisEngine';
-import { HypothesisGenerationResult, HypothesisReviewInput, HypothesisReviewResult, SecurityHypothesis } from '../hypotheses/contracts';
+import { HypothesisGenerationDiagnostics, HypothesisGenerationResult, HypothesisReviewInput, HypothesisReviewResult, SecurityHypothesis } from '../hypotheses/contracts';
+import { FindingSourceProvenance } from '../shared/sourceProvenance';
 
 interface CoreRuntimeOptions {
 	coreVersion: string;
@@ -40,6 +41,8 @@ interface CoreRuntimeOptions {
 interface ScanStateRecord {
 	state: ScanState;
 	result?: CoreScanStartResult;
+	sourceProvenance?: FindingSourceProvenance[];
+	excludedProvenanceCount?: number;
 }
 
 interface ActiveRequest {
@@ -267,7 +270,8 @@ export class CoreRuntime {
 
 	private async generateHypotheses(workspaceRoot: string, scanId: string, cancellationToken?: CancellationTokenLike): Promise<HypothesisGenerationResult> {
 		const root = this.resolveHypothesisRoot(workspaceRoot);
-		const scan = this.scans.get(scanId)?.result;
+		const scanRecord = this.scans.get(scanId);
+		const scan = scanRecord?.result;
 		if (!scan || scan.state.finalState !== 'completed' || normalizeWorkspaceIdentity(scan.state.workspaceRoot) !== normalizeWorkspaceIdentity(root)) {
 			return { status: 'no-evidence', scanId, hypotheses: [], diagnostics: [{ code: 'no-evidence', count: 1, message: 'No completed Core scan evidence is available for this workspace and scan ID.' }] };
 		}
@@ -275,17 +279,20 @@ export class CoreRuntime {
 		const profile = await detectProjectProfile(root, this.filesystem, this.projectOptions(root));
 		const snapshot = await buildHypothesisSnapshot({
 			workspaceRoot: root, scanId, findings: scan.findings, relationships: scan.correlation?.relationships ?? [],
-			profile, filesystem: this.filesystem, capturedAt: scan.state.completedAt, cancelled: () => Boolean(cancellationToken?.isCancellationRequested),
+			profile, filesystem: this.filesystem, scanProvenance: scanRecord?.sourceProvenance, capturedAt: scan.state.completedAt, cancelled: () => Boolean(cancellationToken?.isCancellationRequested),
 		});
 		if (cancellationToken?.isCancellationRequested) throw new Error('Core request cancelled.');
 		if (snapshot.findings.length === 0) {
 			await this.hypotheses.mergeGeneration(root, snapshot, [], () => Boolean(cancellationToken?.isCancellationRequested));
-			return { status: 'no-evidence', scanId, snapshotId: snapshot.id, hypotheses: [], diagnostics: [{ code: 'no-evidence', count: 1, message: 'The completed scan has no current findings with verified in-workspace source spans.' }] };
+			const unavailable = (snapshot.excludedUnprovenancedFindings ?? 0) + (scanRecord?.excludedProvenanceCount ?? 0);
+			return { status: 'no-evidence', scanId, snapshotId: snapshot.id, hypotheses: [], diagnostics: [{ code: 'no-evidence', count: Math.max(1, unavailable), message: unavailable ? 'Findings were excluded because scan-time provenance was missing, source changed or disappeared, reads failed or exceeded per-file/aggregate byte limits, or path/span validation failed.' : 'The completed scan has no findings with verified in-workspace source spans.' }] };
 		}
 		const candidates = generateDeterministicHypotheses(snapshot);
 		const store = await this.hypotheses.mergeGeneration(root, snapshot, candidates, () => Boolean(cancellationToken?.isCancellationRequested));
 		const generated = candidates.map((candidate) => store.hypotheses.find((item) => item.id === candidate.id) ?? candidate);
-		return { status: 'generated', scanId, snapshotId: snapshot.id, hypotheses: generated, diagnostics: candidates.length ? [] : [{ code: 'no-supported-rule', count: 1, message: 'Current verified evidence did not satisfy an allowlisted deterministic hypothesis rule.' }] };
+		const diagnostics: HypothesisGenerationDiagnostics[] = candidates.length ? [] : [{ code: 'no-supported-rule', count: 1, message: 'Current verified evidence did not satisfy an allowlisted deterministic hypothesis rule.' }];
+		if ((snapshot.excludedUnprovenancedFindings ?? 0) + (scanRecord?.excludedProvenanceCount ?? 0) > 0) diagnostics.push({ code: 'invalid-evidence', count: (snapshot.excludedUnprovenancedFindings ?? 0) + (scanRecord?.excludedProvenanceCount ?? 0), message: 'Some findings were excluded because provenance was unavailable, source changed or could not be read within the per-file/aggregate raw-byte budgets, or path/span validation failed.' });
+		return { status: 'generated', scanId, snapshotId: snapshot.id, hypotheses: generated, diagnostics };
 	}
 
 	private async reviewHypothesis(input: HypothesisReviewInput): Promise<HypothesisReviewResult> {
@@ -558,7 +565,7 @@ export class CoreRuntime {
 		});
 		const state: ScanState = { scanId, workspaceRoot: request.workspaceRoot, targetPath: request.targetPath ?? request.workspaceRoot, mode: request.mode ?? 'deep', stage: 'Idle', stageProgress: 100, scanners: [], findingsCount: result.findings.length, riskScore: result.findings.length ? Math.min(100, result.findings.length * 15) : 0, cancelled: false, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), reportStatus: 'completed', finalState: 'completed' };
 		const response: CoreScanStartResult = { scanId: result.scanId, state, findings: result.findings, report: result.report, filesScanned: result.filesScanned, durationMs: result.durationMs, toolResults: result.toolResults, correlation: result.correlation, graph: result.graph, telemetry: result.telemetry };
-		this.scans.set(scanId, { state, result: response });
+		this.scans.set(scanId, { state, result: response, sourceProvenance: result.sourceProvenance, excludedProvenanceCount: result.excludedProvenanceCount });
 		return response;
 	}
 
@@ -898,6 +905,8 @@ function validateRequest(value: unknown): value is CoreRequestMessage {
 	}
 	const input = (params ?? {}) as Record<string, unknown>;
 	const string = (key: string): boolean => typeof input[key] === 'string' && (input[key] as string).length > 0;
+	const hypothesisWorkspace = (): boolean => string('workspaceRoot') && String(input.workspaceRoot).length <= 4096 && !String(input.workspaceRoot).includes('\0') && String(input.workspaceRoot).trim() === String(input.workspaceRoot) && path.isAbsolute(String(input.workspaceRoot));
+	const hypothesisScanId = (): boolean => string('scanId') && /^[A-Za-z0-9._:-]{1,128}$/.test(String(input.scanId));
 	const optionalString = (key: string): boolean => input[key] === undefined || typeof input[key] === 'string';
 	switch (value.method) {
 		case 'core.health': case 'core.info': case 'core.shutdown': case 'ai.providers':
@@ -906,10 +915,10 @@ function validateRequest(value: unknown): value is CoreRequestMessage {
 		case 'core.cancel': return optionalString('requestId');
 		case 'project.detect': case 'project.profile': case 'rag.status': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('currentFile');
 		case 'workspace.rules.get': case 'workspace.threat-history.get': case 'workspace.agent-sessions.get': case 'workspace.recommendations.get': case 'workspace.reports.get': return string('workspaceRoot');
-		case 'hypotheses.generate': return string('workspaceRoot') && string('scanId') && path.isAbsolute(String(input.workspaceRoot));
-		case 'hypotheses.list': return string('workspaceRoot') && path.isAbsolute(String(input.workspaceRoot)) && (input.status === undefined || ['proposed', 'investigating', 'validated', 'rejected', 'dismissed', 'stale', 'unsubstantiated'].includes(String(input.status))) && (input.includeStale === undefined || typeof input.includeStale === 'boolean');
-		case 'hypotheses.get': return string('workspaceRoot') && path.isAbsolute(String(input.workspaceRoot)) && string('hypothesisId') && String(input.hypothesisId).length <= 80;
-		case 'hypotheses.review': return string('workspaceRoot') && path.isAbsolute(String(input.workspaceRoot)) && string('hypothesisId') && String(input.hypothesisId).length <= 80 && ['investigate', 'validate', 'reject', 'dismiss', 'reopen'].includes(String(input.action)) && (input.note === undefined || typeof input.note === 'string' && input.note.length <= 500) && (input.evidenceRefs === undefined || Array.isArray(input.evidenceRefs) && input.evidenceRefs.length <= 20 && input.evidenceRefs.every((item) => typeof item === 'string' && item.length <= 200));
+		case 'hypotheses.generate': return hypothesisWorkspace() && hypothesisScanId();
+		case 'hypotheses.list': return hypothesisWorkspace() && (input.status === undefined || ['proposed', 'investigating', 'validated', 'rejected', 'dismissed', 'stale', 'unsubstantiated'].includes(String(input.status))) && (input.includeStale === undefined || typeof input.includeStale === 'boolean');
+		case 'hypotheses.get': return hypothesisWorkspace() && string('hypothesisId') && String(input.hypothesisId).length <= 80;
+		case 'hypotheses.review': return hypothesisWorkspace() && string('hypothesisId') && String(input.hypothesisId).length <= 80 && ['investigate', 'validate', 'reject', 'dismiss', 'reopen'].includes(String(input.action)) && (input.note === undefined || typeof input.note === 'string' && input.note.length <= 500) && (input.evidenceRefs === undefined || Array.isArray(input.evidenceRefs) && input.evidenceRefs.length <= 20 && input.evidenceRefs.every((item) => typeof item === 'string' && item.length <= 200));
 		case 'workspace.threat-history.delete': return string('workspaceRoot') && string('snapshotId');
 		case 'workspace.agent-sessions.set': return string('workspaceRoot') && Array.isArray(input.sessions) && input.sessions.every(isAgentSession);
 		case 'workspace.rules.set': return string('workspaceRoot') && Array.isArray(input.rules) && validateRuleList(input.rules);

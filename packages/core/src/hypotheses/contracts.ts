@@ -15,6 +15,7 @@ export interface HypothesisEvidenceRef {
 	startLine?: number;
 	endLine?: number;
 	contentHash?: string;
+	fileContentHash?: string;
 	findingId?: string;
 	ruleId?: string;
 	relationshipId?: string;
@@ -46,7 +47,7 @@ export interface SecurityHypothesis {
 	verificationSteps: string[];
 	status: HypothesisStatus;
 	/** Current evidence state. A validated status records reviewer history and can coexist with stale evidence. */
-	evidenceFreshness?: 'current' | 'stale';
+	evidenceFreshness?: 'current' | 'stale' | 'provenance-unavailable';
 	createdAt: string;
 	updatedAt: string;
 	snapshotId: string;
@@ -66,6 +67,7 @@ export interface HypothesisSnapshot {
 	evidence: HypothesisEvidenceRef[];
 	findings: UnifiedFinding[];
 	relationships: CorrelatedRelationship[];
+	excludedUnprovenancedFindings?: number;
 }
 
 export type HypothesisDiagnosticCode = 'no-evidence' | 'invalid-evidence' | 'candidate-rejected' | 'candidate-deduplicated' | 'no-supported-rule';
@@ -94,12 +96,14 @@ export interface HypothesisReviewInput {
 export interface HypothesisReviewResult {
 	hypothesis: SecurityHypothesis;
 	applied: boolean;
-	diagnostic?: 'stale-evidence';
+	diagnostic?: 'stale-evidence' | 'provenance-unavailable';
 }
 
 export interface HypothesisStore {
 	version: 1;
 	scoringPolicyVersion: 1;
+	/** Monotonic committed store generation; absent legacy v1 stores are generation zero. */
+	generation?: number;
 	updatedAt: string;
 	hypotheses: SecurityHypothesis[];
 	snapshots: Array<Pick<HypothesisSnapshot, 'id' | 'scanId' | 'capturedAt' | 'fingerprint'>>;

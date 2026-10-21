@@ -11,9 +11,13 @@ import { SecurityGraph } from '../correlation/relationshipGraph';
 import { ScanTelemetrySnapshot } from '../telemetry';
 import { ResolvedWorkspaceScanPolicy } from '../shared/workspaceScanPolicy';
 import { WorkspaceCustomRule } from '../shared/workspaceRules';
+import { FindingSourceProvenance } from '../shared/sourceProvenance';
 
 export interface NativeScanResult {
 	findings: UnifiedFinding[];
+	/** Optional for adapters; only Core-native scanner provenance is currently trusted. */
+	sourceProvenance?: FindingSourceProvenance[];
+	excludedProvenanceCount?: number;
 	filesScanned: number;
 	durationMs: number;
 }
@@ -63,4 +67,7 @@ export interface CoreScanResult {
 	graph: SecurityGraph;
 	telemetry: ScanTelemetrySnapshot;
 	report: SecurityReportContent;
+	/** Internal scan-time provenance. Runtime retains it separately from public scan results. */
+	sourceProvenance?: FindingSourceProvenance[];
+	excludedProvenanceCount?: number;
 }

@@ -5,9 +5,12 @@ import { FileSystem } from '../../shared/platform';
 import { CoreFileScanResult, ResolvedFileScanPolicy } from '../../shared/fileScan';
 import { ResolvedWorkspaceScanPolicy } from '../../shared/workspaceScanPolicy';
 import { WorkspaceCustomRule } from '../../shared/workspaceRules';
+import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent } from '../../shared/sourceProvenance';
 
 export interface NativeRuleScanResult {
 	findings: UnifiedFinding[];
+	sourceProvenance?: FindingSourceProvenance[];
+	excludedProvenanceCount?: number;
 	filesScanned: number;
 	durationMs: number;
 }
@@ -58,6 +61,10 @@ export class NativeWorkspaceScanner {
 			? await collectPolicyFiles(root, root, this.filesystem, token, policy)
 			: await collectFiles(root, root, this.filesystem, token);
 		const findings: UnifiedFinding[] = [];
+		const sourceProvenance: FindingSourceProvenance[] = [];
+		let excludedProvenanceCount = 0;
+		let hashedSourceBytes = 0;
+		let hashedSpanBytes = 0;
 		let filesScanned = 0;
 		for (const file of files) {
 			if (token?.isCancellationRequested) {
@@ -67,7 +74,9 @@ export class NativeWorkspaceScanner {
 				const stat = policy ? await this.filesystem.stat(file) : undefined;
 				if (policy && stat && stat.size > policy.maxFileSizeBytes) {continue;}
 				const content = await this.filesystem.readFile(file, 'utf8');
+				const observedAt = new Date().toISOString();
 				if (policy && shouldSkipByWorkspacePolicy(file, root, content, policy)) {continue;}
+				let fileFindings: UnifiedFinding[];
 				if (policy) {
 					const filePolicy: ResolvedFileScanPolicy = {
 						supportedExtensions: policy.supportedExtensions,
@@ -80,20 +89,47 @@ export class NativeWorkspaceScanner {
 						customRules: policy.customRules,
 					};
 					const result = await this.scanFileContent(file, content, 'workspace', filePolicy, token);
-					findings.push(...result.findings.map(withWorkspaceSecretIdentity));
+					fileFindings = result.findings.map(withWorkspaceSecretIdentity);
 				} else {
-					findings.push(...scanFile(file, content));
+					fileFindings = scanFile(file, content);
 					if (coreRules.length) {
 						const rules = compileCustomRules(file, coreRules);
-						content.split(/\r?\n/).forEach((line, index) => findings.push(...scanCustomRuleLine(file, line, index, rules)));
+						content.split(/\r?\n/).forEach((line, index) => fileFindings.push(...scanCustomRuleLine(file, line, index, rules)));
 					}
 				}
+				const relative = path.relative(path.resolve(root), path.resolve(file));
+				const safeRelative = relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) ? relative.split(path.sep).join('/') : undefined;
+				const sourceBytes = Buffer.byteLength(content, 'utf8');
+				if (safeRelative && fileFindings.length > 0 && sourceBytes <= 10_000_000 && hashedSourceBytes + sourceBytes <= 50_000_000) {
+					hashedSourceBytes += sourceBytes;
+					const sourceContentHash = hashSourceContent(content);
+					const sourceLineIndex = createSourceLineIndex(content);
+					const spanHashes = new Map<string, string>();
+					for (const finding of fileFindings) {
+						if (sourceProvenance.length >= 10_000) {excludedProvenanceCount += 1; continue;}
+						const endLine = finding.endLine ?? finding.line;
+						try {
+							const spanKey = `${finding.line}-${endLine}`;
+							let contentHash = spanHashes.get(spanKey);
+							if (!contentHash) {
+								const spanBytes = sourceLineIndex.spanByteLength(finding.line, endLine);
+								if (hashedSpanBytes + spanBytes > 10_000_000) {throw new Error('Scan provenance span hash budget exceeded.');}
+								contentHash = sourceLineIndex.hashSpan(finding.line, endLine);
+								hashedSpanBytes += spanBytes;
+								spanHashes.set(spanKey, contentHash);
+							}
+							if (path.resolve(finding.file) !== path.resolve(file)) {throw new Error('Finding path does not match scanned file.');}
+							sourceProvenance.push({ findingId: finding.id, file: safeRelative, startLine: finding.line, endLine, contentHash, sourceContentHash, sourceTool: finding.sourceTool, ruleId: finding.ruleId, observedAt });
+						} catch { excludedProvenanceCount += 1; }
+					}
+				} else {excludedProvenanceCount += fileFindings.length;}
+				findings.push(...fileFindings);
 				filesScanned += 1;
 			} catch {
 				// Individual unreadable files do not abort the workspace scan.
 			}
 		}
-		return { findings, filesScanned: policy ? filesScanned : files.length, durationMs: Date.now() - startedAt };
+		return { findings, sourceProvenance, excludedProvenanceCount, filesScanned: policy ? filesScanned : files.length, durationMs: Date.now() - startedAt };
 	}
 }
 

@@ -4,12 +4,16 @@ import { CorrelatedRelationship } from '../correlation/correlationEngine';
 import { UnifiedFinding } from '../shared/finding';
 import { FileSystem } from '../shared/platform';
 import { ProjectProfile } from '../project/projectProfile';
+import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent } from '../shared/sourceProvenance';
+
+export { hashSourceSpan } from '../shared/sourceProvenance';
 import { ConfidenceFactor, HypothesisEvidenceRef, HypothesisSnapshot, SecurityHypothesis } from './contracts';
 
 const MAX_FINDINGS = 500;
 const MAX_RELATIONSHIPS = 1000;
 const MAX_SPAN_LINES = 20;
 const MAX_SOURCE_FILE_BYTES = 10_000_000;
+const MAX_SNAPSHOT_SOURCE_BYTES = 50_000_000;
 
 export async function buildHypothesisSnapshot(input: {
 	workspaceRoot: string;
@@ -19,7 +23,7 @@ export async function buildHypothesisSnapshot(input: {
 	profile: ProjectProfile;
 	filesystem: FileSystem;
 	/** Content hashes captured by the scanner at scan time, keyed by relative path and inclusive line range. */
-	scanSourceHashes?: Readonly<Record<string, string>>;
+	scanProvenance?: readonly FindingSourceProvenance[];
 	capturedAt?: string;
 	cancelled?: () => boolean;
 }): Promise<HypothesisSnapshot> {
@@ -27,37 +31,80 @@ export async function buildHypothesisSnapshot(input: {
 	const findings: UnifiedFinding[] = [];
 	const refs: HypothesisEvidenceRef[] = [];
 	const findingIds = new Set<string>();
+	const provenance = new Map((input.scanProvenance ?? []).map((item) => [item.findingId, item]));
+	let excludedUnprovenancedFindings = 0;
+	const byFile = new Map<string, Array<{ finding: UnifiedFinding; relative: string; recorded: FindingSourceProvenance }>>();
 	for (const finding of input.findings.slice(0, MAX_FINDINGS)) {
 		if (input.cancelled?.()) {throw new Error('Core request cancelled.');}
 		if (!finding || typeof finding.id !== 'string' || !finding.id || findingIds.has(finding.id)) {continue;}
+		const recorded = provenance.get(finding.id);
+		if (!recorded || recorded.sourceTool !== finding.sourceTool || recorded.ruleId !== finding.ruleId || recorded.startLine !== finding.line || recorded.endLine !== (finding.endLine ?? finding.line)) {excludedUnprovenancedFindings += 1; continue;}
 		const relative = findingPath(root, finding.file);
-		if (!relative || !Number.isInteger(finding.line) || finding.line < 1) {continue;}
-		if (!input.scanSourceHashes) {continue;}
+		if (!relative || recorded.file !== relative || !Number.isInteger(finding.line) || finding.line < 1) {excludedUnprovenancedFindings += 1; continue;}
 		const abs = path.resolve(root, relative);
-		if (!await isSafeWorkspaceFile(root, relative, input.filesystem)) {continue;}
-		try { const stat = await input.filesystem.stat(abs); if (!stat.isFile() || stat.size > MAX_SOURCE_FILE_BYTES) {continue;} } catch { continue; }
+		const key = process.platform === 'win32' ? abs.toLowerCase() : abs;
+		const group = byFile.get(key) ?? [];
+		group.push({ finding, relative, recorded });
+		byFile.set(key, group);
+	}
+	if (!input.filesystem.readFileBoundedBytes) {throw new Error('Hypothesis generation requires bounded raw-byte filesystem reads; evidence was not accepted.');}
+	let snapshotBytes = 0;
+	for (const group of byFile.values()) {
+		if (input.cancelled?.()) {throw new Error('Core request cancelled.');}
+		const { relative } = group[0];
+		const abs = path.resolve(root, relative);
+		if (!await isSafeWorkspaceFile(root, relative, input.filesystem)) {excludedUnprovenancedFindings += group.length; continue;}
+		let bytes: Uint8Array;
+		let readAttempted = false;
+		try {
+			const stat = await input.filesystem.stat(abs);
+			const remaining = MAX_SNAPSHOT_SOURCE_BYTES - snapshotBytes;
+			if (!stat.isFile() || stat.size > MAX_SOURCE_FILE_BYTES || stat.size > remaining || remaining <= 0) {excludedUnprovenancedFindings += group.length; continue;}
+			const readLimit = Math.min(MAX_SOURCE_FILE_BYTES, remaining);
+			readAttempted = true;
+			bytes = await input.filesystem.readFileBoundedBytes(abs, readLimit);
+			if (bytes.byteLength > readLimit) {
+				snapshotBytes = MAX_SNAPSHOT_SOURCE_BYTES;
+				excludedUnprovenancedFindings += group.length;
+				continue;
+			}
+			snapshotBytes += bytes.byteLength;
+		} catch (error) {
+			if (readAttempted) {
+				if (error && typeof error === 'object' && 'bytesRead' in error && Number.isSafeInteger((error as { bytesRead?: unknown }).bytesRead)) {snapshotBytes += Math.min(MAX_SNAPSHOT_SOURCE_BYTES - snapshotBytes, Number((error as { bytesRead: number }).bytesRead));}
+				else {snapshotBytes = MAX_SNAPSHOT_SOURCE_BYTES;}
+			}
+			excludedUnprovenancedFindings += group.length;
+			continue;
+		}
 		let content: string;
-		try { content = await input.filesystem.readFile(abs, 'utf8'); } catch { continue; }
-		const lines = content.split(/\r?\n/);
-		if (finding.line > lines.length) {continue;}
-		const endLine = finding.endLine ?? finding.line;
-		if (!Number.isInteger(endLine) || endLine < finding.line || endLine > lines.length || endLine - finding.line + 1 > MAX_SPAN_LINES) {continue;}
-		let hash: string;
-		try { hash = hashSourceSpan(content, finding.line, endLine); } catch { continue; }
-		if (input.scanSourceHashes[`${relative}:${finding.line}-${endLine}`] !== hash) {continue;}
-		const sourceRef: HypothesisEvidenceRef = {
-			id: `span:${relative}:${finding.line}-${endLine}:${hash.slice(0, 16)}`,
-			kind: 'source-span', source: 'Core filesystem snapshot', file: relative,
-			startLine: finding.line, endLine, contentHash: hash, findingId: finding.id, observedAt: new Date().toISOString(), freshness: 'current',
-		};
-		const findingRef: HypothesisEvidenceRef = {
-			id: `finding:${finding.id}`, kind: 'finding', source: finding.sourceTool, file: relative,
-			startLine: finding.line, endLine, contentHash: hash, findingId: finding.id, ruleId: finding.ruleId,
-			observedAt: new Date().toISOString(), freshness: 'current',
-		};
-		findingIds.add(finding.id);
-		findings.push(stripSensitiveEvidence(finding));
-		refs.push(sourceRef, findingRef);
+		try { content = Buffer.from(bytes).toString('utf8'); } catch {excludedUnprovenancedFindings += group.length; continue;}
+		const fileHash = hashSourceContent(content);
+		const sourceLineIndex = createSourceLineIndex(content);
+		const spanHashes = new Map<string, string | undefined>();
+		for (const { finding, recorded } of group) {
+			const endLine = finding.endLine ?? finding.line;
+			if (finding.line > sourceLineIndex.lineCount || !Number.isInteger(endLine) || endLine < finding.line || endLine > sourceLineIndex.lineCount || endLine - finding.line + 1 > MAX_SPAN_LINES) {excludedUnprovenancedFindings += 1; continue;}
+			const spanKey = `${finding.line}-${endLine}`;
+			if (!spanHashes.has(spanKey)) {
+				try { spanHashes.set(spanKey, sourceLineIndex.hashSpan(finding.line, endLine)); } catch { spanHashes.set(spanKey, undefined); }
+			}
+			const hash = spanHashes.get(spanKey);
+			if (!hash || recorded.contentHash !== hash || recorded.sourceContentHash !== fileHash) {excludedUnprovenancedFindings += 1; continue;}
+			const sourceRef: HypothesisEvidenceRef = {
+				id: `span:${relative}:${finding.line}-${endLine}:${hash.slice(0, 16)}`,
+				kind: 'source-span', source: 'Core filesystem snapshot', file: relative,
+				startLine: finding.line, endLine, contentHash: hash, fileContentHash: recorded.sourceContentHash, findingId: finding.id, observedAt: recorded.observedAt, freshness: 'current',
+			};
+			const findingRef: HypothesisEvidenceRef = {
+				id: `finding:${finding.id}`, kind: 'finding', source: finding.sourceTool, file: relative,
+				startLine: finding.line, endLine, contentHash: hash, findingId: finding.id, ruleId: finding.ruleId,
+				observedAt: recorded.observedAt, freshness: 'current',
+			};
+			findingIds.add(finding.id);
+			findings.push(stripSensitiveEvidence(finding));
+			refs.push(sourceRef, findingRef);
+		}
 	}
 	const relationships = input.relationships.slice(0, MAX_RELATIONSHIPS).filter((relationship) => {
 		if (!findingIds.has(relationship.sourceId) || !findingIds.has(relationship.targetId)) {return false;}
@@ -71,11 +118,11 @@ export async function buildHypothesisSnapshot(input: {
 	const capturedAt = input.capturedAt ?? new Date().toISOString();
 	const fingerprint = sha256(JSON.stringify({
 		scanId: input.scanId,
-		findings: findings.map((finding) => [finding.id, finding.ruleId, safeRelativePath(root, finding.file), finding.line, refs.find((ref) => ref.findingId === finding.id)?.contentHash]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+		findings: findings.map((finding) => [finding.id, finding.ruleId, safeRelativePath(root, finding.file), finding.line, refs.find((ref) => ref.findingId === finding.id)?.contentHash, refs.find((ref) => ref.findingId === finding.id && ref.kind === 'source-span')?.fileContentHash]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
 		relationships: relationships.map(relationshipKey).sort(),
 	}));
 	const id = `snapshot:${fingerprint.slice(0, 32)}`;
-	return { id, workspaceRoot: root, scanId: input.scanId, capturedAt, fingerprint, profile: input.profile, evidence: refs, findings, relationships };
+	return { id, workspaceRoot: root, scanId: input.scanId, capturedAt, fingerprint, profile: input.profile, evidence: refs, findings, relationships, excludedUnprovenancedFindings };
 }
 
 export function safeRelativePath(root: string, input: string): string | undefined {
@@ -86,15 +133,6 @@ export function safeRelativePath(root: string, input: string): string | undefine
 	const relative = path.relative(root, absolute);
 	if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {return undefined;}
 	return relative.split(path.sep).join('/');
-}
-
-/** Canonical source-span hashing: inclusive one-based lines, LF-normalized, complete span. */
-export function hashSourceSpan(content: string, startLine: number, endLine: number): string {
-	const lines = content.split(/\r\n|\n|\r/);
-	if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine || endLine > lines.length || endLine - startLine + 1 > MAX_SPAN_LINES) {throw new Error('Invalid or oversized source span.');}
-	const span = lines.slice(startLine - 1, endLine).join('\n');
-	if (Buffer.byteLength(span, 'utf8') > 64_000) {throw new Error('Source span exceeds the 64 KB evidence limit.');}
-	return sha256(span);
 }
 
 async function physicalWorkspaceRoot(root: string, filesystem: FileSystem): Promise<string> {
@@ -139,12 +177,12 @@ export function relationshipKey(relationship: CorrelatedRelationship): string {
 export function validateEvidenceReference(snapshot: HypothesisSnapshot, ref: HypothesisEvidenceRef): boolean {
 	if (!ref || ref.freshness !== 'current') {return false;}
 	const recorded = snapshot.evidence.find((candidate) => candidate.id === ref.id && candidate.kind === ref.kind);
-	if (!recorded || ['source', 'file', 'startLine', 'endLine', 'contentHash', 'findingId', 'ruleId', 'relationshipId', 'observedAt', 'freshness'].some((key) => (recorded as unknown as Record<string, unknown>)[key] !== (ref as unknown as Record<string, unknown>)[key])) {return false;}
+	if (!recorded || ['source', 'file', 'startLine', 'endLine', 'contentHash', 'fileContentHash', 'findingId', 'ruleId', 'relationshipId', 'observedAt', 'freshness'].some((key) => (recorded as unknown as Record<string, unknown>)[key] !== (ref as unknown as Record<string, unknown>)[key])) {return false;}
 	if (ref.file !== undefined && !safeRelativePath(snapshot.workspaceRoot, ref.file)) {return false;}
 	if ((ref.startLine !== undefined && (!Number.isInteger(ref.startLine) || ref.startLine < 1)) || (ref.endLine !== undefined && (!Number.isInteger(ref.endLine) || ref.endLine < (ref.startLine ?? 1)))) {return false;}
 	if (ref.kind === 'finding') {return Boolean(ref.findingId && snapshot.findings.some((finding) => finding.id === ref.findingId && finding.ruleId === ref.ruleId));}
 	if (ref.kind === 'relationship') {return Boolean(ref.relationshipId && snapshot.relationships.some((relationship) => relationshipKey(relationship) === ref.relationshipId));}
-	if (ref.kind === 'source-span') {return Boolean(ref.file && ref.contentHash && /^[a-f0-9]{64}$/.test(ref.contentHash));}
+	if (ref.kind === 'source-span') {return Boolean(ref.file && ref.contentHash && /^[a-f0-9]{64}$/.test(ref.contentHash) && ref.fileContentHash && /^[a-f0-9]{64}$/.test(ref.fileContentHash));}
 	return false;
 }
 
