@@ -3,12 +3,31 @@ const path = require('node:path');
 
 const summaryPath = process.env.AQIRON_VSCODE_TEST_SUMMARY
 	?? path.resolve(process.env.AQIRON_TEST_OUTDIR ?? 'out', 'vscode-test-summary.json');
+const runnerOutcome = process.env.AQIRON_VSCODE_TEST_OUTCOME ?? 'unknown';
+
+function report(message) {
+	console.log(message);
+	const stepSummary = process.env.GITHUB_STEP_SUMMARY;
+	if (stepSummary) {
+		fs.appendFileSync(stepSummary, `${message}\n`);
+	}
+}
+
+if (runnerOutcome === 'skipped') {
+	report('VS Code extension-host tests: NOT RUN (the workflow skipped the runner step); no test counts are available.');
+	process.exit(0);
+}
+
+if (!['success', 'failure', 'cancelled'].includes(runnerOutcome)) {
+	console.error(`VS Code extension-host runner outcome is unavailable or invalid (${runnerOutcome}); no test result can be accepted.`);
+	process.exit(1);
+}
 
 let summary;
 try {
 	summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
 } catch {
-	console.error(`VS Code test summary is missing or invalid: ${summaryPath}`);
+	console.error(`VS Code extension-host runner outcome: ${runnerOutcome}; no valid test summary was produced. Execution and test counts are unverified.`);
 	process.exit(1);
 }
 
@@ -19,7 +38,7 @@ if (![tests, passes, failures, pending].every(Number.isSafeInteger)
 	process.exit(1);
 }
 
-console.log(`VS Code extension-host tests: ${passes} passed, ${failures} failed, ${pending} skipped (${tests} total).`);
-if (failures > 0) {
+report(`VS Code extension-host tests: ${passes} passed, ${failures} failed, ${pending} skipped (${tests} total); runner outcome: ${runnerOutcome}.`);
+if (failures > 0 || runnerOutcome !== 'success') {
 	process.exit(1);
 }

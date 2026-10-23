@@ -17,7 +17,11 @@ import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent, MAX_
 import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/nativeScanner';
 import { createNodeFileSystem } from '../../packages/core/src/runtime/nodeAdapters';
 
-suite('Core deterministic hypothesis engine', () => {
+suite('Core deterministic hypothesis engine', function () {
+	// These integration tests exercise filesystem persistence, cross-process
+	// locks, and large bounded reads. Their total runtime is normally short, but
+	// individual operations can exceed Mocha's 2-second default on CI runners.
+	this.timeout(15_000);
 	test('builds a stable snapshot from verified findings and emits only the allowlisted malware attribution hypothesis', async () => {
 		const root = await testRoot('snapshot');
 		try {

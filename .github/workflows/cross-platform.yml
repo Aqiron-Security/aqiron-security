@@ -63,6 +63,9 @@ jobs:
       - name: Compile tests to a fresh directory
         run: npx tsc -p . --outDir .ci-compiled-tests
 
+      - name: Test extension-host summary reporting
+        run: node --test scripts/verify-vscode-test-summary.test.cjs
+
       - name: Build Core and run focused lifecycle, transport, protocol, and runtime suites
         run: |
           npm run core:build
@@ -75,15 +78,19 @@ jobs:
         run: npm run compile
 
       - name: Run VS Code extension-host tests
+        id: vscode_test_native
         if: runner.os != 'Linux'
         run: npx vscode-test --fail-zero --jobs 1
 
       - name: Run VS Code extension-host tests under Xvfb
+        id: vscode_test_xvfb
         if: runner.os == 'Linux'
         run: xvfb-run -a npx vscode-test --fail-zero --jobs 1
 
-      - name: Verify extension-host test summary
+      - name: Report extension-host test result
         if: always()
+        env:
+          AQIRON_VSCODE_TEST_OUTCOME: ${{ runner.os == 'Linux' && steps.vscode_test_xvfb.outcome || steps.vscode_test_native.outcome }}
         run: node scripts/verify-vscode-test-summary.cjs
 
       - name: Build Desktop frontend

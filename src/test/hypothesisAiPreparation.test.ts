@@ -480,7 +480,11 @@ suite('Hypothesis AI disclosure preparation', () => {
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 
-	test('snapshot gate rejects concurrent builds and releases its permit after a failed preparation', async () => {
+	test('snapshot gate rejects concurrent builds and releases its permit after a failed preparation', async function () {
+		// This integration test performs several real filesystem reads around a
+		// controlled barrier. Keep Mocha's short 2-second default from turning a
+		// slow CI filesystem into a false lifecycle failure.
+		this.timeout(15_000);
 		const root = await testRoot('preview-snapshot-gate');
 		try {
 			const fixture = await seedRuntime(root, 'gate source\n', { id: 'finding-gate', title: 'T', description: 'D' });
