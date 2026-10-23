@@ -56,6 +56,29 @@ suite('Core deterministic hypothesis engine', function () {
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 
+	test('matches lexical finding paths to a separately resolved physical workspace root', async () => {
+		const lexicalRoot = await testRoot('lexical-workspace');
+		const physicalRoot = await testRoot('physical-workspace');
+		try {
+			const relativeFile = 'src/source.ts';
+			const content = 'const platformIndependent = true;\n';
+			const physicalFile = path.join(physicalRoot, relativeFile);
+			await fs.mkdir(path.dirname(physicalFile), { recursive: true });
+			await fs.writeFile(physicalFile, content);
+			const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file: path.join(lexicalRoot, relativeFile), line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.lexical-path', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+			const filesystem = createFileSystem();
+			const nativeRealpath = filesystem.realpath!;
+			filesystem.realpath = async (value) => path.resolve(value) === path.resolve(lexicalRoot) ? physicalRoot : nativeRealpath(value);
+			let bytesReadFrom: string | undefined;
+			const nativeBoundedRead = filesystem.readFileBoundedBytes!;
+			filesystem.readFileBoundedBytes = async (file, limit) => { bytesReadFrom = file; return await nativeBoundedRead(file, limit); };
+			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: lexicalRoot, scanId: 'lexical-scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(lexicalRoot), filesystem, scanProvenance: makeProvenance(finding, lexicalRoot, content) });
+			assert.equal(bytesReadFrom, physicalFile, 'bounded reads use the physical root after lexical provenance validation');
+			assert.equal(snapshot.findings.length, 1);
+			assert.equal(snapshot.evidence.find((ref) => ref.kind === 'source-span')?.file, relativeFile);
+		} finally { await fs.rm(lexicalRoot, { recursive: true, force: true }); await fs.rm(physicalRoot, { recursive: true, force: true }); }
+	});
+
 	test('rejects fabricated references, absolute/traversal paths, and stale references', async () => {
 		const root = await testRoot('evidence');
 		try {
@@ -858,8 +881,8 @@ suite('Core deterministic hypothesis engine', function () {
 				await fs.mkdir(storeDirectory);
 				await assert.rejects(new HypothesisStoreService(createFileSystem({ symlinkPaths: [storeDirectory] })).list(root));
 				const backupPath = path.join(storeDirectory, 'hypotheses.json.1.abc.bak');
-				await assert.rejects(fs.lstat(backupPath));
-				await assert.doesNotReject(new HypothesisStoreService(createFileSystem({ symlinkPaths: [backupPath] })).list(root));
+				await fs.writeFile(backupPath, '{}');
+				await assert.rejects(new HypothesisStoreService(createFileSystem({ symlinkPaths: [backupPath] })).list(root), { code: 'HYPOTHESIS_STORE_RECOVERY_REQUIRED' });
 				const lockPath = `${path.join(storeDirectory, 'hypotheses.json')}.lock`;
 				await fs.rm(lockPath, { recursive: true, force: true });
 				await fs.mkdir(lockPath);
@@ -887,7 +910,7 @@ suite('Core deterministic hypothesis engine', function () {
 			await assert.rejects(createFileSystem().writeFileExclusive!(tempSymlink, 'overwrite', 'utf8'));
 			assert.equal(await fs.readFile(outsideStore, 'utf8'), '{"external":true}');
 			await fs.symlink(outside, path.join(root, '.aqiron-security', 'hypotheses.json.1.abc.bak'), 'dir');
-			assert.equal((await service.list(root)).hypotheses.length, 0);
+			await assert.rejects(service.list(root), { code: 'HYPOTHESIS_STORE_RECOVERY_REQUIRED' });
 			await fs.symlink(outside, `${path.join(root, '.aqiron-security', 'hypotheses.json')}.lock`, 'dir');
 			await assert.rejects(service.list(root));
 			await fs.writeFile(path.join(outside, 'external.ts'), 'const outside = true;\n');

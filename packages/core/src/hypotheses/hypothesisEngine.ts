@@ -29,10 +29,15 @@ export async function buildHypothesisSnapshot(input: {
 	/** Optional operation budget shared with a later verification/read stage. */
 	readBudget?: SourceReadBudget;
 }): Promise<HypothesisSnapshot> {
-	const root = await physicalWorkspaceRoot(input.workspaceRoot, input.filesystem);
+	// Findings and scanner provenance are recorded against the lexical workspace
+	// root. Keep that identity for path validation, then use the physical root only
+	// for filesystem reads and symlink containment checks.
+	const lexicalRoot = path.resolve(input.workspaceRoot);
+	const root = await physicalWorkspaceRoot(lexicalRoot, input.filesystem);
 	const findings: UnifiedFinding[] = [];
 	const refs: HypothesisEvidenceRef[] = [];
 	const findingIds = new Set<string>();
+	const findingRelativePaths = new Map<string, string>();
 	const provenance = new Map((input.scanProvenance ?? []).map((item) => [item.findingId, item]));
 	let excludedUnprovenancedFindings = 0;
 	const byFile = new Map<string, Array<{ finding: UnifiedFinding; relative: string; recorded: FindingSourceProvenance }>>();
@@ -41,8 +46,9 @@ export async function buildHypothesisSnapshot(input: {
 		if (!finding || typeof finding.id !== 'string' || !finding.id || findingIds.has(finding.id)) {continue;}
 		const recorded = provenance.get(finding.id);
 		if (!recorded || recorded.sourceTool !== finding.sourceTool || recorded.ruleId !== finding.ruleId || recorded.startLine !== finding.line || recorded.endLine !== (finding.endLine ?? finding.line)) {excludedUnprovenancedFindings += 1; continue;}
-		const relative = findingPath(root, finding.file);
+		const relative = findingPath(lexicalRoot, finding.file);
 		if (!relative || recorded.file !== relative || !Number.isInteger(finding.line) || finding.line < 1) {excludedUnprovenancedFindings += 1; continue;}
+		findingRelativePaths.set(finding.id, relative);
 		const abs = path.resolve(root, relative);
 		const key = process.platform === 'win32' ? abs.toLowerCase() : abs;
 		const group = byFile.get(key) ?? [];
@@ -123,7 +129,7 @@ export async function buildHypothesisSnapshot(input: {
 	const capturedAt = input.capturedAt ?? new Date().toISOString();
 	const fingerprint = sha256(JSON.stringify({
 		scanId: input.scanId,
-		findings: findings.map((finding) => [finding.id, finding.ruleId, safeRelativePath(root, finding.file), finding.line, refs.find((ref) => ref.findingId === finding.id)?.contentHash, refs.find((ref) => ref.findingId === finding.id && ref.kind === 'source-span')?.fileContentHash]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+		findings: findings.map((finding) => [finding.id, finding.ruleId, findingRelativePaths.get(finding.id), finding.line, refs.find((ref) => ref.findingId === finding.id)?.contentHash, refs.find((ref) => ref.findingId === finding.id && ref.kind === 'source-span')?.fileContentHash]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
 		relationships: relationships.map(relationshipKey).sort(),
 	}));
 	const id = `snapshot:${fingerprint.slice(0, 32)}`;
