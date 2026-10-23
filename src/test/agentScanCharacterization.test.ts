@@ -91,10 +91,75 @@ suite('AI agent scan characterization', () => {
 				currentFile: fixtureRoot,
 			});
 			assert.deepEqual(result.issues?.map(issue => [issue.id, issue.file, issue.ruleId, issue.severity]), [[finding.id, finding.file, finding.ruleId, finding.severity]]);
-			assert.equal(result.content, 'Workspace scan complete. Scanned 17 files and found 1 issue.');
+			assert.equal(result.content, 'Workspace scan completed, but coverage diagnostics are unavailable. Scanned 17 files and found 1 issue. Full coverage could not be confirmed because skip diagnostics were not reported or were invalid.');
 			assert.deepEqual(result.commands, [{ label: 'Run Aqiron workspace scan', command: 'workspace.scan', status: 'complete' }]);
-			assert.deepEqual({ filesScanned: result.stats?.filesScanned, indexedFiles: result.stats?.indexedFiles, scanStatus: result.stats?.scanStatus }, { filesScanned: 17, indexedFiles: 17, scanStatus: 'Complete' });
+			assert.deepEqual({ filesScanned: result.stats?.filesScanned, indexedFiles: result.stats?.indexedFiles, scanStatus: result.stats?.scanStatus, coverageDiagnosticsAvailable: result.stats?.coverageDiagnosticsAvailable }, { filesScanned: 17, indexedFiles: 17, scanStatus: 'Complete', coverageDiagnosticsAvailable: false });
 			assert.ok(typeof result.stats?.lastScanDurationMs === 'number' && result.stats.lastScanDurationMs >= 0);
+		});
+	});
+
+	test('workspace tool reports partial coverage and filters malformed diagnostic labels', async () => {
+		await withFlutterFixture(async fixtureRoot => {
+			const finding = makeFinding(path.join(fixtureRoot, 'lib', 'vulnerable.dart'), 'high.eval');
+			const provider = harness(undefined, () => undefined, [], undefined, {
+				findings: [finding], filesScanned: 3, skippedFiles: 2, skipReasons: { 'line-limit': 1, '<img onerror=alert(1)>': 1 }, durationMs: 4,
+			});
+			const result = await provider.runWorkspaceScan();
+			assert.match(result.content, /finished with incomplete coverage/);
+			assert.match(result.content, /2 files were skipped/);
+			assert.match(result.content, /line-limit 1/);
+			assert.doesNotMatch(result.content, /<img|onerror/);
+			assert.equal(result.stats?.filesScanned, 3);
+			assert.equal(result.stats?.skippedFiles, 2);
+			assert.deepEqual(result.stats?.skipReasons, { 'line-limit': 1 });
+		});
+	});
+
+	test('agent scan messages classify unavailable, partial, clean, and malformed diagnostics conservatively', async () => {
+		await withFlutterFixture(async () => {
+			const missingWorkspace = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1 });
+			const missingWorkspaceResult = await missingWorkspace.runWorkspaceScan();
+			assert.match(missingWorkspaceResult.content, /coverage diagnostics are unavailable/);
+			assert.match(missingWorkspaceResult.content, /full coverage could not be confirmed/);
+			assert.equal(missingWorkspaceResult.stats?.coverageDiagnosticsAvailable, false);
+
+			const invalidExplicit = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skippedFiles: -1, skipReasons: { 'line-limit': 1 } });
+			const invalidExplicitResult = await invalidExplicit.runWorkspaceScan();
+			assert.match(invalidExplicitResult.content, /finished with incomplete coverage/);
+			assert.match(invalidExplicitResult.content, /1 file was skipped/);
+			assert.deepEqual(invalidExplicitResult.stats?.skipReasons, { 'line-limit': 1 });
+
+			const zeroWithReasons = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skippedFiles: 0, skipReasons: { 'size-limit': 2 } });
+			const zeroWithReasonsResult = await zeroWithReasons.runWorkspaceScan();
+			assert.match(zeroWithReasonsResult.content, /finished with incomplete coverage/);
+			assert.match(zeroWithReasonsResult.content, /2 files were skipped/);
+
+			const missingCountWithReasons = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skipReasons: { 'line-limit': 1 } });
+			const missingCountResult = await missingCountWithReasons.runWorkspaceScan();
+			assert.match(missingCountResult.content, /finished with incomplete coverage/);
+			assert.match(missingCountResult.content, /1 file was skipped/);
+
+			const cleanWorkspace = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skippedFiles: 0, skipReasons: {} });
+			assert.equal((await cleanWorkspace.runWorkspaceScan()).content, 'Workspace scan complete. Scanned 2 files and found 0 issues.');
+
+			const missingSecrets = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1 });
+			const missingSecretsResult = await missingSecrets.runSecretsScan();
+			assert.match(missingSecretsResult.content, /Secret scan completed, but coverage diagnostics are unavailable/);
+			assert.match(missingSecretsResult.content, /full coverage could not be confirmed/);
+
+			const invalidSecrets = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skippedFiles: Number.NaN, skipReasons: { 'line-limit': 1, '<img onerror=alert(1)>': 9, 'bad\u001b[31m': 2, 'size-limit': Number.MAX_VALUE } });
+			const invalidSecretsResult = await invalidSecrets.runSecretsScan();
+			assert.match(invalidSecretsResult.content, /finished with incomplete coverage/);
+			assert.match(invalidSecretsResult.content, /line-limit 1/);
+			assert.doesNotMatch(invalidSecretsResult.content, /<img|onerror|\u001b|size-limit/);
+
+			const overflow = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skipReasons: { first: Number.MAX_SAFE_INTEGER, second: 1 } });
+			const overflowResult = await overflow.runWorkspaceScan();
+			assert.match(overflowResult.content, new RegExp(`at least ${Number.MAX_SAFE_INTEGER} files were skipped`));
+			assert.equal(overflowResult.stats?.skippedFilesIsLowerBound, true);
+
+			const cleanSecrets = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skippedFiles: 0, skipReasons: {} });
+			assert.equal((await cleanSecrets.runSecretsScan()).content, 'Secret scan complete. I scanned 2 files and found no hardcoded API keys, passwords, tokens, or private key material with the current Aqiron rules.');
 		});
 	});
 
@@ -115,7 +180,7 @@ suite('AI agent scan characterization', () => {
 			const provider = harness(undefined, () => undefined);
 			const result = await provider.runWorkspaceScan();
 			assert.equal(provider.coreRequests.length, 0);
-			assert.equal(result.content, 'Workspace scan complete. Scanned 0 files and found 0 issues.');
+			assert.equal(result.content, 'Workspace scan unavailable for this project type. No files were analyzed, so coverage could not be assessed.');
 			assert.equal(result.stats?.filesScanned, 0);
 		});
 	});
@@ -156,7 +221,8 @@ suite('AI agent scan characterization', () => {
 			const result = await provider.runSecretsScan();
 			assert.equal(provider.coreRequests.length, 0);
 			assert.equal(provider.legacyCalls, 0);
-			assert.match(result.content, /scanned 0 files and found no hardcoded/);
+			assert.match(result.content, /Secret scan unavailable for this workspace type/);
+			assert.match(result.content, /coverage and secret findings could not be assessed/);
 			assert.equal(result.stats?.filesScanned, 0);
 		});
 	});
@@ -211,7 +277,7 @@ suite('AI agent scan characterization', () => {
 			const nonSecret = makeFinding(path.join(fixtureRoot, 'lib', 'three.dart'), 'high.eval');
 			const mixedCaseSecret = makeFinding(path.join(fixtureRoot, 'lib', 'four.dart'), 'critical.Secret');
 			const provider = harness(undefined, () => undefined, [existingSecret, existingNonSecret], undefined, {
-				findings: [secretOne, nonSecret, secretTwo, mixedCaseSecret], filesScanned: 9, durationMs: 20,
+				findings: [secretOne, nonSecret, secretTwo, mixedCaseSecret], filesScanned: 9, durationMs: 20, skippedFiles: 0, skipReasons: {},
 			});
 			const result = await provider.runSecretsScan();
 			assert.match(result.content, /Found 2 potential secret findings/);
@@ -236,7 +302,7 @@ suite('AI agent scan characterization', () => {
 	test('secret tool returns the no-findings message and an empty secret projection', async () => {
 		await withFlutterFixture(async fixtureRoot => {
 			const nonSecret = makeFinding(path.join(fixtureRoot, 'lib', 'safe.dart'), 'high.eval');
-			const provider = harness(undefined, () => undefined, [], undefined, { findings: [nonSecret], filesScanned: 4, durationMs: 10 });
+			const provider = harness(undefined, () => undefined, [], undefined, { findings: [nonSecret], filesScanned: 4, durationMs: 10, skippedFiles: 0, skipReasons: {} });
 			const result = await provider.runSecretsScan();
 			assert.equal(result.content, 'Secret scan complete. I scanned 4 files and found no hardcoded API keys, passwords, tokens, or private key material with the current Aqiron rules.');
 			assert.deepEqual(result.issues, []);
@@ -383,6 +449,8 @@ function harness(
 		findings: UnifiedFinding[];
 		filesScanned: number;
 		durationMs: number;
+		skippedFiles?: number;
+		skipReasons?: Partial<Record<string, number>>;
 		execute?: (request: CoreScanStartRequest, events: EventEmitter) => Promise<CoreScanStartResult>;
 		onStart?: (request: CoreScanStartRequest, events: EventEmitter) => void;
 		defer?: () => Promise<CoreScanStartResult>;
@@ -411,7 +479,7 @@ function harness(
 			if (error) { throw error; }
 			if (coreOptions?.execute) {return await coreOptions.execute(request, coreEvents);}
 			if (coreOptions?.defer) { return await coreOptions.defer(); }
-			return makeCoreResult(coreOptions?.findings ?? [], coreOptions?.filesScanned ?? 0, coreOptions?.durationMs ?? 0);
+			return { ...makeCoreResult(coreOptions?.findings ?? [], coreOptions?.filesScanned ?? 0, coreOptions?.durationMs ?? 0), skippedFiles: coreOptions?.skippedFiles, skipReasons: coreOptions?.skipReasons };
 		},
 		async cancelRequest(requestId: string) {
 			provider.cancelRequests.push(requestId);

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CoreClient } from '../../core/src/client';
 import { CoreScanStartResult } from '../../core/src/runtime/protocol';
+import { formatSkippedFileCount, normalizeScanCoverage } from '../../core/src/shared/scanCoverage';
 
 export interface CliOutput { write(text: string): void; }
 export interface CliEvent { event: string; requestId?: string; payload?: unknown; }
@@ -125,10 +126,20 @@ function renderResult(format: Format, result: CoreScanStartResult): string {
 	if (format === 'pdf') { return result.report.pdf; }
 	if (format === 'sarif') { return `${JSON.stringify(result.report.sarif, null, 2)}\n`; }
 	if (format === 'json') {
-		return `${JSON.stringify({ schemaVersion: 1, scan: { scanId: result.scanId, mode: result.state.mode, filesScanned: result.filesScanned ?? null, durationMs: result.durationMs ?? null }, report: result.report.json }, null, 2)}\n`;
+		const diagnostics = scanDiagnostics(result);
+		return `${JSON.stringify({ schemaVersion: 1, scan: { scanId: result.scanId, mode: result.state.mode, filesScanned: result.filesScanned ?? null, durationMs: result.durationMs ?? null, coverageDiagnosticsAvailable: diagnostics.coverageDiagnosticsAvailable, coverageDiagnosticsPresent: diagnostics.coverageDiagnosticsPresent, coverageDiagnosticsValid: diagnostics.coverageDiagnosticsValid, coverageStatus: diagnostics.coverageStatus, skippedFilesCountCertainty: diagnostics.skippedFilesCountCertainty, skipCountConflict: diagnostics.skipCountConflict, ...(diagnostics.coverageDiagnosticsAvailable ? { skippedFiles: diagnostics.skippedFiles } : {}), ...(diagnostics.skippedFilesIsLowerBound ? { skippedFilesIsLowerBound: true } : {}), ...(diagnostics.skipReasonsTruncated ? { skipReasonsTruncated: true } : {}), ...(result.skipReasons !== undefined ? { skipReasons: diagnostics.skipReasons } : {}) }, report: result.report.json }, null, 2)}\n`;
 	}
 	const counts = countSeverities(result);
-	return `\nFindings: ${result.findings.length}\nCritical: ${counts.Critical}\nHigh:     ${counts.High}\nMedium:   ${counts.Medium}\nLow:      ${counts.Low}\nDuration: ${((result.durationMs ?? 0) / 1000).toFixed(1)}s\n`;
+	const diagnostics = scanDiagnostics(result);
+	const formattedReasons = Object.entries(diagnostics.skipReasons).map(([reason, count]) => `${reason} (${count})`).join(', ');
+	const coverage = diagnostics.skippedFiles
+		? `Coverage: Partial (${formatSkippedFileCount(diagnostics)} file${diagnostics.skippedFiles === 1 ? '' : 's'} skipped${diagnostics.skipCountConflict ? '; conflicting totals, exact count unavailable' : ''})\n${formattedReasons ? `Skip reasons: ${formattedReasons}${diagnostics.skipReasonsTruncated ? ' (additional reason categories omitted)' : ''}\n` : ''}`
+		: diagnostics.coverageDiagnosticsAvailable ? '' : 'Coverage: Unavailable (Core did not provide valid skip diagnostics)\n';
+	return `\nFindings: ${result.findings.length}\nCritical: ${counts.Critical}\nHigh:     ${counts.High}\nMedium:   ${counts.Medium}\nLow:      ${counts.Low}\nDuration: ${((result.durationMs ?? 0) / 1000).toFixed(1)}s\n${coverage}`;
+}
+
+function scanDiagnostics(result: CoreScanStartResult) {
+	return normalizeScanCoverage(result.skippedFiles, result.skipReasons);
 }
 
 function writeResult(args: ScanArgs, content: string, stdout: CliOutput, encoding: BufferEncoding): void {

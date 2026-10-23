@@ -142,6 +142,9 @@ export class OpenRouterProvider extends BaseProvider implements AIProvider {
 					method: 'POST',
 					timeoutMs: req.timeoutMs,
 					abortSignal: req.abortSignal,
+					maxRequestBodyBytes: req.transportLimits?.maxRequestBodyBytes,
+					maxResponseBodyBytes: req.transportLimits?.maxResponseBodyBytes,
+					maxSseEventBytes: req.transportLimits?.maxSseEventBytes,
 					headers: {
 						Authorization: auth,
 						'HTTP-Referer': 'https://aqiron-security.local',
@@ -160,21 +163,12 @@ export class OpenRouterProvider extends BaseProvider implements AIProvider {
 				{ retries: req.retries, shouldRetry: isTransientError },
 			);
 		} catch (error) {
-			if (error instanceof AIHttpError) {
-				const details = error.providerError;
-				this.onRequestRejected?.({
-					status: error.status,
-					providerId: this.id,
-					modelId: req.model,
-					message: error.message,
-					bodyFormat: details?.bodyFormat ?? 'empty',
-					...(details?.code ? { errorCode: details.code } : {}),
-					...(details?.errorType ? { errorType: details.errorType } : {}),
-					...(details?.providerCode ? { providerCode: details.providerCode } : {}),
-					...(details?.parameter ? { parameter: details.parameter } : {}),
-				});
-			}
-			throw error;
+			const safeError = error instanceof AIHttpError
+				? new AIHttpError(error.status)
+				: new AIHttpError(req.abortSignal?.aborted ? 408 : 502);
+			try { this.onRequestRejected?.({ status: safeError.status, category: safeError.category }); }
+			catch { /* Diagnostics callbacks must not replace the safe provider error. */ }
+			throw safeError;
 		}
 		const diagnostics: OpenRouterResponseDiagnostics = {
 			status: response.status,
@@ -269,10 +263,10 @@ export class OpenRouterProvider extends BaseProvider implements AIProvider {
 						completionFinishReason = finishReason;
 					}
 				}
-			})) {
+			}, req.transportLimits?.maxResponseBodyBytes, req.transportLimits?.maxSseEventBytes)) {
 				const chunk = item as OpenRouterChunk;
 				if (chunk.error?.message) {
-					yield { type: 'error', error: chunk.error.message };
+					yield { type: 'error', error: 'The provider returned an error response.' };
 					continue;
 				}
 				const choice = chunk.choices?.[0];

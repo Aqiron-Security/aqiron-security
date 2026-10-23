@@ -2,6 +2,7 @@ import React, { Suspense, lazy, memo, useEffect, useMemo, useState } from 'react
 import { AnimatePresence, motion } from 'framer-motion';
 import { Section, WebviewHostApi, WebviewState } from './types.js';
 import { AqironBadge, AqironButton, AqironIconButton, AqironSectionHeader } from './design/primitives.js';
+import { formatSkippedFileCount, normalizeScanCoverage, scanCoverageLabel } from '../../shared/scanCoverage';
 
 declare global {
 	interface Window { __AQIRON_DESKTOP__?: boolean; }
@@ -21,6 +22,10 @@ interface Props {
 
 export function AqironApp({ initialState, hostApi }: Props): React.ReactElement {
 	const [state, setState] = useState(initialState);
+	const coverage = normalizeScanCoverage(state.stats.skippedFiles, state.stats.skipReasons, state.stats.skippedFilesIsLowerBound, state.stats);
+	const displayedSkippedFiles = coverage.skippedFiles;
+	const hasSkippedFiles = displayedSkippedFiles > 0;
+	const coverageLabel = scanCoverageLabel(state.stats.scanStatus, { ...coverage, coverageDiagnosticsAvailable: hasSkippedFiles || (state.stats.coverageDiagnosticsAvailable !== false && coverage.coverageDiagnosticsAvailable) });
 
 	useEffect(() => {
 		const listener = (event: MessageEvent<{ type: string; state: WebviewState }>) => {
@@ -51,7 +56,7 @@ export function AqironApp({ initialState, hostApi }: Props): React.ReactElement 
 				<header className="aq-top">
 					<DashboardHero state={state} />
 					<div className="orb-actions">
-						<span className={`aq-status ${getScanStatusTone(state.stats.scanStatus)}`} aria-label={`Scan status: ${state.stats.scanStatus}`}>{state.stats.scanStatus}</span>
+						<span className={`aq-status ${getScanStatusTone(state.stats.scanStatus, coverageLabel)}`} aria-label={`Scan status: ${coverageLabel}`}>{coverageLabel}</span>
 						{window.__AQIRON_DESKTOP__ && <AqironButton type="button" variant="secondary" onClick={() => post('selectWorkspace')}>{state.workspace.root ? 'Change project' : 'Select project'}</AqironButton>}
 						<AqironIconButton className="top-settings" aria-label="Open settings" onClick={() => post('focus', 'settings')}><span className="codicon codicon-settings-gear" aria-hidden="true" /></AqironIconButton>
 						<div className="orb-wrap">
@@ -59,7 +64,7 @@ export function AqironApp({ initialState, hostApi }: Props): React.ReactElement 
 						<div className="orb-pop">
 							<strong>{state.workspace.risk} posture</strong>
 							<span>{state.counts.total} open findings across {state.counts.filesAffected} files</span>
-							<span>{state.stats.scanStatus === 'Scanning' ? 'Scan in progress' : `${state.stats.filesScanned} files scanned`}</span>
+							<span>{state.stats.scanStatus === 'Scanning' ? 'Scan in progress' : `${state.stats.filesScanned} files analyzed${hasSkippedFiles ? `; ${formatSkippedFileCount(coverage)} skipped` : coverageLabel === 'Coverage unavailable' ? '; coverage diagnostics unavailable' : ''}`}</span>
 						</div>
 						</div>
 					</div>
@@ -202,7 +207,6 @@ function sanitizeAssetUrl(url: string | undefined | null): string {
 	}
 	return '';
 }
-
 function tabIcon(tab: Section, state: WebviewState): string {
 	if (tab === 'agent') {
 		return state.assets.agentIcon;
@@ -232,13 +236,14 @@ function getOrbState(state: WebviewState): string {
 	return 'green';
 }
 
-function getScanStatusTone(status: WebviewState['stats']['scanStatus']): string {
+function getScanStatusTone(status: WebviewState['stats']['scanStatus'], coverageLabel: string): string {
 	if (status === 'Scanning') {
 		return 'aq-status--info';
 	}
-	if (status === 'Complete') {
+	if (status === 'Complete' && coverageLabel === 'Complete') {
 		return 'aq-status--success';
 	}
+	if (status === 'Complete' && coverageLabel !== 'Complete') { return 'aq-status--warning'; }
 	if (status === 'Failed') {
 		return 'aq-status--danger';
 	}

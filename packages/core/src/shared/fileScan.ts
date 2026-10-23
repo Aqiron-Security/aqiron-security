@@ -40,7 +40,7 @@ export interface CoreFileScanResult {
 	scanId: string;
 	filePath: string;
 	state: 'completed' | 'skipped';
-	skipReason?: 'ineligible' | 'excluded' | 'unsupported' | 'generated' | 'minified' | 'compiled' | 'size-limit';
+	skipReason?: 'ineligible' | 'excluded' | 'unsupported' | 'generated' | 'minified' | 'compiled' | 'size-limit' | 'line-limit';
 	findings: UnifiedFinding[];
 	filesScanned: 0 | 1;
 	findingCount: number;

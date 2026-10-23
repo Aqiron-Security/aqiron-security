@@ -53,6 +53,16 @@ suite('Host-neutral Core client', () => {
 		assert.deepEqual(transport.methods, ['hypotheses.generate', 'hypotheses.list', 'hypotheses.get', 'hypotheses.review']);
 	});
 
+	test('routes explicit AI approval, denial, and execution references through Core', async () => {
+		const transport = new RecordingTransport();
+		const client = new CoreClient({ clientVersion: 'test-client', runtimePath, restartOnCrash: false }, transport);
+		const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+		await client.approveHypothesisAiPreparation(id, 'a'.repeat(64));
+		await client.denyHypothesisAiPreparation(id, 'a'.repeat(64));
+		await client.executeHypothesisAiPreparation(id, 'a'.repeat(64), 'execution-request-1');
+		assert.deepEqual(transport.methods, ['hypotheses.ai.approve', 'hypotheses.ai.deny', 'hypotheses.ai.execute']);
+	});
+
 	test('the host-neutral client has no VS Code or scanner implementation dependencies', () => {
 		const clientRoot = path.resolve(__dirname, '../../../packages/core/src/client');
 		const sources = ['coreClient.ts', 'coreProcessManager.ts', 'index.ts'].map((file) => fsSyncRead(path.join(clientRoot, file))).join('\n');

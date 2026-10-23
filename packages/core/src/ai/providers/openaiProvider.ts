@@ -30,11 +30,14 @@ export class OpenAIProvider extends BaseProvider implements AIProvider {
 			const settings = await this.getSettings();
 			return await this.transport.request(`${this.endpoint}/chat/completions`, {
 				method: 'POST', timeoutMs: req.timeoutMs, abortSignal: req.abortSignal,
+				maxRequestBodyBytes: req.transportLimits?.maxRequestBodyBytes,
+				maxResponseBodyBytes: req.transportLimits?.maxResponseBodyBytes,
+				maxSseEventBytes: req.transportLimits?.maxSseEventBytes,
 				headers: { Authorization: await this.getAuthHeader() },
 				body: { model: req.model, messages: req.messages, stream: true, temperature: req.temperature, max_tokens: req.maxTokens },
 			});
 		}, { retries: req.retries, shouldRetry: isTransientError });
-		for await (const item of parseSseStream(response)) {
+		for await (const item of parseSseStream(response, undefined, req.transportLimits?.maxResponseBodyBytes, req.transportLimits?.maxSseEventBytes)) {
 			const chunk = item as OpenAIChunk;
 			const choice = chunk.choices?.[0];
 			if (choice?.delta?.content) yield { type: 'token', content: choice.delta.content };

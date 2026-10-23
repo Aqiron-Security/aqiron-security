@@ -13,7 +13,7 @@ import { HypothesisStoreError, HypothesisStoreService, transition } from '../../
 import { FileSystem } from '../../packages/core/src/shared/platform';
 import { AITransport } from '../../packages/core/src/ai/utils/request';
 import * as sourceProvenance from '../../packages/core/src/shared/sourceProvenance';
-import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent } from '../../packages/core/src/shared/sourceProvenance';
+import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent, MAX_SOURCE_LINE_INDEX_LINES } from '../../packages/core/src/shared/sourceProvenance';
 import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/nativeScanner';
 import { createNodeFileSystem } from '../../packages/core/src/runtime/nodeAdapters';
 
@@ -644,6 +644,59 @@ suite('Core deterministic hypothesis engine', () => {
 			} finally { mutableProvenance.createSourceLineIndex = originalCreateIndex; }
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
+
+	test('rejects over-limit newline-heavy files before line-array allocation and skips them safely in native scanning', async () => {
+		const root = await testRoot('line-index-limit');
+		const sourcePath = path.join(root, 'newline-heavy.ts');
+		const content = '\n'.repeat(MAX_SOURCE_LINE_INDEX_LINES);
+		const originalSplit = String.prototype.split;
+		let wholeFileSplits = 0;
+		const instrumented = String.prototype as unknown as { split: (this: string, separator?: string | RegExp, limit?: number) => string[] };
+		instrumented.split = function (this: string, separator?: string | RegExp, limit?: number): string[] {
+			if (this === content && separator instanceof RegExp && separator.source === '\\r?\\n') {wholeFileSplits += 1;}
+			return Reflect.apply(originalSplit, this, [separator, limit]) as string[];
+		};
+		try {
+			await fs.writeFile(sourcePath, content);
+			assert.throws(() => createSourceLineIndex(content), /line indexing limit/);
+			assert.equal(wholeFileSplits, 0, 'line count is checked before split allocates the line array');
+			const finding = createFinding({ title: 'Line-boundary test', description: 'Observed', severity: 'Low', cwe: [], owasp: [], file: sourcePath, line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'line.limit', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+			const provenance: FindingSourceProvenance = { findingId: finding.id, file: 'newline-heavy.ts', startLine: 1, endLine: 1, contentHash: 'a'.repeat(64), sourceContentHash: hashSourceContent(content), sourceTool: finding.sourceTool, ruleId: finding.ruleId, observedAt: '2026-10-21T00:00:00.000Z' };
+			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: 'line-limit', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createFileSystem(), scanProvenance: [provenance] });
+			assert.equal(snapshot.evidence.some((ref) => ref.kind === 'source-span'), false, 'over-limit content cannot produce current source provenance');
+			assert.equal(snapshot.excludedUnprovenancedFindings, 1);
+			const native = await new NativeWorkspaceScanner({} as never).scanFileContent(sourcePath, content, 'line-limit', {} as never);
+			assert.equal(native.state, 'skipped');
+			assert.equal(native.skipReason, 'line-limit');
+		} finally {instrumented.split = originalSplit as typeof instrumented.split; await fs.rm(root, { recursive: true, force: true });}
+	});
+
+		test('workspace scan counts only analysed files and reports line-limit skips with or without policy', async () => {
+			const root = await testRoot('workspace-line-limit-report');
+			const oversizedPath = path.join(root, 'oversized.ts');
+			try {
+				await fs.writeFile(path.join(root, 'normal.ts'), 'OBSERVED_MARKER\n');
+				await fs.writeFile(oversizedPath, '\n'.repeat(MAX_SOURCE_LINE_INDEX_LINES));
+				const scanner = new NativeWorkspaceScanner(createFileSystem());
+				const withoutPolicy = await scanner.scanWorkspace(root, undefined, undefined, [testRule()]);
+				assert.equal(withoutPolicy.filesScanned, 1, 'the skipped file is not counted as analysed');
+				assert.equal(withoutPolicy.skippedFiles, 1);
+				assert.deepEqual(withoutPolicy.skipReasons, { 'line-limit': 1 });
+				assert.ok(withoutPolicy.findings.some((finding) => finding.file.endsWith('normal.ts')), 'normal-file findings are retained');
+				assert.ok(withoutPolicy.sourceProvenance?.every((item) => item.file !== 'oversized.ts'), 'no current provenance is emitted for the skipped file');
+
+				await fs.writeFile(path.join(root, 'generated.ts'), '// @generated\nOBSERVED_MARKER\n');
+				const withPolicy = await scanner.scanWorkspace(root, undefined, {
+					supportedExtensions: ['.ts'], excludedDirectoryPaths: [], excludedFileNamePatterns: [], aqExclusionPatterns: [],
+					maxFileSizeBytes: 1_000_000, customRules: [testRule()], skipGeneratedFiles: true, skipMinifiedFiles: false, skipCompiledFiles: false,
+				});
+				assert.equal(withPolicy.filesScanned, 1, 'workspace-policy scanning uses the same analysed-file count');
+				assert.equal(withPolicy.skippedFiles, 2);
+				assert.deepEqual(withPolicy.skipReasons, { 'line-limit': 1, 'workspace-policy': 1 });
+				assert.ok(withPolicy.findings.some((finding) => finding.file.endsWith('normal.ts')));
+				assert.ok(withPolicy.sourceProvenance?.every((item) => item.file !== 'oversized.ts'));
+			} finally { await fs.rm(root, { recursive: true, force: true }); }
+		});
 
 	test('caps native scan provenance at the configured record count', async () => {
 		const root = await testRoot('provenance-record-cap');

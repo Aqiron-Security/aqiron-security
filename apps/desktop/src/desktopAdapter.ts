@@ -3,9 +3,10 @@ import type { UnifiedFinding } from '../../../packages/core/src/shared/finding.j
 import { countFindings, mapFinding } from '../../../packages/desktop/src/findings.js';
 import { providerName } from '../../../src/webview/ui/providerOptions.js';
 import { buildWorkspaceRecommendations } from '../../../src/agents/recommendations.js';
+import { normalizeScanCoverage, statsForHistoricalSnapshot, statsWithoutSelectedSnapshot } from '../../../src/shared/scanCoverage.js';
 import aqironLogo from '../src-tauri/icons/aqiron-security-logo.png';
 type DesktopCoreEvent = { event?: string; requestId?: string; payload?: Record<string, unknown> };
-type DesktopCommand = 'project.detect' | 'project.profile' | 'scan.start' | 'rag.index' | 'ai.providers' | 'ai.models' | 'ai.chat' | 'ai.cancel' | 'credentials.status' | 'credentials.set' | 'credentials.delete' | 'workspace.rules.get' | 'workspace.rules.set' | 'workspace.threat-history.get' | 'workspace.threat-history.delete' | 'workspace.reports.get' | 'workspace.agent-sessions.get' | 'workspace.agent-sessions.set' | 'workspace.recommendations.get';
+type DesktopCommand = 'project.detect' | 'project.profile' | 'scan.start' | 'rag.index' | 'ai.providers' | 'ai.models' | 'ai.chat' | 'ai.cancel' | 'core.cancel' | 'credentials.status' | 'credentials.set' | 'credentials.delete' | 'workspace.rules.get' | 'workspace.rules.set' | 'workspace.threat-history.get' | 'workspace.threat-history.delete' | 'workspace.reports.get' | 'workspace.agent-sessions.get' | 'workspace.agent-sessions.set' | 'workspace.recommendations.get' | 'hypotheses.ai.prepare' | 'hypotheses.ai.approve' | 'hypotheses.ai.deny' | 'hypotheses.ai.execute';
 
 const EMPTY = makeInitialState();
 
@@ -17,6 +18,8 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 	let pickerRequest = 0;
 	let reportBundle: { json: unknown; sarif: unknown; pdf: string } | undefined;
 	let refreshingRecommendations = false;
+	let hypothesisRequestBusy = false;
+	let hypothesisExecutionRequestId: string | undefined;
 	let coreAiSettings: Record<string, unknown> = {};
 	const credentialKey = (id: string) => `aqiron.ai.api.${id}`;
 	const refreshProviders = async () => {
@@ -51,12 +54,16 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 		if (!workspaceRoot || !state.threatSnapshots.some((snapshot) => snapshot.id === snapshotId)) return;
 		try {
 			const result = await core('workspace.threat-history.delete', { snapshotId }) as { snapshots: StoredThreatSnapshot[] };
-			const snapshots = result.snapshots.map((snapshot) => ({ ...snapshot, issues: snapshot.issues.map((issue) => mapStoredIssue(issue, workspaceRoot!)) }));
+			const snapshots = result.snapshots.map((snapshot) => {
+				const previous = state.threatSnapshots.find((entry) => entry.id === snapshot.id);
+				const liveCoverage = previous?.coverageDiagnosticsAvailable === true;
+				return { ...snapshot, coverageDiagnosticsAvailable: liveCoverage, coverageDiagnosticsPresent: liveCoverage ? previous.coverageDiagnosticsPresent : false, coverageDiagnosticsValid: liveCoverage ? previous.coverageDiagnosticsValid : false, coverageStatus: liveCoverage ? previous.coverageStatus : 'unavailable' as const, ...(liveCoverage ? { skippedFiles: previous.skippedFiles, skippedFilesIsLowerBound: previous.skippedFilesIsLowerBound, skippedFilesCountCertainty: previous.skippedFilesCountCertainty, skipCountConflict: previous.skipCountConflict, skipReasonsTruncated: previous.skipReasonsTruncated, skipReasons: previous.skipReasons } : { skippedFiles: undefined, skippedFilesIsLowerBound: undefined, skippedFilesCountCertainty: 'indeterminate' as const, skipCountConflict: false, skipReasonsTruncated: false, skipReasons: undefined }), issues: snapshot.issues.map((issue) => mapStoredIssue(issue, workspaceRoot!)) };
+			});
 			const activeId = state.activeThreatSnapshotId === snapshotId ? snapshots[0]?.id : state.activeThreatSnapshotId;
 			const active = snapshots.find((snapshot) => snapshot.id === activeId);
 			const issues = active?.issues ?? (state.activeThreatSnapshotId === snapshotId ? [] : state.issues);
 			const counts = countFindings(issues);
-			update({ threatSnapshots: snapshots, activeThreatSnapshotId: activeId, issues, counts, selectedThreatId: issues[0]?.id, suggestions: rebuildRecommendations(issues), stats: active ? { ...state.stats, filesScanned: active.filesScanned, indexedFiles: active.filesScanned, scanStatus: 'Complete' } : state.activeThreatSnapshotId === snapshotId ? { ...state.stats, filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete' } : state.stats, workspace: { ...state.workspace, risk: counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure' } });
+			update({ threatSnapshots: snapshots, activeThreatSnapshotId: activeId, issues, counts, selectedThreatId: issues[0]?.id, suggestions: rebuildRecommendations(issues), stats: active ? statsForHistoricalSnapshot(state.stats, active) : state.activeThreatSnapshotId === snapshotId ? statsWithoutSelectedSnapshot(state.stats) : state.stats, workspace: { ...state.workspace, risk: counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure' } });
 		} catch (error) { window.alert(`Could not delete threat report: ${error instanceof Error ? error.message : String(error)}`); }
 	};
 	const removeProviderCredentials = async (providerId: string) => {
@@ -161,7 +168,11 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 		state = { ...state, ...next };
 		window.dispatchEvent(new MessageEvent('message', { data: { type: 'state', state } }));
 	};
-	const core = (method: DesktopCommand, params: unknown = {}) => import('@tauri-apps/api/core').then(({ invoke }) => invoke<unknown>('core_request', { method, params }));
+	const core = (method: DesktopCommand, params: unknown = {}, requestId?: string) => import('@tauri-apps/api/core').then(({ invoke }) => invoke<unknown>('core_request', { method, params, ...(requestId ? { requestId } : {}) }));
+	const requestCancellationForActiveHypothesis = () => {
+		const requestId = hypothesisExecutionRequestId;
+		if (requestId) { void core('core.cancel', { requestId }).catch(() => undefined); }
+	};
 	void import('@tauri-apps/api/event').then(({ listen }) => listen<DesktopCoreEvent>('desktop-core-event', ({ payload }) => {
 		const event = payload.event ?? '';
 		if (event === 'ai.token' && typeof payload.requestId === 'string' && typeof payload.payload?.content === 'string') {
@@ -184,23 +195,25 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 	}));
 	const scan = async (mode: 'quick' | 'deep' | 'analysis' = 'deep') => {
 		if (!workspaceRoot || scanning) { return; }
+		requestCancellationForActiveHypothesis();
 		const scanRoot = workspaceRoot;
-		const scanVersion = selectionVersion;
+		const scanVersion = ++selectionVersion;
 		scanning = true;
-		update({ section: 'scan', stats: { ...state.stats, scanStatus: 'Scanning' }, pipeline: { stages: [], tools: [], logs: ['Starting Aqiron Core scan…'] } });
+		update({ section: 'scan', coreScanId: undefined, hypothesisAiConsent: undefined, stats: { ...state.stats, scanStatus: 'Scanning' }, pipeline: { stages: [], tools: [], logs: ['Starting Aqiron Core scan…'] } });
 		try {
-			const result = await core('scan.start', { workspaceRoot, trusted: true, mode }) as { findings: UnifiedFinding[]; filesScanned?: number; durationMs?: number; report?: { model: { generatedAt: string; executiveSummary: string; summary: WebviewState['counts'] }; json: unknown; text: string; sarif: unknown; pdf: string }; scanId?: string };
+			const result = await core('scan.start', { workspaceRoot, trusted: true, mode }) as { findings: UnifiedFinding[]; filesScanned?: number; skippedFiles?: number; skipReasons?: Partial<Record<string, number>>; durationMs?: number; report?: { model: { generatedAt: string; executiveSummary: string; summary: WebviewState['counts'] }; json: unknown; text: string; sarif: unknown; pdf: string }; scanId?: string };
 			if (scanVersion !== selectionVersion) { return; }
 			reportBundle = result.report;
 			const issues = (result.findings ?? []).map((finding) => mapFinding(finding, scanRoot));
 			const counts = countFindings(issues);
 			const risk = counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure';
 			const filesScanned = result.filesScanned ?? 0;
-			update({ section: 'threats', issues, counts, suggestions: rebuildRecommendations(issues), selectedThreatId: issues[0]?.id,
-				stats: { filesScanned, indexedFiles: filesScanned, scanStatus: 'Complete', lastScanDurationMs: result.durationMs ?? 0 },
+			const coverage = normalizeScanCoverage(result.skippedFiles, result.skipReasons);
+			update({ section: 'threats', coreScanId: result.scanId, hypothesisAiConsent: undefined, issues, counts, suggestions: rebuildRecommendations(issues), selectedThreatId: issues[0]?.id,
+				stats: { filesScanned, indexedFiles: filesScanned, ...coverage, scanStatus: 'Complete', lastScanDurationMs: result.durationMs ?? 0 },
 				workspace: { ...state.workspace, risk },
 				pipeline: { ...state.pipeline, stages: state.pipeline.stages.map((stage) => ({ ...stage, status: 'completed', progress: 100 })), lastReport: { executiveSummary: result.report?.model?.executiveSummary, reportData: result.report ? { model: { generatedAt: result.report.model.generatedAt, executiveSummary: result.report.model.executiveSummary, summary: result.report.model.summary }, text: result.report.text } : undefined, artifactsAvailable: { pdf: Boolean(result.report?.pdf), json: Boolean(result.report?.json), sarif: Boolean(result.report?.sarif) } } },
-				threatSnapshots: [{ id: result.scanId ?? String(Date.now()), title: 'Latest scan', createdAt: new Date().toISOString(), filesScanned, executiveSummary: result.report?.model?.executiveSummary, issues }],
+				threatSnapshots: [{ id: result.scanId ?? String(Date.now()), title: 'Latest scan', createdAt: new Date().toISOString(), filesScanned, ...coverage, executiveSummary: result.report?.model?.executiveSummary, issues }],
 				activeThreatSnapshotId: result.scanId,
 			});
 		} catch (error) {
@@ -209,12 +222,13 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 		} finally { scanning = false; }
 	};
 	const loadWorkspace = async (selection: string, request: number) => {
+		requestCancellationForActiveHypothesis();
 		const selectedVersion = ++selectionVersion;
 		workspaceRoot = selection;
 		reportBundle = undefined;
 		update({ desktopProjectError: undefined, desktopProjectLoading: true,
 			workspace: { ...state.workspace, name: folderName(selection), root: undefined, types: [], status: 'Indexing', risk: 'Secure', backend: 'Aqiron Core' },
-			issues: [], selectedThreatId: undefined, counts: emptyCounts(), threatSnapshots: [], activeThreatSnapshotId: undefined,
+			issues: [], coreScanId: undefined, hypothesisAiConsent: undefined, selectedThreatId: undefined, counts: emptyCounts(), threatSnapshots: [], activeThreatSnapshotId: undefined,
 			stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Idle', lastScanDurationMs: 0 },
 			pipeline: { stages: [], tools: [], logs: [] },
 			ai: { ...state.ai, providers: [], models: [], filteredModels: [], apiCredentials: [], selection: { ...state.ai.selection, model: '' } }, customRules: '[]', chatSessions: [], activeChatSessionId: undefined, suggestions: [], rag: { ...state.rag, ready: false, suggestionsGenerated: false, suggestions: [], suggestionError: undefined },
@@ -245,7 +259,8 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			const counts = countFindings(issues);
 			const suggestions = recommendationResult.generated ? buildWorkspaceRecommendations(issues, recommendationResult.suggestions) : [];
 			const selectedProvider = providerId as WebviewState['ai']['selection']['provider'];
-			update({ desktopProjectError: undefined, desktopProjectLoading: false, workspace: { ...state.workspace, name: folderName(selection), root: selection, types: project.projectTypes ?? project.frameworks ?? project.languages ?? [], status: 'Ready', backend: 'Aqiron Core', risk: counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure' }, issues, counts, selectedThreatId: issues[0]?.id, threatSnapshots: historyResult.snapshots.map((snapshot) => ({ ...snapshot, issues: snapshot.issues.map((issue) => mapStoredIssue(issue, selection)) })), activeThreatSnapshotId: historyResult.snapshots[0]?.id, stats: historyResult.snapshots[0] ? { ...state.stats, filesScanned: historyResult.snapshots[0].filesScanned, indexedFiles: historyResult.snapshots[0].filesScanned, scanStatus: 'Complete' } : state.stats, suggestions, chatSessions: sessionResult.sessions, activeChatSessionId: sessionResult.sessions[0]?.id, ai: { ...state.ai, providers: providers.providers.map((id) => ({ id: id as WebviewState['ai']['selection']['provider'], name: providerName(id as WebviewState['ai']['selection']['provider']), connected: id === providerId ? modelResult.status.connected : false, message: id === providerId ? modelResult.status.message : 'Not selected', hasCredential: configured.get(id) ?? false })), models: modelResult.models, filteredModels: filterDesktopModels(modelResult.models, state.ai.modelFilter), status: modelResult.status, apiCredentials: providers.credentialSummaries ?? [], selection: { ...state.ai.selection, provider: selectedProvider, model: state.ai.selection.model && modelResult.models.some((item) => item.id === state.ai.selection.model) ? state.ai.selection.model : modelResult.models[0]?.id ?? '' } }, customRules: JSON.stringify(ruleResult.rules, null, 2), rag: { ...state.rag, ready: recommendationResult.generated, suggestionsGenerated: recommendationResult.generated, suggestions: recommendationResult.suggestions, suggestionError: recommendationResult.error }, pipeline: { ...state.pipeline, lastReport: reportResult.directory ? { directory: reportResult.directory, pdfPath: reportResult.pdfPath, jsonPath: reportResult.jsonPath, sarifPath: reportResult.sarifPath, sizes: reportResult.sizes, modifiedAt: reportResult.modifiedAt, artifactsAvailable: { pdf: Boolean(reportResult.pdfPath), json: Boolean(reportResult.jsonPath), sarif: Boolean(reportResult.sarifPath) } } : undefined } });
+			const historySnapshots = historyResult.snapshots.map((snapshot) => ({ ...snapshot, coverageDiagnosticsAvailable: false, coverageDiagnosticsPresent: false, coverageDiagnosticsValid: false, coverageStatus: 'unavailable' as const, skippedFiles: undefined, skippedFilesIsLowerBound: undefined, skippedFilesCountCertainty: 'indeterminate' as const, skipCountConflict: false, skipReasonsTruncated: false, skipReasons: undefined, issues: snapshot.issues.map((issue) => mapStoredIssue(issue, selection)) }));
+			update({ desktopProjectError: undefined, desktopProjectLoading: false, workspace: { ...state.workspace, name: folderName(selection), root: selection, types: project.projectTypes ?? project.frameworks ?? project.languages ?? [], status: 'Ready', backend: 'Aqiron Core', risk: counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure' }, issues, counts, selectedThreatId: issues[0]?.id, threatSnapshots: historySnapshots, activeThreatSnapshotId: historyResult.snapshots[0]?.id, stats: historySnapshots[0] ? statsForHistoricalSnapshot(state.stats, historySnapshots[0]) : state.stats, suggestions, chatSessions: sessionResult.sessions, activeChatSessionId: sessionResult.sessions[0]?.id, ai: { ...state.ai, providers: providers.providers.map((id) => ({ id: id as WebviewState['ai']['selection']['provider'], name: providerName(id as WebviewState['ai']['selection']['provider']), connected: id === providerId ? modelResult.status.connected : false, message: id === providerId ? modelResult.status.message : 'Not selected', hasCredential: configured.get(id) ?? false })), models: modelResult.models, filteredModels: filterDesktopModels(modelResult.models, state.ai.modelFilter), status: modelResult.status, apiCredentials: providers.credentialSummaries ?? [], selection: { ...state.ai.selection, provider: selectedProvider, model: state.ai.selection.model && modelResult.models.some((item) => item.id === state.ai.selection.model) ? state.ai.selection.model : modelResult.models[0]?.id ?? '' } }, customRules: JSON.stringify(ruleResult.rules, null, 2), rag: { ...state.rag, ready: recommendationResult.generated, suggestionsGenerated: recommendationResult.generated, suggestions: recommendationResult.suggestions, suggestionError: recommendationResult.error }, pipeline: { ...state.pipeline, lastReport: reportResult.directory ? { directory: reportResult.directory, pdfPath: reportResult.pdfPath, jsonPath: reportResult.jsonPath, sarifPath: reportResult.sarifPath, sizes: reportResult.sizes, modifiedAt: reportResult.modifiedAt, artifactsAvailable: { pdf: Boolean(reportResult.pdfPath), json: Boolean(reportResult.jsonPath), sarif: Boolean(reportResult.sarifPath) } } : undefined } });
 			if (persistenceError) { window.alert(`Project selected, but could not remember it for the next launch: ${persistenceError}`); }
 		} catch (error) {
 			if (request !== pickerRequest || selectedVersion !== selectionVersion) { return; }
@@ -287,6 +302,74 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			update({ desktopProjectError: message, desktopProjectLoading: false, workspace: { ...state.workspace, name: 'No project selected', root: undefined, types: [], status: 'No workspace' }, pipeline: { ...state.pipeline, logs: [...state.pipeline.logs, message] } });
 		}
 	};
+	const setHypothesisConsent = (value: NonNullable<WebviewState['hypothesisAiConsent']>) => update({ hypothesisAiConsent: value });
+	const retainedConsent = (payload: unknown) => {
+		const input = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : undefined;
+		const current = state.hypothesisAiConsent;
+		if (!input || Object.keys(input).some((key) => !['preparationId', 'contentFingerprint'].includes(key)) || typeof input.preparationId !== 'string' || typeof input.contentFingerprint !== 'string' || !current?.manifest || current.manifest.preparationId !== input.preparationId || current.contentFingerprint !== input.contentFingerprint) return undefined;
+		return current;
+	};
+	const prepareDesktopHypothesis = async (payload: unknown) => {
+		if (hypothesisRequestBusy) return;
+		const input = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : undefined;
+		if (!input || Object.keys(input).some((key) => !['providerId', 'modelId', 'evidenceIds', 'includeSourceExcerpts'].includes(key)) || typeof input.providerId !== 'string' || typeof input.modelId !== 'string' || !Array.isArray(input.evidenceIds) || input.evidenceIds.length < 1 || input.evidenceIds.length > 40 || input.evidenceIds.some((id) => typeof id !== 'string' || id.length > 256) || (input.includeSourceExcerpts !== undefined && typeof input.includeSourceExcerpts !== 'boolean') || !workspaceRoot || !state.coreScanId || state.stats.scanStatus !== 'Complete') return;
+		const requestVersion = selectionVersion;
+		const selectedWorkspace = workspaceRoot;
+		const scanId = state.coreScanId;
+		hypothesisRequestBusy = true;
+		setHypothesisConsent({ message: 'Preparing a Core-verified disclosure…' });
+		try {
+			const response = await core('hypotheses.ai.prepare', { workspaceRoot: selectedWorkspace, scanId, providerId: input.providerId, modelId: input.modelId, evidenceIds: input.evidenceIds.map((id) => `finding:${id}`), includeSourceExcerpts: input.includeSourceExcerpts === true });
+			if (requestVersion === selectionVersion) {
+				if (!isDesktopPreparationResponse(response)) { setHypothesisConsent({ message: 'Core returned a malformed disclosure response. No approval was recorded.' }); }
+				else { setHypothesisConsent(response.status === 'prepared' ? { manifest: response.manifest, contentFingerprint: response.contentFingerprint } : { message: response.diagnostic.message }); }
+			}
+		} catch { if (requestVersion === selectionVersion) { setHypothesisConsent({ message: 'Core could not prepare disclosure. No approval was recorded.' }); } }
+		finally { hypothesisRequestBusy = false; }
+	};
+	const decideDesktopHypothesis = async (decision: 'approve' | 'deny', payload: unknown) => {
+		if (hypothesisRequestBusy) return;
+		const retained = retainedConsent(payload);
+		if (!retained?.manifest || !retained.contentFingerprint || retained.result) return;
+		const requestVersion = selectionVersion;
+		hypothesisRequestBusy = true;
+		try {
+			const response = await core(decision === 'approve' ? 'hypotheses.ai.approve' : 'hypotheses.ai.deny', { preparationId: retained.manifest.preparationId, contentFingerprint: retained.contentFingerprint });
+			if (requestVersion === selectionVersion) {
+				if (!isDesktopDecisionResponse(response)) { setHypothesisConsent({ ...retained, message: 'Core returned a malformed decision response. It is not shown as approved.' }); }
+				else { const decision = response as NonNullable<NonNullable<WebviewState['hypothesisAiConsent']>['result']>; setHypothesisConsent({ ...retained, result: decision, ...(!decision.ok ? { message: `Preparation ${decision.state}: ${decision.reason}.` } : {}) }); }
+			}
+		} catch { if (requestVersion === selectionVersion) { setHypothesisConsent({ ...retained, message: 'Core did not confirm the decision. It is not shown as approved.' }); } }
+		finally { hypothesisRequestBusy = false; }
+	};
+	const executeDesktopHypothesis = async (payload: unknown) => {
+		if (hypothesisRequestBusy) return;
+		const retained = retainedConsent(payload);
+		if (!retained?.manifest || !retained.contentFingerprint || retained.result?.state !== 'approved') return;
+		const requestVersion = selectionVersion;
+		hypothesisRequestBusy = true;
+		const requestId = `desktop-hypothesis-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+		hypothesisExecutionRequestId = requestId;
+		setHypothesisConsent({ ...retained, executionPending: true, message: 'Execution is running through Core.' });
+		try {
+			const response = await core('hypotheses.ai.execute', { preparationId: retained.manifest.preparationId, contentFingerprint: retained.contentFingerprint }, requestId);
+			if (requestVersion !== selectionVersion) { return; }
+			if (!isDesktopLifecycleResponse(response)) { setHypothesisConsent({ ...retained, executionPending: false, message: 'Core returned a malformed execution response. No success is reported.' }); }
+			else {
+				const result = response as NonNullable<WebviewState['hypothesisAiConsent']>['executionResult'];
+				setHypothesisConsent({ ...retained, executionResult: result, executionPending: false, message: result?.ok && result.state === 'succeeded' ? 'Core confirmed synthesis completed.' : result && !result.ok && result.reason === 'executor-disabled' ? 'Production synthesis is disabled; no provider request was made.' : 'Core did not complete this execution.' });
+			}
+		} catch { if (requestVersion === selectionVersion) { setHypothesisConsent({ ...retained, executionPending: false, message: 'Core did not confirm execution. No success is reported.' }); } }
+		finally { if (hypothesisExecutionRequestId === requestId) { hypothesisExecutionRequestId = undefined; } hypothesisRequestBusy = false; }
+	};
+	const cancelDesktopHypothesisExecution = async () => {
+		const requestId = hypothesisExecutionRequestId;
+		if (!requestId) return;
+		try {
+			const result = await core('core.cancel', { requestId }) as { cancelled?: boolean };
+			if (result.cancelled) update({ hypothesisAiConsent: { ...state.hypothesisAiConsent, message: 'Core accepted the cancellation request; waiting for the execution result.' } });
+		} catch { update({ hypothesisAiConsent: { ...state.hypothesisAiConsent, message: 'Core did not confirm cancellation; execution result is still pending.' } }); }
+	};
 	return {
 		state,
 		postMessage: ({ command, payload }) => {
@@ -296,12 +379,18 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			else if (command === 'ragRefreshSuggestions') { void refreshRecommendations(); }
 			else if (command === 'aiVulnerabilityAnalysis') { void scan('analysis'); }
 			else if (command === 'sendChat') { void sendChat(payload); }
+			else if (command === 'prepareHypothesisAi') { void prepareDesktopHypothesis(payload); }
+			else if (command === 'approveHypothesisAi' || command === 'denyHypothesisAi') { void decideDesktopHypothesis(command === 'approveHypothesisAi' ? 'approve' : 'deny', payload); }
+			else if (command === 'executeHypothesisAi') { void executeDesktopHypothesis(payload); }
+			else if (command === 'cancelHypothesisAiExecution') { void cancelDesktopHypothesisExecution(); }
 			else if (command === 'configureProvider' && typeof payload === 'string' && state.ai.providers.some((provider) => provider.id === payload)) { update({ section: 'settings', ai: { ...state.ai, selection: { ...state.ai.selection, provider: payload as WebviewState['ai']['selection']['provider'] } } }); }
 			else if (command === 'selectThreatSnapshot' && typeof payload === 'string') {
 				const snapshot = state.threatSnapshots.find((item) => item.id === payload);
 				if (snapshot) {
+					requestCancellationForActiveHypothesis();
+					selectionVersion++;
 					const counts = countFindings(snapshot.issues);
-				update({ activeThreatSnapshotId: snapshot.id, issues: snapshot.issues, counts, suggestions: rebuildRecommendations(snapshot.issues), selectedThreatId: snapshot.issues[0]?.id, stats: { ...state.stats, filesScanned: snapshot.filesScanned, indexedFiles: snapshot.filesScanned, scanStatus: 'Complete' }, workspace: { ...state.workspace, risk: counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure' } });
+				update({ activeThreatSnapshotId: snapshot.id, coreScanId: undefined, hypothesisAiConsent: undefined, issues: snapshot.issues, counts, suggestions: rebuildRecommendations(snapshot.issues), selectedThreatId: snapshot.issues[0]?.id, stats: statsForHistoricalSnapshot(state.stats, snapshot), workspace: { ...state.workspace, risk: counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure' } });
 				}
 			}
 			else if (command === 'deleteThreatSnapshot' && typeof payload === 'string') { void deleteThreatSnapshot(payload); }
@@ -339,6 +428,24 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			else if (command === 'clearTerminal') { update({ pipeline: { ...state.pipeline, logs: [] } }); }
 		},
 	};
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === 'object' && !Array.isArray(value)); }
+
+function isDesktopPreparationResponse(value: unknown): value is import('../../../packages/core/src/hypotheses/contracts').HypothesisAiPrepareResult {
+	if (!isObjectRecord(value)) return false;
+	if (value.status === 'rejected') return isObjectRecord(value.diagnostic) && typeof value.diagnostic.message === 'string';
+	if (value.status !== 'prepared' || typeof value.contentFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.contentFingerprint) || !isObjectRecord(value.manifest)) return false;
+	const manifest = value.manifest;
+	return typeof manifest.preparationId === 'string' && typeof manifest.disclosure === 'string' && typeof manifest.includeSourceExcerpts === 'boolean' && Array.isArray(manifest.evidence) && isObjectRecord(manifest.proposedContent) && isObjectRecord(manifest.provider) && typeof manifest.provider.id === 'string' && typeof manifest.provider.modelId === 'string' && typeof manifest.provider.endpoint === 'string' && isObjectRecord(manifest.provider.requestOptions) && isObjectRecord(manifest.provider.credential);
+}
+
+function isDesktopLifecycleResponse(value: unknown): value is NonNullable<NonNullable<WebviewState['hypothesisAiConsent']>['result']> | NonNullable<NonNullable<WebviewState['hypothesisAiConsent']>['executionResult']> {
+	return isObjectRecord(value) && typeof value.ok === 'boolean' && ['approved', 'denied', 'succeeded', 'failed', 'cancelled', 'expired', 'invalidated', 'prepared', 'executing'].includes(String(value.state)) && (value.reason === undefined || typeof value.reason === 'string');
+}
+
+function isDesktopDecisionResponse(value: unknown): value is NonNullable<NonNullable<WebviewState['hypothesisAiConsent']>['result']> {
+	return isDesktopLifecycleResponse(value) && value.state !== 'succeeded';
 }
 
 function folderName(path: string): string { return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path; }

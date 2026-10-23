@@ -5,6 +5,7 @@ import { Markdown } from './markdown.js';
 import { providerName } from './providerOptions';
 import { AqironBadge, AqironButton, AqironIconButton, AqironMetric, AqironSectionHeader, AqironSeverity } from './design/primitives.js';
 import { recommendationChatPayload } from '../../agents/recommendations';
+import { formatSkippedFileCount, normalizeScanCoverage, scanCoverageLabel } from '../../shared/scanCoverage';
 
 type Post = (command: string, payload?: unknown) => void;
 
@@ -241,11 +242,11 @@ export const ScanTab = memo(function ScanTab({ state, post }: { state: WebviewSt
 		<div className="tab-page scan-tab">
 			<section className="scan-hero aq-surface-panel">
 				<AqironSectionHeader title="Security scan" description="Choose a target and depth, then review the evidence as it arrives." />
-				<span className={`aq-status aq-status--${scanStatusTone(state.stats.scanStatus)}`}>{formatScanStatus(state.stats.scanStatus)}</span>
+				<span className={`aq-status aq-status--${scanStatusTone(state.stats.scanStatus, safeScanDiagnostics(state.stats.skippedFiles, state.stats.skipReasons, state.stats.coverageDiagnosticsAvailable, state.stats.skippedFilesIsLowerBound, state.stats))}`}>{formatScanStatus(state.stats.scanStatus, safeScanDiagnostics(state.stats.skippedFiles, state.stats.skipReasons, state.stats.coverageDiagnosticsAvailable, state.stats.skippedFilesIsLowerBound, state.stats))}</span>
 			</section>
 			<section className="scan-context section">
 				<AqironSectionHeader title="Project context" description="Current workspace signals" />
-				<div className="scan-context-list"><span>{state.workspace.name}</span><span>{state.workspace.types[0] ?? 'Workspace'}</span><span>{state.branches[0] ?? 'No branch'}</span><span>{state.stats.scanStatus}</span></div>
+				<div className="scan-context-list"><span>{state.workspace.name}</span><span>{state.workspace.types[0] ?? 'Workspace'}</span><span>{state.branches[0] ?? 'No branch'}</span><span>{formatScanStatus(state.stats.scanStatus, safeScanDiagnostics(state.stats.skippedFiles, state.stats.skipReasons, state.stats.coverageDiagnosticsAvailable, state.stats.skippedFilesIsLowerBound, state.stats))}</span></div>
 			</section>
 			<section className="scan-config section">
 				<AqironSectionHeader title="What do you want to scan?" description="Start with the smallest useful scope." />
@@ -302,7 +303,18 @@ function ScanRunningState({ activeStage, activeTool, stages, tools, onCancel }: 
 }
 
 function ScanCompleteState({ state, onRunAgain, post }: { state: WebviewState; onRunAgain: () => void; post: Post }): React.ReactElement {
-	return <div className="scan-complete-state"><div className="scan-complete-heading"><div><span className="aq-status aq-status--success">Complete</span><h2>Scan complete</h2><p>{state.stats.lastScanDurationMs ? `Completed in ${formatDuration(state.stats.lastScanDurationMs)}.` : 'The existing scan pipeline completed.'}</p></div><AqironButton variant="primary" onClick={onRunAgain}>Run again</AqironButton></div><div className="scan-findings-summary"><span><strong>{state.counts.total}</strong>Total findings</span><span><AqironSeverity severity="Critical" /><strong>{state.counts.critical}</strong></span><span><AqironSeverity severity="High" /><strong>{state.counts.high}</strong></span><span><AqironSeverity severity="Medium" /><strong>{state.counts.medium}</strong></span><span><AqironSeverity severity="Low" /><strong>{state.counts.low}</strong></span><span><strong>{state.stats.filesScanned}</strong>Files scanned</span></div><div className="scan-result-actions"><AqironButton variant="secondary" onClick={() => post('focus', 'threats')}>View findings</AqironButton><AqironButton variant="secondary" onClick={() => post('focus', 'reports')}>Open reports</AqironButton>{state.pipeline.lastReport?.pdfPath ? <AqironButton variant="ghost" onClick={() => post('exportReport', 'pdf')}>Export PDF</AqironButton> : null}</div></div>;
+	const diagnostics = safeScanDiagnostics(state.stats.skippedFiles, state.stats.skipReasons, state.stats.coverageDiagnosticsAvailable, state.stats.skippedFilesIsLowerBound, state.stats);
+	const partial = diagnostics.skippedFiles > 0;
+	const unavailable = !diagnostics.coverageDiagnosticsAvailable;
+	return <div className="scan-complete-state"><div className="scan-complete-heading"><div><span className={`aq-status ${partial || unavailable ? 'aq-status--warning' : 'aq-status--success'}`}>{partial ? 'Incomplete coverage' : unavailable ? 'Coverage unavailable' : 'Complete'}</span><h2>{partial ? 'Scan finished with skipped files' : unavailable ? 'Scan finished; coverage is unavailable' : 'Scan complete'}</h2><p>{state.stats.lastScanDurationMs ? `Completed in ${formatDuration(state.stats.lastScanDurationMs)}.` : 'The existing scan pipeline completed.'} Analyzed {safeCount(state.stats.filesScanned)} files.{unavailable ? ' Skip diagnostics were not recorded, so full coverage cannot be confirmed.' : ''}</p></div><AqironButton variant="primary" onClick={onRunAgain}>Run again</AqironButton></div>{partial ? <div className="scan-warning" role="alert"><strong>{formatSkippedFileCount(diagnostics)} file{diagnostics.skippedFiles === 1 ? '' : 's'} {diagnostics.skippedFiles === 1 ? 'was' : 'were'} skipped; coverage is incomplete.{diagnostics.skipCountConflict ? ' Reported skip totals conflict, so the count is a lower bound.' : ''}</strong>{Object.keys(diagnostics.skipReasons).length ? <ul>{Object.entries(diagnostics.skipReasons).map(([reason, count]) => <li key={reason}>{reason}: {count}</li>)}</ul> : null}{diagnostics.skipReasonsTruncated ? <p>Additional reason categories omitted.</p> : null}</div> : unavailable ? <div className="scan-warning" role="note"><strong>Coverage diagnostics unavailable.</strong> This scan cannot be shown as fully analyzed.</div> : null}<div className="scan-findings-summary"><span><strong>{state.counts.total}</strong>Total findings</span><span><AqironSeverity severity="Critical" /><strong>{state.counts.critical}</strong></span><span><AqironSeverity severity="High" /><strong>{state.counts.high}</strong></span><span><AqironSeverity severity="Medium" /><strong>{state.counts.medium}</strong></span><span><AqironSeverity severity="Low" /><strong>{state.counts.low}</strong></span><span><strong>{safeCount(state.stats.filesScanned)}</strong>Files analyzed</span></div><div className="scan-result-actions"><AqironButton variant="secondary" onClick={() => post('focus', 'threats')}>View findings</AqironButton><AqironButton variant="secondary" onClick={() => post('focus', 'reports')}>Open reports</AqironButton>{state.pipeline.lastReport?.pdfPath ? <AqironButton variant="ghost" onClick={() => post('exportReport', 'pdf')}>Export PDF</AqironButton> : null}</div></div>;
+}
+
+function safeCount(value: unknown): number { return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : 0; }
+
+function safeScanDiagnostics(skippedValue: unknown, reasonsValue: unknown, availableValue?: boolean, lowerBoundValue?: boolean, priorHints?: WebviewState['stats']) {
+	const normalized = normalizeScanCoverage(skippedValue, reasonsValue, lowerBoundValue, priorHints);
+	const hasSkippedFiles = normalized.skippedFiles > 0;
+	return { ...normalized, coverageDiagnosticsAvailable: hasSkippedFiles || (availableValue !== false && normalized.coverageDiagnosticsAvailable) };
 }
 
 function ScanFailedState({ stages, logs, onRetry }: { stages: WebviewState['pipeline']['stages']; logs: string[]; onRetry: () => void }): React.ReactElement {
@@ -318,12 +330,13 @@ function ScanToolRow({ tool, detail }: { tool: WebviewState['pipeline']['tools']
 	return <div className={`scan-tool-row ${tool.status}`}><span className="stage-status" aria-hidden="true">{getStageMarker(tool.status)}</span><strong>{tool.label}</strong><span>{formatToolStatus(tool.status)}</span><small>{detail}</small></div>;
 }
 
-function scanStatusTone(status: WebviewState['stats']['scanStatus']): 'info' | 'success' | 'danger' | 'warning' {
-	return status === 'Scanning' ? 'info' : status === 'Complete' ? 'success' : status === 'Failed' ? 'danger' : 'warning';
+function scanStatusTone(status: WebviewState['stats']['scanStatus'], coverage: ReturnType<typeof safeScanDiagnostics>): 'info' | 'success' | 'danger' | 'warning' {
+	const label = scanCoverageLabel(status, coverage);
+	return status === 'Scanning' ? 'info' : status === 'Complete' && label === 'Complete' ? 'success' : status === 'Complete' ? 'warning' : status === 'Failed' ? 'danger' : 'warning';
 }
 
-function formatScanStatus(status: WebviewState['stats']['scanStatus']): string {
-	return status === 'Idle' ? 'Ready to scan' : status;
+function formatScanStatus(status: WebviewState['stats']['scanStatus'], coverage: ReturnType<typeof safeScanDiagnostics>): string {
+	return status === 'Idle' ? 'Ready to scan' : scanCoverageLabel(status, coverage);
 }
 
 function getVisiblePipelineStages(stages: WebviewState['pipeline']['stages'], scanStatus: WebviewState['stats']['scanStatus']): WebviewState['pipeline']['stages'] {
@@ -575,6 +588,7 @@ export const ThreatTab = memo(function ThreatTab({ state, post }: { state: Webvi
 					<AqironMetric title="Medium" value={`${state.counts.medium}`} />
 					<AqironMetric title="Low" value={`${state.counts.low}`} />
 				</section>
+				<HypothesisConsentPanel state={state} post={post} />
 				<section className="findings-toolbar aq-surface-panel" aria-label="Finding filters">
 					<label className="findings-search"><span className="codicon codicon-search" aria-hidden="true" /><span className="sr-only">Search findings</span><input className="aq-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search findings, files, rules, CWE, or OWASP..." /></label>
 					<div className="findings-toolbar-actions"><AqironButton variant={filtersOpen ? 'secondary' : 'ghost'} type="button" onClick={() => setFiltersOpen((value) => !value)} aria-expanded={filtersOpen}><span className="codicon codicon-filter" aria-hidden="true" />Filters{filtersActive ? ` · ${[severityFilter !== 'all', toolFilter !== 'all', statusFilter !== 'all'].filter(Boolean).length}` : ''}</AqironButton>{filtersActive && <AqironButton variant="ghost" type="button" onClick={clearFilters}>Clear</AqironButton>}</div>
@@ -616,6 +630,57 @@ export const ThreatTab = memo(function ThreatTab({ state, post }: { state: Webvi
 	);
 });
 
+function HypothesisConsentPanel({ state, post }: { state: WebviewState; post: Post }): React.ReactElement {
+	const [selectedIds, setSelectedIds] = useState<string[]>([]);
+	const [providerId, setProviderId] = useState(state.ai.settings.selectedProvider);
+	const [modelId, setModelId] = useState(state.ai.settings.selectedModel ?? '');
+	const [includeSourceExcerpts, setIncludeSourceExcerpts] = useState(false);
+	const [submitting, setSubmitting] = useState(false);
+	const consent = state.hypothesisAiConsent;
+	const manifest = consent?.manifest;
+	const providerModels = state.ai.models.filter((model) => model.providerId === providerId);
+	const scanReady = Boolean(state.coreScanId && state.stats.scanStatus === 'Complete');
+	useEffect(() => { if (consent?.result) {setSubmitting(false);} }, [consent?.result]);
+	useEffect(() => { if (!providerModels.some((model) => model.id === modelId)) {setModelId(providerModels[0]?.id ?? '');} }, [providerId, state.ai.models]);
+	const toggleEvidence = (id: string) => setSelectedIds((previous) => previous.includes(id) ? previous.filter((item) => item !== id) : previous.length < 40 ? [...previous, id] : previous);
+	const decide = (command: 'approveHypothesisAi' | 'denyHypothesisAi') => {
+		if (!manifest || !consent?.contentFingerprint || submitting || consent.result) {return;}
+		setSubmitting(true);
+		post(command, { preparationId: manifest.preparationId, contentFingerprint: consent.contentFingerprint });
+	};
+	return <section className="aq-surface-panel hypothesis-consent" aria-labelledby="hypothesis-consent-title">
+		<AqironSectionHeader title="AI hypothesis disclosure" description="Prepare and review the exact Core-bound operation. Approval records consent only; provider execution remains disabled." />
+		{!manifest && <>
+			<p className="hypothesis-consent-note">Evidence is limited to the latest completed Core scan. Select findings, then prepare a disclosure. Excerpts are off unless you explicitly enable them.</p>
+			<div className="hypothesis-consent-controls">
+				<label className="aq-field"><span className="aq-field__label">Provider</span><select className="aq-select" value={providerId} onChange={(event) => setProviderId(event.target.value as typeof providerId)}>{state.ai.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
+			<label className="aq-field"><span className="aq-field__label">Model</span><select className="aq-select" value={modelId} onChange={(event) => setModelId(event.target.value)}>{providerModels.map((model) => <option key={model.id} value={model.id}>{model.label} ({model.id})</option>)}</select></label>
+			</div>
+			<div className="hypothesis-evidence-select"><strong>Select disclosed findings (up to 40)</strong>{state.issues.map((issue) => <label key={issue.id}><input type="checkbox" checked={selectedIds.includes(issue.id)} onChange={() => toggleEvidence(issue.id)} /><span>{issue.title} <small>{issue.relativeFile}:{issue.line} · {issue.tool}</small></span></label>)}</div>
+			<label className="hypothesis-excerpt-toggle"><input type="checkbox" checked={includeSourceExcerpts} onChange={(event) => setIncludeSourceExcerpts(event.target.checked)} />Include verified source excerpts in the outbound content</label>
+			<div className="modal-actions"><AqironButton type="button" variant="primary" disabled={!scanReady || !selectedIds.length || !modelId || submitting} onClick={() => { setSubmitting(true); post('prepareHypothesisAi', { providerId, modelId, evidenceIds: selectedIds, includeSourceExcerpts }); }}>Prepare disclosure</AqironButton>{!scanReady && <span>Run a completed workspace scan first.</span>}</div>
+		</>}
+		{consent?.message && <p role="status" className="hypothesis-consent-note">{consent.message}</p>}
+		{manifest && <>
+			<div className="hypothesis-disclosure-summary">
+				<h3>Purpose</h3><p>{manifest.proposedContent.purpose}</p>
+				<h3>Destination and model</h3><p>{manifest.provider.id} · {manifest.provider.modelId}<br />{manifest.provider.endpoint}</p>
+				<h3>Disclosure details</h3><p>{manifest.disclosure}</p><p>Source excerpts: {manifest.includeSourceExcerpts ? `enabled (${manifest.excerptCount})` : 'disabled'}. Provider retention: {manifest.provider.retentionPolicy}.</p>
+				<h3>Selected evidence</h3><ul>{manifest.evidence.map((item) => <li key={item.alias}><strong>{item.alias} · {item.kind}</strong> · {item.evidenceId}{item.sourcePath ? ` · ${item.sourcePath}${item.startLine ? `:${item.startLine}-${item.endLine}` : ''}` : ''}<br />{item.summary}{item.excerptText !== undefined ? <pre>{item.excerptText}</pre> : null}</li>)}</ul>
+				<h3>Exact model message content</h3><p>This is the canonical content sent inside the selected provider's request envelope.</p><pre className="hypothesis-outbound-content">{JSON.stringify(manifest.proposedContent, null, 2)}</pre>
+				<h3>Request constraints</h3><p>Temperature {manifest.provider.requestOptions.temperature} · {manifest.provider.requestOptions.maxTokens} max tokens · {manifest.provider.requestOptions.timeoutMs} ms timeout · {manifest.provider.requestOptions.retries} retries · {manifest.provider.requestOptions.maxRequestBodyBytes} request bytes · {manifest.provider.requestOptions.maxResponseBodyBytes} response bytes · streaming {manifest.provider.requestOptions.streaming ? 'on' : 'off'}.</p><p>Response format: {manifest.provider.responseMode ?? 'Provider format not specified'}; Core validates all returned proposals before persistence.</p>
+				<p>Credential identity: {manifest.provider.credential.name} (ending {manifest.provider.credential.last4}); secret value is not displayed. Other provider-side retention and processing details are unknown.</p>
+			</div>
+			{consent.result?.ok && <p role="status">{consent.result.state === 'approved' ? 'Approved for this preparation. No provider request was started.' : 'Denied. This preparation can no longer be approved.'}</p>}
+			{consent.result && !consent.result.ok && <p role="alert">{consent.message ?? `Preparation ${consent.result.state}: ${consent.result.reason}.`}</p>}
+			{!consent.result && <div className="modal-actions"><AqironButton type="button" variant="primary" disabled={submitting} onClick={() => decide('approveHypothesisAi')}>{submitting ? 'Recording decision…' : 'Approve this exact disclosure'}</AqironButton><AqironButton type="button" variant="secondary" disabled={submitting} onClick={() => decide('denyHypothesisAi')}>Deny</AqironButton></div>}
+			{consent.result?.ok && consent.result.state === 'approved' && !consent.executionResult && <div className="modal-actions"><AqironButton type="button" variant="primary" disabled={Boolean(consent.executionPending)} onClick={() => post('executeHypothesisAi', { preparationId: manifest.preparationId, contentFingerprint: consent.contentFingerprint })}>{consent.executionPending ? 'Checking Core…' : 'Check Core execution gate'}</AqironButton>{consent.executionPending && <AqironButton type="button" variant="secondary" onClick={() => post('cancelHypothesisAiExecution')}>Cancel request</AqironButton>}</div>}
+			{consent.executionResult?.ok && consent.executionResult.state === 'succeeded' && <p role="status">Synthesis completed. {consent.executionResult.value.proposalCount} validated proposal(s) were saved.</p>}
+			{consent.executionResult && !consent.executionResult.ok && <p role="alert">Execution was not completed: {consent.executionResult.reason}. {consent.executionResult.reason === 'executor-disabled' ? 'The release gate is closed; no provider request was made.' : 'This preparation cannot be replayed.'}</p>}
+		</>}
+	</section>;
+}
+
 function ThreatSnapshotCard({ snapshot, active, onSelect, onDelete }: { snapshot: WebviewState['threatSnapshots'][number]; active: boolean; onSelect: () => void; onDelete: () => void }): React.ReactElement {
 	const counts = countSnapshotSeverities(snapshot.issues);
 	return <div className={active ? 'threat-snapshot active' : 'threat-snapshot'} role="button" tabIndex={0} onClick={onSelect} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect(); } }} aria-pressed={active}>
@@ -648,13 +713,14 @@ function formatTimelineTimestamp(value: string): string {
 
 export const ReportsTab = memo(function ReportsTab({ state, post }: { state: WebviewState; post: Post }): React.ReactElement {
 	const activeReport = state.threatSnapshots.find((snapshot) => snapshot.id === state.activeThreatSnapshotId);
+	const coverage = safeScanDiagnostics(state.stats.skippedFiles, state.stats.skipReasons, state.stats.coverageDiagnosticsAvailable, state.stats.skippedFilesIsLowerBound, state.stats);
 	const lastReport = state.pipeline.lastReport;
 	const reportAvailable = Boolean(lastReport?.pdfPath || lastReport?.jsonPath || lastReport?.sarifPath || lastReport?.artifactsAvailable?.pdf || lastReport?.artifactsAvailable?.json || lastReport?.artifactsAvailable?.sarif);
 	const reportStatus = reportAvailable ? 'Available' : state.threatSnapshots.length ? 'Assessment available' : 'No report yet';
 	return (
 		<div className="tab-page reports-workspace">
 			<section className="reports-hero aq-surface-panel">
-				<div className="reports-hero-copy"><AqironBadge tone="brand"><span className="codicon codicon-file-text" aria-hidden="true" />Assessment workspace</AqironBadge><AqironSectionHeader title="Security reports" description="Review what the latest assessment found, then export the format your workflow needs." /><div className="reports-context"><span><span className="codicon codicon-folder" aria-hidden="true" />{state.workspace.name}</span><span><span className="codicon codicon-shield" aria-hidden="true" />{state.stats.scanStatus}</span><span><span className="codicon codicon-file-code" aria-hidden="true" />{state.stats.filesScanned} files scanned</span></div></div>
+				<div className="reports-hero-copy"><AqironBadge tone="brand"><span className="codicon codicon-file-text" aria-hidden="true" />Assessment workspace</AqironBadge><AqironSectionHeader title="Security reports" description="Review what the latest assessment found, then export the format your workflow needs." /><div className="reports-context"><span><span className="codicon codicon-folder" aria-hidden="true" />{state.workspace.name}</span><span><span className="codicon codicon-shield" aria-hidden="true" />{formatScanStatus(state.stats.scanStatus, coverage)}</span><span><span className="codicon codicon-file-code" aria-hidden="true" />{safeCount(state.stats.filesScanned)} files analyzed{coverage.skippedFiles ? ` · ${formatSkippedFileCount(coverage)} skipped` : coverage.coverageDiagnosticsAvailable ? '' : ' · coverage unavailable'}</span></div></div>
 				<div className="reports-hero-status"><span className={`aq-status ${reportAvailable ? 'aq-status--success' : 'aq-status--warning'}`}>{reportStatus}</span>{activeReport ? <span>{activeReport.title}</span> : <span>Run a scan to create report artifacts</span>}</div>
 			</section>
 			<section className="reports-assessment">

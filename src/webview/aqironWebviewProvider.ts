@@ -13,20 +13,26 @@ import { getCounts } from '../views/aqironTreeProvider';
 import { RagWorkspaceService } from '../rag/ragWorkspaceService';
 import { ThreatHistoryService, ThreatSnapshot } from '../security/threatHistoryService';
 import { CoreClient } from '../../packages/core/src/client';
+import { formatAgentScanCoverage, formatSkippedFileCount, normalizeScanCoverage, statsForHistoricalSnapshot, statsWithoutSelectedSnapshot } from '../shared/scanCoverage';
 import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
 import { buildWorkspaceRecommendations } from '../agents/recommendations';
+import { HypothesisAiPrepareResult } from '../../packages/core/src/hypotheses/contracts';
+import { isHypothesisAiPrepareMessage, isHypothesisAiResponseMessage, isWebviewMessage } from './hypothesisAiConsentMessages';
 
 export type AqironWebviewSection = 'agent' | 'scan' | 'threats' | 'reports' | 'settings' | 'aiAgent';
 export type WorkspaceScanMode = 'quick' | 'deep' | 'analysis';
+type WebviewThreatSnapshot = ThreatSnapshot & { coverageDiagnosticsAvailable?: boolean; coverageDiagnosticsPresent?: boolean; coverageDiagnosticsValid?: boolean; coverageStatus?: 'complete' | 'partial' | 'unavailable'; skippedFiles?: number; skippedFilesIsLowerBound?: boolean; skippedFilesCountCertainty?: 'exact' | 'lower-bound' | 'indeterminate'; skipCountConflict?: boolean; skipReasonsTruncated?: boolean; skipReasons?: Partial<Record<string, number>> };
 
 interface WebviewState {
 	issues: AqironIssue[];
+	coreScanId?: string;
+	hypothesisAiConsent?: { manifest?: import('../../packages/core/src/hypotheses/contracts').HypothesisAiPreparedDisclosureManifest; contentFingerprint?: string; result?: import('../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult; executionResult?: import('../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult<{ proposalCount: number }>; executionPending?: boolean; message?: string };
 	stats: AqironWorkspaceStats;
 	workspace: WorkspaceProfile;
 	branches: string[];
 	selectedThreatId?: string;
 	zoom: number;
-	threatSnapshots: ThreatSnapshot[];
+	threatSnapshots: WebviewThreatSnapshot[];
 	activeThreatSnapshotId?: string;
 	memory: AgentMemory;
 	chatSessions: ChatSession[];
@@ -148,7 +154,7 @@ const defaultStats: AqironWorkspaceStats = {
 };
 
 export interface AqironWebviewController {
-	update(issues: readonly AqironIssue[], stats?: Partial<AqironWorkspaceStats>, report?: WebviewPipelineState['lastReport'], scanMode?: WorkspaceScanMode): void;
+	update(issues: readonly AqironIssue[], stats?: Partial<AqironWorkspaceStats>, report?: WebviewPipelineState['lastReport'], scanMode?: WorkspaceScanMode, coreScanId?: string): void;
 	setScanStatus(scanStatus: AqironWorkspaceStats['scanStatus']): void;
 	onPipelineEvent(event: PipelineEvent): void;
 	open(): void;
@@ -163,6 +169,8 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 	private readonly threatHistory = new ThreatHistoryService();
 	private readonly agentOutput = vscode.window.createOutputChannel('Aqiron Agent Tools');
 	private readonly activeAgentScans = new Map<string, string>();
+	private hypothesisAiRequestBusy = false;
+	private hypothesisAiExecutionRequestId?: string;
 	private state: WebviewState = {
 		issues: [],
 		zoom: 1,
@@ -245,7 +253,8 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		this.panel = panel;
 		this.view = panel;
 		panel.webview.html = this.render(panel.webview);
-		panel.webview.onDidReceiveMessage((message: { command: string; payload?: unknown }) => {
+		panel.webview.onDidReceiveMessage((message: unknown) => {
+			if (!isWebviewMessage(message)) {return;}
 			void this.handleWebviewMessage(message.command, message.payload);
 		});
 		panel.onDidDispose(() => {
@@ -294,7 +303,8 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'assets', 'tab', 'agents.svg');
 		this.agentPanel = panel;
 		panel.webview.html = this.render(panel.webview, 'aiAgent');
-		panel.webview.onDidReceiveMessage((message: { command: string; payload?: unknown }) => {
+		panel.webview.onDidReceiveMessage((message: unknown) => {
+			if (!isWebviewMessage(message)) {return;}
 			void this.handleWebviewMessage(message.command, message.payload);
 		});
 		panel.onDidDispose(() => {
@@ -314,15 +324,18 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 				],
 		};
 		view.webview.html = this.render(view.webview);
-		view.webview.onDidReceiveMessage((message: { command: string; payload?: unknown }) => {
+		view.webview.onDidReceiveMessage((message: unknown) => {
+			if (!isWebviewMessage(message)) {return;}
 			void this.handleWebviewMessage(message.command, message.payload);
 		});
 		void this.refreshWorkspaceProfile();
 	}
 
-	update(issues: readonly AqironIssue[], stats?: Partial<AqironWorkspaceStats>, report?: WebviewPipelineState['lastReport'], scanMode: WorkspaceScanMode = 'deep'): void {
+	update(issues: readonly AqironIssue[], stats?: Partial<AqironWorkspaceStats>, report?: WebviewPipelineState['lastReport'], scanMode: WorkspaceScanMode = 'deep', coreScanId?: string): void {
 		this.state = {
 			...this.state,
+			coreScanId,
+			hypothesisAiConsent: coreScanId !== this.state.coreScanId ? undefined : this.state.hypothesisAiConsent,
 			issues: [...issues],
 			stats: { ...this.state.stats, ...stats },
 			pipeline: report ? { ...this.state.pipeline, lastReport: report } : this.state.pipeline,
@@ -361,6 +374,21 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 
 	private async handleMessage(command: string, payload?: unknown): Promise<void> {
 		switch (command) {
+			case 'prepareHypothesisAi':
+				await this.prepareHypothesisAiFromWebview(payload);
+				return;
+			case 'approveHypothesisAi':
+				await this.respondToHypothesisAiFromWebview('approve', payload);
+				return;
+			case 'denyHypothesisAi':
+				await this.respondToHypothesisAiFromWebview('deny', payload);
+				return;
+			case 'executeHypothesisAi':
+				await this.executeHypothesisAiFromWebview(payload);
+				return;
+			case 'cancelHypothesisAiExecution':
+				if (this.hypothesisAiExecutionRequestId) {await this.coreClient.cancelRequest(this.hypothesisAiExecutionRequestId);}
+				return;
 			case 'ready':
 				await this.refreshAiState();
 				this.postState();
@@ -557,6 +585,75 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		}
 	}
 
+	private async prepareHypothesisAiFromWebview(payload: unknown): Promise<void> {
+		if (this.hypothesisAiRequestBusy || !isHypothesisAiPrepareMessage(payload)) {return;}
+		const root = this.state.workspace.root;
+		const scanId = this.state.coreScanId;
+		if (!root || !scanId || this.state.stats.scanStatus !== 'Complete') {
+			this.state = { ...this.state, hypothesisAiConsent: { message: 'Run a completed workspace scan before preparing a disclosure.' } };
+			this.postState();
+			return;
+		}
+		const model = this.state.ai.models.find((item) => item.id === payload.modelId && item.providerId === payload.providerId);
+		if (!model || !this.state.ai.providers.some((item) => item.id === payload.providerId)) {
+			this.state = { ...this.state, hypothesisAiConsent: { message: 'Choose a currently available provider and model.' } };
+			this.postState();
+			return;
+		}
+		const allowedFindingIds = new Set(this.state.issues.map((issue) => issue.id));
+		if (payload.evidenceIds.some((id) => !allowedFindingIds.has(id))) {return;}
+		this.hypothesisAiRequestBusy = true;
+		this.state = { ...this.state, hypothesisAiConsent: { message: 'Preparing a Core-verified disclosure…' } };
+		this.postState();
+		try {
+			const result: HypothesisAiPrepareResult = await this.coreClient.prepareHypothesisAiDisclosure({ workspaceRoot: root, scanId, providerId: payload.providerId, modelId: payload.modelId, evidenceIds: payload.evidenceIds.map((id) => `finding:${id}`), includeSourceExcerpts: payload.includeSourceExcerpts });
+			this.state = { ...this.state, hypothesisAiConsent: result.status === 'prepared' ? { manifest: result.manifest, contentFingerprint: result.contentFingerprint } : { message: result.diagnostic.message } };
+		} catch {
+			this.state = { ...this.state, hypothesisAiConsent: { message: 'Core could not prepare the disclosure. No approval was recorded.' } };
+		} finally { this.hypothesisAiRequestBusy = false; this.postState(); }
+	}
+
+	private async respondToHypothesisAiFromWebview(action: 'approve' | 'deny', payload: unknown): Promise<void> {
+		if (this.hypothesisAiRequestBusy || !isHypothesisAiResponseMessage(payload)) {return;}
+		const retained = this.state.hypothesisAiConsent;
+		if (!retained?.manifest || !retained.contentFingerprint || retained.manifest.preparationId !== payload.preparationId || retained.contentFingerprint !== payload.contentFingerprint || retained.result) {return;}
+		this.hypothesisAiRequestBusy = true;
+		try {
+			const result = action === 'approve'
+				? await this.coreClient.approveHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint)
+				: await this.coreClient.denyHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint);
+			this.state = { ...this.state, hypothesisAiConsent: { ...retained, result, ...(!result.ok ? { message: lifecycleFailureMessage(result.state, result.reason) } : {}) } };
+		} catch {
+			this.state = { ...this.state, hypothesisAiConsent: { ...retained, message: 'Core could not record this decision. It was not shown as approved.' } };
+		} finally { this.hypothesisAiRequestBusy = false; this.postState(); }
+	}
+
+	private async executeHypothesisAiFromWebview(payload: unknown): Promise<void> {
+		if (this.hypothesisAiRequestBusy || !isHypothesisAiResponseMessage(payload)) {return;}
+		const retained = this.state.hypothesisAiConsent;
+		if (!retained?.manifest || !retained.contentFingerprint || retained.manifest.preparationId !== payload.preparationId || retained.contentFingerprint !== payload.contentFingerprint || retained.result?.state !== 'approved' || retained.executionResult) {return;}
+		this.hypothesisAiRequestBusy = true;
+		const requestId = `hypothesis-ai-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+		this.hypothesisAiExecutionRequestId = requestId;
+		this.state = { ...this.state, hypothesisAiConsent: { ...retained, executionPending: true, message: 'Core is checking the release gate. No provider request is assumed.' } };
+		this.postState();
+		try {
+			const executionResult = await this.coreClient.executeHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint, requestId);
+			const message = executionResult.ok && executionResult.state === 'succeeded'
+				? `Core completed synthesis and persisted ${executionResult.value.proposalCount} validated proposal(s).`
+				: !executionResult.ok && executionResult.reason === 'executor-disabled'
+					? 'Execution is disabled by this release gate. No provider request was made.'
+					: `Execution ${executionResult.state}: ${executionResult.ok ? 'complete' : executionResult.reason}.`;
+			this.state = { ...this.state, hypothesisAiConsent: { ...retained, executionResult, executionPending: false, message } };
+		} catch {
+			this.state = { ...this.state, hypothesisAiConsent: { ...retained, executionPending: false, message: 'Core did not confirm execution. The result was not shown as completed.' } };
+		} finally {
+			this.hypothesisAiExecutionRequestId = undefined;
+			this.hypothesisAiRequestBusy = false;
+			this.postState();
+		}
+	}
+
 	async refreshAiState(): Promise<void> {
 		this.state = { ...this.state, ai: await this.aiService.getWebviewState(), mobsf: getMobSfSettingsState(), customRules: formatCustomRules(getConfiguredCustomRules()) };
 		this.postState();
@@ -568,7 +665,12 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			return;
 		}
 		try {
-			const threatSnapshots = await this.threatHistory.record(root, issues, filesScanned, this.state.pipeline.lastReport?.executiveSummary, mode);
+			const persisted = await this.threatHistory.record(root, issues, filesScanned, this.state.pipeline.lastReport?.executiveSummary, mode);
+			const currentCoverage = normalizeScanCoverage(this.state.stats.skippedFiles, this.state.stats.skipReasons, this.state.stats.skippedFilesIsLowerBound, this.state.stats);
+			const diagnosticsAvailable = this.state.stats.coverageDiagnosticsAvailable === true;
+			const threatSnapshots = persisted.map((snapshot, index) => index === 0
+				? { ...snapshot, ...currentCoverage, coverageDiagnosticsAvailable: diagnosticsAvailable, ...(diagnosticsAvailable ? {} : { skippedFiles: undefined, skippedFilesIsLowerBound: undefined, skipReasons: undefined }) }
+				: { ...snapshot, coverageDiagnosticsAvailable: false, coverageDiagnosticsPresent: false, coverageDiagnosticsValid: false, coverageStatus: 'unavailable' as const, skippedFiles: undefined, skippedFilesIsLowerBound: undefined, skippedFilesCountCertainty: 'indeterminate' as const, skipCountConflict: false, skipReasonsTruncated: false, skipReasons: undefined });
 			this.state = {
 				...this.state,
 				threatSnapshots,
@@ -588,8 +690,10 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		}
 		this.state = {
 			...this.state,
+			coreScanId: undefined,
+			hypothesisAiConsent: undefined,
 			issues: snapshot.issues,
-			stats: { ...this.state.stats, filesScanned: snapshot.filesScanned, indexedFiles: snapshot.filesScanned, scanStatus: 'Complete' },
+			stats: statsForHistoricalSnapshot(this.state.stats, snapshot),
 			activeThreatSnapshotId: snapshot.id,
 			selectedThreatId: snapshot.issues[0]?.id,
 			pipeline: snapshot.executiveSummary ? { ...this.state.pipeline, lastReport: { ...this.state.pipeline.lastReport, executiveSummary: snapshot.executiveSummary } } : this.state.pipeline,
@@ -604,7 +708,13 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			return;
 		}
 		const wasActive = this.state.activeThreatSnapshotId === id;
-		const threatSnapshots = await this.threatHistory.delete(root, id);
+		const persisted = await this.threatHistory.delete(root, id);
+		const threatSnapshots = persisted.map((snapshot) => {
+			const previous = this.state.threatSnapshots.find((entry) => entry.id === snapshot.id);
+			return previous?.coverageDiagnosticsAvailable === true
+				? { ...snapshot, coverageDiagnosticsAvailable: true, skippedFiles: previous.skippedFiles, skippedFilesIsLowerBound: previous.skippedFilesIsLowerBound, skipReasons: previous.skipReasons }
+				: { ...snapshot, coverageDiagnosticsAvailable: false, skippedFiles: undefined, skippedFilesIsLowerBound: undefined, skipReasons: undefined };
+		});
 		if (threatSnapshots.length === this.state.threatSnapshots.length) {
 			return;
 		}
@@ -615,7 +725,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 					...this.state,
 					threatSnapshots,
 					issues: next.issues,
-					stats: { ...this.state.stats, filesScanned: next.filesScanned, indexedFiles: next.filesScanned, scanStatus: 'Complete' },
+					stats: statsForHistoricalSnapshot(this.state.stats, next),
 					activeThreatSnapshotId: next.id,
 					selectedThreatId: next.issues[0]?.id,
 					workspace: { ...this.state.workspace, risk: getRiskStatus(next.issues) },
@@ -626,7 +736,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 					...this.state,
 					threatSnapshots,
 					issues: [],
-					stats: { ...this.state.stats, filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete' },
+					stats: statsWithoutSelectedSnapshot(this.state.stats),
 					activeThreatSnapshotId: undefined,
 					selectedThreatId: undefined,
 					workspace: { ...this.state.workspace, risk: 'Secure' },
@@ -1097,13 +1207,13 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		const workspaceRoot = workspaceFolder.uri.fsPath;
 		if (!isFlutterWorkspace(workspaceRoot)) {
 			return {
-				content: 'Secret scan complete. I scanned 0 files and found no hardcoded API keys, passwords, tokens, or private key material with the current Aqiron rules.',
+				content: 'Secret scan unavailable for this workspace type. No files were analyzed, so coverage and secret findings could not be assessed.',
 				commands: [
-					{ label: 'Hunt secrets', command: 'secrets.scan', status: 'complete' },
-					{ label: 'Workspace scanner', command: 'Scanned 0 files with Aqiron rules', status: 'complete' },
+					{ label: 'Hunt secrets', command: 'secrets.scan', status: 'unavailable' },
+					{ label: 'Workspace scanner', command: 'No files analyzed; coverage unavailable', status: 'unavailable' },
 				],
 				issues: mergeIssues(this.state.issues.filter((issue) => !isSecretRule(issue.ruleId)), []),
-				stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete', lastScanDurationMs: 0 },
+				stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete', coverageDiagnosticsAvailable: false, lastScanDurationMs: 0 },
 			};
 		}
 		const requestId = `agent-secrets-${createId()}`;
@@ -1130,17 +1240,19 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			const secretFindings = result.findings.filter((finding) => isSecretRule(finding.ruleId));
 			const secretIssues = await findingsToAgentIssues(secretFindings);
 			const filesScanned = result.filesScanned ?? 0;
+			const diagnostics = readSkipDiagnostics(result.skippedFiles, result.skipReasons);
+			const coverage = formatAgentScanCoverage(diagnostics);
 			const findings = secretIssues.slice(0, 5).map((issue) => `- ${issue.title} in ${path.relative(workspaceRoot, issue.file)}:${issue.range.startLine + 1}`).join('\n');
 			return {
 				content: secretIssues.length > 0
-					? [`Secret scan complete. Found ${secretIssues.length} potential secret finding${secretIssues.length === 1 ? '' : 's'}.`, findings].join('\n\n')
-					: `Secret scan complete. I scanned ${filesScanned} files and found no hardcoded API keys, passwords, tokens, or private key material with the current Aqiron rules.`,
+					? [`Secret scan ${coverage.completion}. Found ${secretIssues.length} potential secret finding${secretIssues.length === 1 ? '' : 's'}.${coverage.note}`, findings].join('\n\n')
+					: `Secret scan ${coverage.completion}. I scanned ${filesScanned} files and found no hardcoded API keys, passwords, tokens, or private key material with the current Aqiron rules.${coverage.note}`,
 				commands: [
 					{ label: 'Hunt secrets', command: 'secrets.scan', status: 'complete' },
-					{ label: 'Workspace scanner', command: `Scanned ${filesScanned} files with Aqiron rules`, status: 'complete' },
+					{ label: 'Workspace scanner', command: `Scanned ${filesScanned} files with Aqiron rules${diagnostics.coverageStatus === 'partial' ? `; ${formatSkippedFileCount(diagnostics)} skipped${diagnostics.skipCountConflict ? ' (exact count unavailable: totals conflict)' : ''}` : diagnostics.coverageStatus === 'unavailable' ? '; coverage diagnostics unavailable' : ''}`, status: 'complete' },
 				],
 				issues: mergeIssues(this.state.issues.filter((issue) => !isSecretRule(issue.ruleId)), secretIssues),
-				stats: { filesScanned, indexedFiles: filesScanned, scanStatus: 'Complete', lastScanDurationMs: Date.now() - startedAt },
+				stats: { filesScanned, indexedFiles: filesScanned, ...diagnostics, scanStatus: 'Complete', lastScanDurationMs: Date.now() - startedAt },
 			};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1167,10 +1279,10 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		const workspaceRoot = workspaceFolder.uri.fsPath;
 		if (!isFlutterWorkspace(workspaceRoot)) {
 			return {
-				content: 'Workspace scan complete. Scanned 0 files and found 0 issues.',
-				commands: [{ label: 'Run Aqiron workspace scan', command: 'workspace.scan', status: 'complete' }],
+				content: 'Workspace scan unavailable for this project type. No files were analyzed, so coverage could not be assessed.',
+				commands: [{ label: 'Run Aqiron workspace scan', command: 'workspace.scan', status: 'unavailable' }],
 				issues: [],
-				stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete', lastScanDurationMs: 0 },
+				stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Complete', coverageDiagnosticsAvailable: false, lastScanDurationMs: 0 },
 			};
 		}
 		const requestId = `agent-workspace-${createId()}`;
@@ -1200,13 +1312,16 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			});
 			const issues = await findingsToAgentIssues(result.findings);
 			const filesScanned = result.filesScanned ?? 0;
+			const diagnostics = readSkipDiagnostics(result.skippedFiles, result.skipReasons);
+			const coverage = formatAgentScanCoverage(diagnostics);
 			return {
-				content: `Workspace scan complete. Scanned ${filesScanned} files and found ${issues.length} issue${issues.length === 1 ? '' : 's'}.`,
+				content: `Workspace scan ${coverage.completion}. Scanned ${filesScanned} files and found ${issues.length} issue${issues.length === 1 ? '' : 's'}.${coverage.note}`,
 				commands: [{ label: 'Run Aqiron workspace scan', command: 'workspace.scan', status: 'complete' }],
 				issues,
 				stats: {
 					filesScanned,
 					indexedFiles: filesScanned,
+					...diagnostics,
 					scanStatus: 'Complete',
 					lastScanDurationMs: result.durationMs ?? Date.now() - startedAt,
 				},
@@ -1606,7 +1721,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			await this.refreshRagState();
 			return;
 		}
-		const [types, branches, hasGit, graph, threatSnapshots, storedReport] = await Promise.all([
+		const [types, branches, hasGit, graph, loadedThreatSnapshots, storedReport] = await Promise.all([
 			detectProjectTypes(root),
 			getGitBranches(root),
 			pathExists(path.join(root, '.git')),
@@ -1614,6 +1729,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			this.threatHistory.load(root),
 			loadLatestReportBundle(root),
 		]);
+		const threatSnapshots = loadedThreatSnapshots.map((snapshot) => ({ ...snapshot, coverageDiagnosticsAvailable: false, skippedFiles: undefined, skippedFilesIsLowerBound: undefined, skipReasons: undefined }));
 		const memory = this.getMemory();
 		const frameworksDetected = [...new Set([...memory.frameworksDetected, ...types])].slice(0, 16);
 		const apisDiscovered = [...new Set([...memory.apisDiscovered, ...graph.apis])].slice(0, 24);
@@ -1644,7 +1760,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			},
 			branches,
 			issues,
-			stats: activeThreatSnapshot && this.state.issues.length === 0 ? { ...this.state.stats, filesScanned: activeThreatSnapshot.filesScanned, indexedFiles: activeThreatSnapshot.filesScanned, scanStatus: 'Complete' } : this.state.stats,
+			stats: activeThreatSnapshot && this.state.issues.length === 0 ? statsForHistoricalSnapshot(this.state.stats, activeThreatSnapshot) : this.state.stats,
 			threatSnapshots,
 			activeThreatSnapshotId,
 			selectedThreatId: this.state.selectedThreatId ?? issues[0]?.id,
@@ -1716,6 +1832,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			workspace: this.state.workspace,
 			branches: this.state.branches,
 			stats: this.state.stats,
+			coreScanId: this.state.coreScanId,
 			counts,
 			issues,
 			suggestions: this.state.rag.suggestionsGenerated ? buildWorkspaceRecommendations(issues, this.state.rag.suggestions) : [],
@@ -1796,6 +1913,17 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 </body>
 </html>`;
 	}
+}
+
+function lifecycleFailureMessage(state: string, reason: string): string {
+	if (state === 'expired') {return 'This disclosure expired. Prepare a fresh disclosure before deciding.';}
+	if (state === 'invalidated') {return 'The scan evidence or provider configuration changed. Prepare a fresh disclosure.';}
+	if (state === 'denied') {return 'This preparation was denied.';}
+	return `Core did not record this decision (${reason}). Current state: ${state}.`;
+}
+
+function readSkipDiagnostics(skippedValue: unknown, reasonsValue: unknown) {
+	return normalizeScanCoverage(skippedValue, reasonsValue);
 }
 
 function getScanModePayload(payload: unknown): { mode: 'quick' | 'deep' } {

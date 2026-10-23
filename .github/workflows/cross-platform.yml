@@ -1,0 +1,96 @@
+name: Cross-platform validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    env:
+      AQIRON_TEST_OUTDIR: .ci-compiled-tests
+      AQIRON_VSCODE_TEST_SUMMARY: .ci-compiled-tests/vscode-test-summary.json
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Tauri Linux and keytar build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential curl file libgtk-3-dev libayatana-appindicator3-dev libsecret-1-dev \
+            libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev pkg-config xvfb
+
+      - name: Set up Rust 1.95.0
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+        if: runner.os == 'Windows'
+
+      - name: Set up Rust 1.95.0
+        uses: dtolnay/rust-toolchain@1.95.0
+        if: runner.os != 'Windows'
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      - name: Install JavaScript dependencies from package-lock.json
+        run: npm ci
+
+      - name: Check TypeScript types
+        run: npm run check-types
+
+      - name: Compile tests to a fresh directory
+        run: npx tsc -p . --outDir .ci-compiled-tests
+
+      - name: Build Core and run focused lifecycle, transport, protocol, and runtime suites
+        run: |
+          npm run core:build
+          npx mocha --ui tdd ".ci-compiled-tests/src/test/hypothesisAi*.test.js" .ci-compiled-tests/src/test/hypothesisEngine.test.js .ci-compiled-tests/src/test/coreProtocolFraming.test.js .ci-compiled-tests/src/test/coreClient.test.js .ci-compiled-tests/src/test/coreAiTransport.test.js .ci-compiled-tests/src/test/coreRuntime.test.js
+
+      - name: Run Desktop bridge correlation and cancellation tests
+        run: npm run desktop:test
+
+      - name: Build VS Code extension and run lint
+        run: npm run compile
+
+      - name: Run VS Code extension-host tests
+        if: runner.os != 'Linux'
+        run: npx vscode-test --fail-zero --jobs 1
+
+      - name: Run VS Code extension-host tests under Xvfb
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npx vscode-test --fail-zero --jobs 1
+
+      - name: Verify extension-host test summary
+        if: always()
+        run: node scripts/verify-vscode-test-summary.cjs
+
+      - name: Build Desktop frontend
+        run: npm run desktop:build
+
+      - name: Run Tauri host unit tests
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --bin aqiron-security-desktop
+
+      - name: Build native Tauri host
+        run: cargo build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --bin aqiron-security-desktop

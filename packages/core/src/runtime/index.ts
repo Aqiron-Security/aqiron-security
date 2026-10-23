@@ -1,2 +1,3 @@
 export * from './protocol';
-export * from './coreRuntime';
+export { runCoreRuntime } from './coreRuntime';
+export type { CoreRuntimeOptions } from './coreRuntime';

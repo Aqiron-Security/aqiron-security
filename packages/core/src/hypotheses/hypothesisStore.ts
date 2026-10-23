@@ -1,8 +1,11 @@
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import { FileSystem } from '../shared/platform';
-import { HypothesisReviewInput, HypothesisReviewResult, HypothesisSnapshot, HypothesisStatus, HypothesisStore, SecurityHypothesis } from './contracts';
+import { AIProviderId } from '../shared/ai';
+import { HypothesisAiCommitControl } from './contracts';
+import { HypothesisReviewInput, HypothesisReviewResult, HypothesisSnapshot, HypothesisStatus, HypothesisStore, SecurityHypothesis, ValidatedHypothesisAiProposal } from './contracts';
 import { hashSourceContent, hashSourceSpan } from '../shared/sourceProvenance';
+import { validateEvidenceReference } from './hypothesisEngine';
 
 const MAX_HYPOTHESES = 500;
 const MAX_SNAPSHOTS = 20;
@@ -85,6 +88,53 @@ export class HypothesisStoreService {
 		});
 	}
 
+	/** Appends only freshly validated AI proposals. Existing records are never replaced. */
+	async persistValidatedAiProposals(root: string, snapshot: HypothesisSnapshot, proposals: readonly ValidatedHypothesisAiProposal[], preparationId: string, providerId: AIProviderId, modelId: string, signal?: AbortSignal, commitControl?: HypothesisAiCommitControl): Promise<HypothesisStore> {
+		return await withWorkspaceLock(root, this.filesystem, async (safeRoot) => {
+			throwIfCancelled(signal);
+			if (!proposals.length || proposals.length > 5 || !/^[a-f0-9-]{1,80}$/i.test(preparationId) || providerId.length > 32 || modelId.length > 128
+				|| proposals.some((proposal) => !isBoundedString(proposal.title, 160, 1) || !isBoundedString(proposal.claim, 500, 1) || !isBoundedString(proposal.evidenceRationale, 1200, 1)
+					|| !Array.isArray(proposal.supportingEvidence) || proposal.supportingEvidence.length === 0 || proposal.supportingEvidence.length > 8
+					|| !Array.isArray(proposal.contradictoryEvidence) || proposal.contradictoryEvidence.length > 8
+					|| [...proposal.supportingEvidence, ...proposal.contradictoryEvidence].some((ref) => !validateEvidenceReference(snapshot, ref))
+					|| !isStringList(proposal.verificationCriteria, 5, 300) || !isStringList(proposal.falsificationCriteria, 5, 300) || !isStringList(proposal.uncertainties, 5, 240))) {
+				throw new HypothesisStoreError('Validated proposal persistence request is invalid; existing data was preserved.');
+			}
+			const current = await this.read(safeRoot);
+			throwIfCancelled(signal);
+			if (current.snapshots[0] && current.snapshots[0].id !== snapshot.id) {throw Object.assign(new Error('AI proposals belong to a scan snapshot that is no longer current.'), { code: 'HYPOTHESIS_STALE_GENERATION' });}
+			await this.assertAiProposalEvidenceFresh(safeRoot, snapshot, proposals);
+			throwIfCancelled(signal);
+			const timestamp = new Date().toISOString();
+			const additions = proposals.map((proposal, index): SecurityHypothesis => {
+				const evidence = [...proposal.supportingEvidence, ...proposal.contradictoryEvidence].map((ref) => ({ ...ref }));
+				const id = `hyp:ai:${crypto.createHash('sha256').update(`${preparationId}:${index}:${JSON.stringify(proposal)}`).digest('hex').slice(0, 32)}`;
+				const file = proposal.supportingEvidence.find((ref) => ref.file)?.file;
+				const firstFinding = proposal.supportingEvidence.find((ref) => ref.findingId);
+				return {
+					id, title: proposal.title, description: proposal.claim, asset: file ? { kind: 'file', id: file } : { kind: 'project', id: snapshot.workspaceRoot }, evidence,
+					rationale: proposal.evidenceRationale, confidence: { band: 'low', factors: [
+						{ kind: 'freshness', value: 'current', detail: 'Evidence was current in the bound Core snapshot at validation.' },
+						{ kind: 'preconditions', value: 'unknown', detail: 'AI-generated claims require independent reviewer verification.' },
+					], policyVersion: 1 }, assumptions: proposal.uncertainties.slice(0, 10), contradictions: proposal.contradictoryEvidence.map((ref) => ({ ...ref })),
+					verificationSteps: [...proposal.verificationCriteria, ...proposal.falsificationCriteria].slice(0, 10), status: 'proposed', evidenceFreshness: 'current',
+					createdAt: timestamp, updatedAt: timestamp, snapshotId: snapshot.id, relatedFindingIds: firstFinding ? [firstFinding.findingId!] : [],
+					relatedRuleIds: proposal.supportingEvidence.flatMap((ref) => ref.ruleId ? [ref.ruleId] : []).slice(0, 100), relatedHypothesisIds: [],
+					origin: { kind: 'ai-proposal', preparationId, providerId, modelId },
+				};
+			});
+			const existingIds = new Set(current.hypotheses.map((item) => item.id));
+			if (additions.some((item) => existingIds.has(item.id)) || current.hypotheses.length + additions.length > MAX_HYPOTHESES) {throw new HypothesisStoreError('AI proposals conflict with existing records or exceed store capacity; existing data was preserved.');}
+			const snapshots = current.snapshots.length ? current.snapshots : [{ id: snapshot.id, scanId: snapshot.scanId, capturedAt: snapshot.capturedAt, fingerprint: snapshot.fingerprint }];
+			const next: HypothesisStore = { ...current, generation: (current.generation ?? 0) + 1, updatedAt: timestamp, hypotheses: [...current.hypotheses, ...additions].sort((a, b) => a.id.localeCompare(b.id)), snapshots };
+			validateStore(next);
+			// Cancellation is checked at the last boundary before the atomic write.
+			throwIfCancelled(signal);
+			await this.write(safeRoot, next, signal, commitControl);
+			return next;
+		});
+	}
+
 	private async markChangedEvidenceStale(root: string, store: HypothesisStore): Promise<HypothesisStore> {
 		let changed = false;
 		const active = store.hypotheses.filter((hypothesis) => hypothesis.evidenceFreshness !== 'stale' && hypothesis.evidenceFreshness !== 'provenance-unavailable');
@@ -146,6 +196,30 @@ export class HypothesisStoreService {
 		return changed ? { ...store, generation: (store.generation ?? 0) + 1, updatedAt: new Date().toISOString(), hypotheses } : store;
 	}
 
+	private async assertAiProposalEvidenceFresh(root: string, snapshot: HypothesisSnapshot, proposals: readonly ValidatedHypothesisAiProposal[]): Promise<void> {
+		const references = [...new Map(proposals.flatMap((proposal) => [...proposal.supportingEvidence, ...proposal.contradictoryEvidence]).filter((ref) => ref.kind === 'source-span').map((ref) => [ref.id, ref])).values()];
+		if (!references.length) {throw new HypothesisStoreError('AI proposals require verified source-span evidence; existing data was preserved.');}
+		if (!this.filesystem.readFileBoundedBytes) {throw new HypothesisStoreError('AI proposal persistence requires bounded evidence reads; existing data was preserved.');}
+		let totalBytes = 0;
+		const files = new Map<string, Uint8Array>();
+		for (const ref of references) {
+			if (!ref.file || !ref.contentHash || !ref.fileContentHash || ref.startLine === undefined || ref.endLine === undefined || !await isSafeStoreRelativeFile(root, ref.file, this.filesystem)) {throw new HypothesisStoreError('AI proposal evidence path or provenance is invalid; existing data was preserved.');}
+			let bytes = files.get(ref.file);
+			if (!bytes) {
+				const absolute = path.resolve(root, ref.file);
+				const stat = await this.filesystem.stat(absolute);
+				if (!stat.isFile() || stat.size > MAX_SOURCE_FILE_BYTES || totalBytes + stat.size > MAX_FRESHNESS_BYTES) {throw new HypothesisStoreError('AI proposal source evidence exceeds freshness limits; existing data was preserved.');}
+				bytes = await this.filesystem.readFileBoundedBytes(absolute, Math.min(MAX_SOURCE_FILE_BYTES, MAX_FRESHNESS_BYTES - totalBytes));
+				if (bytes.byteLength > MAX_SOURCE_FILE_BYTES || totalBytes + bytes.byteLength > MAX_FRESHNESS_BYTES) {throw new HypothesisStoreError('AI proposal source evidence exceeds freshness limits; existing data was preserved.');}
+				totalBytes += bytes.byteLength;
+				files.set(ref.file, bytes);
+			}
+			let content: string;
+			try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch {throw new HypothesisStoreError('AI proposal source evidence is no longer valid UTF-8; existing data was preserved.');}
+			if (hashSourceContent(content) !== ref.fileContentHash || hashSourceSpan(content, ref.startLine, ref.endLine) !== ref.contentHash) {throw Object.assign(new Error('AI proposal evidence changed after preparation; create a fresh preparation.'), { code: 'HYPOTHESIS_STALE_GENERATION' });}
+		}
+	}
+
 	private async read(root: string): Promise<HypothesisStore> {
 		const file = storePath(root);
 		await assertSafeStoreTarget(root, file, this.filesystem, true);
@@ -166,7 +240,7 @@ export class HypothesisStoreService {
 		return { ...parsed, generation: parsed.generation ?? 0 };
 	}
 
-	private async write(root: string, store: HypothesisStore): Promise<void> {
+	private async write(root: string, store: HypothesisStore, signal?: AbortSignal, commitControl?: HypothesisAiCommitControl): Promise<void> {
 		const directory = path.dirname(storePath(root));
 		await assertSafeStoreDirectory(root, directory, this.filesystem, true);
 		const target = storePath(root);
@@ -182,13 +256,19 @@ export class HypothesisStoreService {
 			createdTemporary = true;
 			await assertSafeStoreTarget(root, temporary, this.filesystem, false);
 			if (!(await this.filesystem.exists(target))) {
+				throwIfCancelled(signal);
+				if (commitControl && !commitControl.beginCommit()) {throwIfCancelled(signal); throw Object.assign(new Error('Core request cancelled before persistence commit.'), { code: 'CORE_REQUEST_CANCELLED' });}
 				await this.filesystem.rename(temporary, target);
+				commitControl?.markCommitted();
 				return;
 			}
 			const backup = `${target}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.bak`;
 			await this.filesystem.rename(target, backup);
 			try {
+				throwIfCancelled(signal);
+				if (commitControl && !commitControl.beginCommit()) {throwIfCancelled(signal); throw Object.assign(new Error('Core request cancelled before persistence commit.'), { code: 'CORE_REQUEST_CANCELLED' });}
 				await this.filesystem.rename(temporary, target);
+				commitControl?.markCommitted();
 			} catch (error) {
 				try { await this.filesystem.rename(backup, target); }
 				catch { throw Object.assign(new Error(`Could not replace hypothesis store. The previous store is preserved at ${backup}; recover it before continuing.`), { code: 'HYPOTHESIS_STORE_RECOVERY_REQUIRED' }); }
@@ -473,11 +553,12 @@ function isHypothesis(value: unknown): value is SecurityHypothesis {
 		|| !Array.isArray(value.contradictions) || value.contradictions.length > 20
 		|| !isStringList(value.assumptions, 10, 500) || !isStringList(value.verificationSteps, 10, 500)
 		|| !isAsset(value.asset) || !isConfidence(value.confidence)) {return false;}
-	const allowedKeys = new Set(['id','title','description','weakness','attackPath','asset','evidence','rationale','confidence','assumptions','contradictions','impact','verificationSteps','status','evidenceFreshness','createdAt','updatedAt','snapshotId','relatedFindingIds','relatedRuleIds','relatedHypothesisIds','review']);
+	const allowedKeys = new Set(['id','title','description','weakness','attackPath','asset','evidence','rationale','confidence','assumptions','contradictions','impact','verificationSteps','status','evidenceFreshness','createdAt','updatedAt','snapshotId','relatedFindingIds','relatedRuleIds','relatedHypothesisIds','origin','review']);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key))) {return false;}
 	if (value.evidenceFreshness !== undefined && !['current','stale','provenance-unavailable'].includes(String(value.evidenceFreshness))) {return false;}
 	if (![...value.evidence, ...value.contradictions].every(isEvidenceRef)) {return false;}
 	if (value.review !== undefined && !isReview(value.review)) {return false;}
+	if (value.origin !== undefined && (!isRecord(value.origin) || Object.keys(value.origin).some((key) => !['kind','preparationId','providerId','modelId'].includes(key)) || value.origin.kind !== 'ai-proposal' || !isBoundedString(value.origin.preparationId, 80, 1) || !isBoundedString(value.origin.providerId, 32, 1) || !isBoundedString(value.origin.modelId, 128, 1))) {return false;}
 	const idLists = [value.relatedFindingIds, value.relatedRuleIds, value.relatedHypothesisIds];
 	return idLists.every((items) => Array.isArray(items) && items.length <= 100 && items.every((item: unknown) => typeof item === 'string' && item.length <= 200))
 		&& (value.weakness === undefined || isBoundedString(value.weakness, 120))
@@ -488,6 +569,7 @@ function isRecord(value: unknown): value is Record<string, any> { return Boolean
 function isTimestamp(value: unknown): value is string { return typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value)); }
 function isBoundedString(value: unknown, max: number, min = 0): value is string { return typeof value === 'string' && value.length >= min && value.length <= max; }
 function isStringList(value: unknown, maxItems: number, maxLength: number): value is string[] { return Array.isArray(value) && value.length <= maxItems && value.every((item) => isBoundedString(item, maxLength)); }
+function throwIfCancelled(signal?: AbortSignal): void {if (signal?.aborted) {throw Object.assign(new Error('Core request cancelled.'), { code: 'CORE_REQUEST_CANCELLED' });}}
 function isAsset(value: unknown): boolean {
 	return isRecord(value) && Object.keys(value).every((key) => ['kind','id','label'].includes(key))
 		&& ['file','dependency','service','project'].includes(String(value.kind))

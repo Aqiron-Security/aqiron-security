@@ -70,6 +70,130 @@ suite('Aqiron CLI', () => {
 		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
 	});
 
+	test('JSON adds scan skip diagnostics while preserving the existing scan and report fields', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		const stdout = captureOutput();
+		const fake = new FakeCoreClient();
+		fake.skippedFiles = 2;
+		fake.skipReasons = { 'line-limit': 1, 'size-limit': 1 };
+		try {
+			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--trust-local-workspace'], { stdout, stderr: captureOutput(), createClient: () => fake }), 0);
+			const result = JSON.parse(stdout.text) as { scan: Record<string, unknown>; report: { summary: { total: number } } };
+			assert.equal(result.scan.filesScanned, 8);
+			assert.equal(result.scan.skippedFiles, 2);
+			assert.equal(result.scan.coverageDiagnosticsAvailable, true);
+			assert.equal(result.scan.coverageDiagnosticsPresent, true);
+			assert.equal(result.scan.coverageDiagnosticsValid, true);
+			assert.equal(result.scan.coverageStatus, 'partial');
+			assert.equal(result.scan.skippedFilesCountCertainty, 'exact');
+			assert.deepEqual(result.scan.skipReasons, { 'line-limit': 1, 'size-limit': 1 });
+			assert.equal(result.report.summary.total, 2);
+
+			const conflictJson = captureOutput();
+			const conflictFake = new FakeCoreClient();
+			conflictFake.skippedFiles = 1;
+			conflictFake.skipReasons = { first: 2, second: 3 };
+			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--trust-local-workspace'], { stdout: conflictJson, stderr: captureOutput(), createClient: () => conflictFake }), 0);
+			const conflictScan = (JSON.parse(conflictJson.text) as { scan: Record<string, unknown> }).scan;
+			assert.equal(conflictScan.skippedFiles, 5);
+			assert.equal(conflictScan.skippedFilesIsLowerBound, true);
+			assert.equal(conflictScan.skippedFilesCountCertainty, 'lower-bound');
+			assert.equal(conflictScan.skipCountConflict, true);
+
+			const legacyJson = captureOutput();
+			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--trust-local-workspace'], { stdout: legacyJson, stderr: captureOutput(), createClient: () => new FakeCoreClient() }), 0);
+			const legacyScan = (JSON.parse(legacyJson.text) as { scan: Record<string, unknown> }).scan;
+			assert.equal(legacyScan.coverageStatus, 'unavailable');
+			assert.equal(legacyScan.coverageDiagnosticsPresent, false);
+			assert.equal(legacyScan.skippedFilesCountCertainty, 'indeterminate');
+			assert.equal('skippedFiles' in legacyScan, false);
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
+
+	test('text reports partial coverage and reasons, tolerating malformed optional diagnostics', async () => {
+		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
+		try {
+			const partial = captureOutput();
+			const fake = new FakeCoreClient();
+			fake.skippedFiles = 1;
+			fake.skipReasons = { 'line-limit': 1 };
+			assert.equal(await runCli(['scan', workspace, '--trust-local-workspace'], { stdout: partial, stderr: captureOutput(), createClient: () => fake }), 0);
+			assert.match(partial.text, /Coverage: Partial \(1 file skipped\)/);
+			assert.match(partial.text, /Skip reasons: line-limit \(1\)/);
+			assert.match(partial.text, /Findings: 2/);
+
+			const reasonsOnly = captureOutput();
+			const reasonsOnlyFake = new FakeCoreClient();
+			reasonsOnlyFake.skipReasons = { 'line-limit': 1 };
+			assert.equal(await runCli(['scan', workspace, '--trust-local-workspace'], { stdout: reasonsOnly, stderr: captureOutput(), createClient: () => reasonsOnlyFake }), 0);
+			assert.match(reasonsOnly.text, /Coverage: Partial \(1 file skipped\)/);
+
+			const explicitZeroWithReasons = captureOutput();
+			const explicitZeroWithReasonsFake = new FakeCoreClient();
+			explicitZeroWithReasonsFake.skippedFiles = 0;
+			explicitZeroWithReasonsFake.skipReasons = { 'line-limit': 2 };
+			assert.equal(await runCli(['scan', workspace, '--trust-local-workspace'], { stdout: explicitZeroWithReasons, stderr: captureOutput(), createClient: () => explicitZeroWithReasonsFake }), 0);
+			assert.match(explicitZeroWithReasons.text, /Coverage: Partial \(at least 2 files skipped; conflicting totals, exact count unavailable\)/);
+
+			const explicitExceedsReasons = captureOutput();
+			const explicitExceedsReasonsFake = new FakeCoreClient();
+			explicitExceedsReasonsFake.skippedFiles = 8;
+			explicitExceedsReasonsFake.skipReasons = { 'line-limit': 2 };
+			assert.equal(await runCli(['scan', workspace, '--trust-local-workspace'], { stdout: explicitExceedsReasons, stderr: captureOutput(), createClient: () => explicitExceedsReasonsFake }), 0);
+			assert.match(explicitExceedsReasons.text, /at least 8 files skipped; conflicting totals/);
+
+			const clean = captureOutput();
+			const cleanFake = new FakeCoreClient();
+			cleanFake.skippedFiles = 0;
+			cleanFake.skipReasons = {};
+			assert.equal(await runCli(['scan', workspace, '--trust-local-workspace'], { stdout: clean, stderr: captureOutput(), createClient: () => cleanFake }), 0);
+			assert.doesNotMatch(clean.text, /Coverage: Partial|Coverage: Unavailable/);
+
+			const complete = captureOutput();
+			assert.equal(await runCli(['scan', workspace, '--trust-local-workspace'], { stdout: complete, stderr: captureOutput(), createClient: () => new FakeCoreClient() }), 0);
+			assert.match(complete.text, /Coverage: Unavailable/);
+
+			const malformed = captureOutput();
+			const malformedFake = new FakeCoreClient();
+			malformedFake.skippedFiles = -1;
+			malformedFake.skipReasons = { '<img onerror=alert(1)>': -2, 'bad\u001b[31m': 1 };
+			assert.equal(await runCli(['scan', workspace, '--trust-local-workspace'], { stdout: malformed, stderr: captureOutput(), createClient: () => malformedFake }), 0);
+			assert.doesNotMatch(malformed.text, /<img|bad|Coverage: Partial/);
+			assert.match(malformed.text, /Coverage: Unavailable/);
+
+			const overflowJson = captureOutput();
+			const overflowFake = new FakeCoreClient();
+			overflowFake.skipReasons = { first: Number.MAX_SAFE_INTEGER, second: 1 };
+			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--trust-local-workspace'], { stdout: overflowJson, stderr: captureOutput(), createClient: () => overflowFake }), 0);
+			const overflowScan = (JSON.parse(overflowJson.text) as { scan: Record<string, unknown> }).scan;
+			assert.equal(overflowScan.skippedFiles, Number.MAX_SAFE_INTEGER);
+			assert.equal(overflowScan.skippedFilesIsLowerBound, true);
+			assert.equal(overflowScan.skippedFilesCountCertainty, 'lower-bound');
+			assert.equal(overflowScan.coverageStatus, 'partial');
+
+			const overflowText = captureOutput();
+			assert.equal(await runCli(['scan', workspace, '--trust-local-workspace'], { stdout: overflowText, stderr: captureOutput(), createClient: () => overflowFake }), 0);
+			assert.match(overflowText.text, new RegExp(`at least ${Number.MAX_SAFE_INTEGER} files skipped`));
+
+			const safeSumJson = captureOutput();
+			const safeSumFake = new FakeCoreClient();
+			safeSumFake.skipReasons = { first: Number.MAX_SAFE_INTEGER - 4, second: 3 };
+			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--trust-local-workspace'], { stdout: safeSumJson, stderr: captureOutput(), createClient: () => safeSumFake }), 0);
+			const safeSumScan = (JSON.parse(safeSumJson.text) as { scan: Record<string, unknown> }).scan;
+			assert.equal(safeSumScan.skippedFiles, Number.MAX_SAFE_INTEGER - 1);
+			assert.equal(safeSumScan.skippedFilesIsLowerBound, undefined);
+
+			const veryLargeExplicitJson = captureOutput();
+			const veryLargeExplicitFake = new FakeCoreClient();
+			veryLargeExplicitFake.skippedFiles = Number.MAX_SAFE_INTEGER;
+			assert.equal(await runCli(['scan', workspace, '--format', 'json', '--trust-local-workspace'], { stdout: veryLargeExplicitJson, stderr: captureOutput(), createClient: () => veryLargeExplicitFake }), 0);
+			const veryLargeExplicitScan = (JSON.parse(veryLargeExplicitJson.text) as { scan: Record<string, unknown> }).scan;
+			assert.equal(veryLargeExplicitScan.skippedFiles, Number.MAX_SAFE_INTEGER);
+			assert.equal(veryLargeExplicitScan.skippedFilesIsLowerBound, undefined);
+			assert.equal(veryLargeExplicitScan.skippedFilesCountCertainty, 'exact');
+		} finally { fs.rmSync(workspace, { recursive: true, force: true }); }
+	});
+
 	test('writes output files exclusively and preserves an existing file', async () => {
 		const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-'));
 		const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-cli-output-'));
@@ -384,6 +508,9 @@ class FakeCoreClient implements CliCoreClient {
 	stopCalls = 0;
 	cancelCalls = 0;
 	emptyFindings = false;
+	filesScanned = 8;
+	skippedFiles?: number;
+	skipReasons?: Partial<Record<string, number>>;
 	request?: { requestId: string; workspaceRoot: string; trusted: boolean; mode: 'deep' };
 	onStart?: (request: NonNullable<FakeCoreClient['request']>) => Promise<void>;
 	onStartUp?: () => Promise<void>;
@@ -416,6 +543,9 @@ class FakeCoreClient implements CliCoreClient {
 			scanId: request.requestId,
 			state: { mode: 'deep' } as CoreScanStartResult['state'],
 			findings,
+			filesScanned: this.filesScanned,
+			skippedFiles: this.skippedFiles,
+			skipReasons: this.skipReasons,
 			correlation,
 			graph,
 			telemetry,

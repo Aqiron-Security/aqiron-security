@@ -48,6 +48,17 @@ export interface WorkspaceProfile {
 export interface WorkspaceStats {
 	filesScanned: number;
 	indexedFiles: number;
+	/** False when this scan's aggregate skip diagnostics were not recorded (for example, historical scans). */
+	coverageDiagnosticsAvailable?: boolean;
+	coverageDiagnosticsPresent?: boolean;
+	coverageDiagnosticsValid?: boolean;
+	coverageStatus?: 'complete' | 'partial' | 'unavailable';
+	skippedFiles?: number;
+	skippedFilesIsLowerBound?: boolean;
+	skippedFilesCountCertainty?: 'exact' | 'lower-bound' | 'indeterminate';
+	skipCountConflict?: boolean;
+	skipReasonsTruncated?: boolean;
+	skipReasons?: Partial<Record<string, number>>;
 	scanStatus: 'Idle' | 'Scanning' | 'Complete' | 'Failed';
 	lastScanDurationMs: number;
 }
@@ -181,6 +192,8 @@ export interface WebviewState {
 	stats: WorkspaceStats;
 	counts: Counts;
 	issues: WebviewIssue[];
+	coreScanId?: string;
+	hypothesisAiConsent?: { manifest?: import('../../../packages/core/src/hypotheses/contracts').HypothesisAiPreparedDisclosureManifest; contentFingerprint?: string; result?: import('../../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult; executionResult?: import('../../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult<{ proposalCount: number }>; executionPending?: boolean; message?: string };
 	suggestions: Suggestion[];
 	selectedThreatId?: string;
 	zoom: number;
@@ -236,6 +249,17 @@ export interface ThreatSnapshot {
 	title: string;
 	createdAt: string;
 	filesScanned: number;
+	/** Present only for an in-memory live scan; persisted history does not record coverage diagnostics. */
+	coverageDiagnosticsAvailable?: boolean;
+	coverageDiagnosticsPresent?: boolean;
+	coverageDiagnosticsValid?: boolean;
+	coverageStatus?: 'complete' | 'partial' | 'unavailable';
+	skippedFiles?: number;
+	skippedFilesIsLowerBound?: boolean;
+	skippedFilesCountCertainty?: 'exact' | 'lower-bound' | 'indeterminate';
+	skipCountConflict?: boolean;
+	skipReasonsTruncated?: boolean;
+	skipReasons?: Partial<Record<string, number>>;
 	executiveSummary?: string;
 	issues: WebviewIssue[];
 }

@@ -7,8 +7,8 @@ import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
 import { CoreClientTransport, CoreProcessManager } from './coreProcessManager';
 import { CoreAgentSession, CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreReportGenerateRequest, CoreEventMessage, CoreMethodResults } from '../runtime';
 import { WorkspaceCustomRule } from '../shared/workspaceRules';
-import { HypothesisReviewInput, SecurityHypothesis } from '../hypotheses/contracts';
-import { HypothesisGenerationResult } from '../hypotheses/contracts';
+import { HypothesisAiPrepareRequest, HypothesisAiPrepareResult, HypothesisGenerationResult, HypothesisReviewInput, SecurityHypothesis } from '../hypotheses/contracts';
+import type { HypothesisAiLifecycleResult } from '../hypotheses/hypothesisAiPreparation';
 
 export interface CoreClientOptions {
 	clientVersion: string;
@@ -108,6 +108,26 @@ export class CoreClient extends EventEmitter {
 		await this.start();
 		const requestId = request.requestId ?? createId();
 		return await this.manager.request('hypotheses.generate', { workspaceRoot: request.workspaceRoot, scanId: request.scanId }, 120_000, requestId);
+	}
+
+	async prepareHypothesisAiDisclosure(request: HypothesisAiPrepareRequest): Promise<HypothesisAiPrepareResult> {
+		await this.start();
+		return await this.manager.request('hypotheses.ai.prepare', request, 120_000);
+	}
+
+	async approveHypothesisAiPreparation(preparationId: string, contentFingerprint: string): Promise<HypothesisAiLifecycleResult> {
+		await this.start();
+		return await this.manager.request('hypotheses.ai.approve', { preparationId, contentFingerprint }, 120_000);
+	}
+
+	async denyHypothesisAiPreparation(preparationId: string, contentFingerprint: string): Promise<HypothesisAiLifecycleResult> {
+		await this.start();
+		return await this.manager.request('hypotheses.ai.deny', { preparationId, contentFingerprint }, 120_000);
+	}
+
+	async executeHypothesisAiPreparation(preparationId: string, contentFingerprint: string, requestId?: string): Promise<CoreMethodResults['hypotheses.ai.execute']> {
+		await this.start();
+		return await this.manager.request('hypotheses.ai.execute', { preparationId, contentFingerprint }, 120_000, requestId);
 	}
 
 	async listHypotheses(request: { workspaceRoot: string; status?: SecurityHypothesis['status']; includeStale?: boolean }): Promise<CoreMethodResults['hypotheses.list']> {

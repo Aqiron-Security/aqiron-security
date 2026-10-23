@@ -14,7 +14,8 @@ import { AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
 import { CoreFileScanRequest, CoreFileScanResult } from '../shared/fileScan';
 import { ResolvedWorkspaceScanPolicy } from '../shared/workspaceScanPolicy';
 import { WorkspaceCustomRule } from '../shared/workspaceRules';
-import { HypothesisGenerationResult, HypothesisReviewInput, HypothesisReviewResult, SecurityHypothesis } from '../hypotheses/contracts';
+import { HypothesisAiPrepareRequest, HypothesisAiPrepareResult, HypothesisGenerationResult, HypothesisReviewInput, HypothesisReviewResult, SecurityHypothesis } from '../hypotheses/contracts';
+import type { HypothesisAiLifecycleResult } from '../hypotheses/hypothesisAiPreparation';
 
 export const CORE_PROTOCOL_VERSION = 1;
 
@@ -56,6 +57,10 @@ export type CoreMethodParams = {
 	'workspace.agent-sessions.set': { workspaceRoot: string; sessions: CoreAgentSession[] };
 	'workspace.recommendations.get': { workspaceRoot: string };
 	'hypotheses.generate': { workspaceRoot: string; scanId: string };
+	'hypotheses.ai.prepare': HypothesisAiPrepareRequest;
+	'hypotheses.ai.approve': { preparationId: string; contentFingerprint: string };
+	'hypotheses.ai.deny': { preparationId: string; contentFingerprint: string };
+	'hypotheses.ai.execute': { preparationId: string; contentFingerprint: string };
 	'hypotheses.list': { workspaceRoot: string; status?: SecurityHypothesis['status']; includeStale?: boolean };
 	'hypotheses.get': { workspaceRoot: string; hypothesisId: string };
 	'hypotheses.review': HypothesisReviewInput;
@@ -98,6 +103,10 @@ export interface CoreMethodResults {
 	'workspace.agent-sessions.set': { sessions: CoreAgentSession[] };
 	'workspace.recommendations.get': { generated: boolean; suggestions: string[] };
 	'hypotheses.generate': HypothesisGenerationResult;
+	'hypotheses.ai.prepare': HypothesisAiPrepareResult;
+	'hypotheses.ai.approve': HypothesisAiLifecycleResult;
+	'hypotheses.ai.deny': HypothesisAiLifecycleResult;
+	'hypotheses.ai.execute': HypothesisAiLifecycleResult<{ proposalCount: number }>;
 	'hypotheses.list': { hypotheses: SecurityHypothesis[]; storeVersion: 1 };
 	'hypotheses.get': { hypothesis?: SecurityHypothesis };
 	'hypotheses.review': HypothesisReviewResult;
@@ -243,6 +252,8 @@ export interface CoreScanStartResult {
 	findings: UnifiedFinding[];
 	report: SecurityReportContent;
 	filesScanned?: number;
+	skippedFiles?: number;
+	skipReasons?: Partial<Record<string, number>>;
 	durationMs?: number;
 	toolResults?: ScannerResult[];
 	correlation?: CorrelationResult;

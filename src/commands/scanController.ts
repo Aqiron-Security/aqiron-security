@@ -14,6 +14,7 @@ import { CoreFileScanRequest, CoreFileScanResult, ResolvedFileScanPolicy } from 
 import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
 import { CoreClient } from '../../packages/core/src/client';
 import { getResolvedCurrentFileRules } from '../scanner/rules';
+import { formatWorkspaceScanCompletion, normalizeScanCoverage } from '../shared/scanCoverage';
 
 export class ScanController implements vscode.Disposable {
 	private readonly debouncer = new Debouncer(800);
@@ -25,6 +26,7 @@ export class ScanController implements vscode.Disposable {
 		lastScanDurationMs: 0,
 	};
 	private running = false;
+	private latestCoreScanId?: string;
 	private lastReport?: { directory?: string; jsonPath?: string; sarifPath?: string; pdfPath?: string; executiveSummary?: string };
 	private readonly orchestrator: SecurityOrchestrator;
 	private readonly pipelineSubscription: vscode.Disposable;
@@ -81,15 +83,15 @@ export class ScanController implements vscode.Disposable {
 
 		await this.runScan(async () => {
 			const result = await this.orchestrator.scanWorkspace(workspaceFolder, mode);
+			const coverage = normalizeScanCoverage(result.skippedFiles, result.skipReasons);
 			const visibleIssues = filterVisibleIssues(result.issues);
 			this.replaceAll(visibleIssues);
 			this.lastReport = result.report ? { ...result.report.exports, executiveSummary: result.report.executiveSummary } : undefined;
 			if (showMessage) {
 				const hiddenCount = result.issues.length - visibleIssues.length;
-				const suffix = hiddenCount > 0 ? ` (${hiddenCount} generated/build finding${hiddenCount === 1 ? '' : 's'} hidden)` : '';
-				vscode.window.showInformationMessage(`Aqiron Security scan completed: ${visibleIssues.length} actionable issue${visibleIssues.length === 1 ? '' : 's'} found${suffix}.`);
+				vscode.window.showInformationMessage(formatWorkspaceScanCompletion(visibleIssues.length, hiddenCount, coverage));
 			}
-			return { ...result, issues: visibleIssues };
+			return { ...result, ...coverage, issues: visibleIssues };
 		}, mode);
 	}
 
@@ -245,6 +247,7 @@ export class ScanController implements vscode.Disposable {
 		}
 
 		this.running = true;
+		this.latestCoreScanId = undefined;
 		this.workspaceStats.scanStatus = 'Scanning';
 		this.sidebar.setScanStatus('Scanning');
 		this.statusBar.text = '$(sync~spin) Aqiron Security Scanning';
@@ -257,9 +260,14 @@ export class ScanController implements vscode.Disposable {
 				},
 				async () => {
 					const result = await task();
+					this.latestCoreScanId = result.scanId;
 					this.workspaceStats = {
 						filesScanned: result.filesScanned,
 						indexedFiles: result.filesScanned,
+						coverageDiagnosticsAvailable: result.coverageDiagnosticsAvailable,
+						...(result.skippedFiles !== undefined ? { skippedFiles: result.skippedFiles } : {}),
+						...(result.skippedFilesIsLowerBound !== undefined ? { skippedFilesIsLowerBound: result.skippedFilesIsLowerBound } : {}),
+						...(result.skipReasons ? { skipReasons: result.skipReasons } : {}),
 						scanStatus: 'Complete',
 						lastScanDurationMs: result.durationMs,
 					};
@@ -292,7 +300,7 @@ export class ScanController implements vscode.Disposable {
 	private refreshViews(scanMode?: 'quick' | 'deep' | 'analysis'): void {
 		const allIssues = [...this.issuesByFile.values()].flat();
 		this.diagnostics.setIssues(allIssues);
-		this.sidebar.update(allIssues, this.workspaceStats, this.lastReport, scanMode);
+		this.sidebar.update(allIssues, this.workspaceStats, this.lastReport, scanMode, this.latestCoreScanId);
 
 		const counts = getCounts(allIssues);
 		this.statusBar.text = `$(shield) Aqiron Security ${counts.total} Issue${counts.total === 1 ? '' : 's'}`;

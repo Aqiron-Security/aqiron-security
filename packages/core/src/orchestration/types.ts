@@ -19,6 +19,8 @@ export interface NativeScanResult {
 	sourceProvenance?: FindingSourceProvenance[];
 	excludedProvenanceCount?: number;
 	filesScanned: number;
+	skippedFiles?: number;
+	skipReasons?: Partial<Record<string, number>>;
 	durationMs: number;
 }
 
@@ -70,4 +72,6 @@ export interface CoreScanResult {
 	/** Internal scan-time provenance. Runtime retains it separately from public scan results. */
 	sourceProvenance?: FindingSourceProvenance[];
 	excludedProvenanceCount?: number;
+	skippedFiles?: number;
+	skipReasons?: Partial<Record<string, number>>;
 }

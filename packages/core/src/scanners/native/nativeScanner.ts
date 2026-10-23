@@ -5,13 +5,15 @@ import { FileSystem } from '../../shared/platform';
 import { CoreFileScanResult, ResolvedFileScanPolicy } from '../../shared/fileScan';
 import { ResolvedWorkspaceScanPolicy } from '../../shared/workspaceScanPolicy';
 import { WorkspaceCustomRule } from '../../shared/workspaceRules';
-import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent } from '../../shared/sourceProvenance';
+import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent, MAX_SOURCE_LINE_INDEX_LINES, SourceLineIndex, sourceLineCount } from '../../shared/sourceProvenance';
 
 export interface NativeRuleScanResult {
 	findings: UnifiedFinding[];
 	sourceProvenance?: FindingSourceProvenance[];
 	excludedProvenanceCount?: number;
 	filesScanned: number;
+	skippedFiles?: number;
+	skipReasons?: Partial<Record<string, number>>;
 	durationMs: number;
 }
 
@@ -34,6 +36,9 @@ export class NativeWorkspaceScanner {
 		const startedAt = Date.now();
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		if (token?.isCancellationRequested) {throw new Error('Core request cancelled.');}
+		if (sourceLineCount(content) > MAX_SOURCE_LINE_INDEX_LINES) {
+			return { scanId, filePath, state: 'skipped', skipReason: 'line-limit', findings: [], filesScanned: 0, findingCount: 0, durationMs: Date.now() - startedAt };
+		}
 		const skipReason = getFileSkipReason(filePath, content, policy);
 		if (skipReason) {
 			return { scanId, filePath, state: 'skipped', skipReason, findings: [], filesScanned: 0, findingCount: 0, durationMs: Date.now() - startedAt };
@@ -66,16 +71,20 @@ export class NativeWorkspaceScanner {
 		let hashedSourceBytes = 0;
 		let hashedSpanBytes = 0;
 		let filesScanned = 0;
+		let skippedFiles = 0;
+		const skipReasons: Record<string, number> = {};
+		const recordSkip = (reason: string): void => { skippedFiles += 1; skipReasons[reason] = (skipReasons[reason] ?? 0) + 1; };
 		for (const file of files) {
 			if (token?.isCancellationRequested) {
 				break;
 			}
 			try {
 				const stat = policy ? await this.filesystem.stat(file) : undefined;
-				if (policy && stat && stat.size > policy.maxFileSizeBytes) {continue;}
+				if (policy && stat && stat.size > policy.maxFileSizeBytes) {recordSkip('size-limit'); continue;}
 				const content = await this.filesystem.readFile(file, 'utf8');
+				if (sourceLineCount(content) > MAX_SOURCE_LINE_INDEX_LINES) { excludedProvenanceCount += 1; recordSkip('line-limit'); continue; }
 				const observedAt = new Date().toISOString();
-				if (policy && shouldSkipByWorkspacePolicy(file, root, content, policy)) {continue;}
+				if (policy && shouldSkipByWorkspacePolicy(file, root, content, policy)) {recordSkip('workspace-policy'); continue;}
 				let fileFindings: UnifiedFinding[];
 				if (policy) {
 					const filePolicy: ResolvedFileScanPolicy = {
@@ -89,6 +98,7 @@ export class NativeWorkspaceScanner {
 						customRules: policy.customRules,
 					};
 					const result = await this.scanFileContent(file, content, 'workspace', filePolicy, token);
+					if (result.state === 'skipped') {recordSkip(result.skipReason ?? 'workspace-policy'); continue;}
 					fileFindings = result.findings.map(withWorkspaceSecretIdentity);
 				} else {
 					fileFindings = scanFile(file, content);
@@ -103,7 +113,8 @@ export class NativeWorkspaceScanner {
 				if (safeRelative && fileFindings.length > 0 && sourceBytes <= 10_000_000 && hashedSourceBytes + sourceBytes <= 50_000_000) {
 					hashedSourceBytes += sourceBytes;
 					const sourceContentHash = hashSourceContent(content);
-					const sourceLineIndex = createSourceLineIndex(content);
+					let sourceLineIndex: SourceLineIndex;
+					try { sourceLineIndex = createSourceLineIndex(content); } catch { excludedProvenanceCount += fileFindings.length; findings.push(...fileFindings); filesScanned += 1; continue; }
 					const spanHashes = new Map<string, string>();
 					for (const finding of fileFindings) {
 						if (sourceProvenance.length >= 10_000) {excludedProvenanceCount += 1; continue;}
@@ -126,10 +137,11 @@ export class NativeWorkspaceScanner {
 				findings.push(...fileFindings);
 				filesScanned += 1;
 			} catch {
-				// Individual unreadable files do not abort the workspace scan.
+				// A file-level failure does not abort the workspace scan, but is not counted as analysed.
+				recordSkip('scan-error');
 			}
 		}
-		return { findings, sourceProvenance, excludedProvenanceCount, filesScanned: policy ? filesScanned : files.length, durationMs: Date.now() - startedAt };
+		return { findings, sourceProvenance, excludedProvenanceCount, filesScanned, skippedFiles, skipReasons, durationMs: Date.now() - startedAt };
 	}
 }
 

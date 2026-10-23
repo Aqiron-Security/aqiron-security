@@ -4,8 +4,9 @@ import * as fs from 'fs/promises';
 import * as os from 'os';
 import { strict as assert } from 'assert';
 import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
-import { CredentialStore } from '../../packages/core/src/shared/platform';
-import { AITransport } from '../../packages/core/src/ai/utils/request';
+import { NodeCredentialStore } from '../../packages/core/src/runtime/nodeAdapters';
+import { CredentialStore, NetworkClient, NetworkResponse } from '../../packages/core/src/shared/platform';
+import { AITransport, createNetworkTransport } from '../../packages/core/src/ai/utils/request';
 
 interface CoreResponse {
 	id: string;
@@ -15,7 +16,62 @@ interface CoreResponse {
 	error?: { code: string; message: string };
 }
 
+async function createWorkspaceTempDirectory(prefix: string): Promise<string> {
+	let directory = __dirname;
+	while (directory !== path.dirname(directory)) {
+		try {
+			await fs.access(path.join(directory, 'package.json'));
+			return await fs.mkdtemp(path.join(directory, `.${prefix}-`));
+		} catch {
+			directory = path.dirname(directory);
+		}
+	}
+	throw new Error('Could not locate the repository root for a runtime test fixture.');
+}
+
 suite('Core runtime process', () => {
+	test('Core OpenRouter rejection logging contains only safe status/category diagnostics', async () => {
+		const marker = 'SECRET=do-not-share';
+		const modelId = 'private-model-identifier';
+		const values = new Map<string, string>([
+			['aqiron.ai.settings', JSON.stringify({ selectedProvider: 'openrouter', selectedModel: modelId, temperature: 0.2, maxTokens: 1024, timeoutMs: 30_000, retries: 0, streaming: true, openRouterEndpoint: 'https://test.invalid/api/v1' })],
+			['aqiron.ai.openrouter.apiKey', 'private-provider-credential'],
+		]);
+		const credentialStore: CredentialStore = { get: async (key) => values.get(key), set: async (key, value) => { values.set(key, value); }, delete: async (key) => { values.delete(key); } };
+		let failureMode: 'json' | 'malformed' | 'throw' = 'json';
+		const network: NetworkClient = { request: async (url) => {
+			if (url.endsWith('/models')) {return fakeResponse(200, JSON.stringify({ data: [{ id: modelId, supported_parameters: [] }] }));}
+			if (failureMode === 'throw') {throw new Error(`Input rejected: ${marker}`);}
+			if (failureMode === 'malformed') {return fakeResponse(400, `malformed response ${marker}`);}
+			return fakeResponse(400, JSON.stringify({ error: { message: `Input rejected: ${marker}` } }));
+		} };
+		const runtime = new CoreRuntime({ coreVersion: 'safe-provider-error-test', credentialStore, aiTransport: createNetworkTransport(network) });
+		const originalWrite = process.stderr.write.bind(process.stderr);
+		let capturedLogs = '';
+		process.stderr.write = ((chunk: string | Uint8Array) => { capturedLogs += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'); return true; }) as typeof process.stderr.write;
+		try {
+			for (const [index, mode] of (['json', 'malformed', 'throw'] as const).entries()) {
+				failureMode = mode;
+				const id = `safe-provider-rejection-${index}`;
+				const response = await runtime.handle({ id, type: 'request', method: 'ai.chat', params: {
+					sessionId: id, providerId: 'openrouter', model: modelId, text: 'Do not log this prompt.', intelligence: 'Medium', history: [],
+					context: { workspaceName: 'fixture', projectTypes: [], backend: 'Core', currentFile: 'None', scanStatus: 'Complete', issues: [], stats: { filesScanned: 0, indexedFiles: 0 }, apis: [] },
+				} }, () => undefined);
+				assert.equal(response.success, false);
+				assert.ok(!JSON.stringify(response).includes(marker));
+			}
+			const rejectionLogs = capturedLogs.split(/\r?\n/).filter((line) => line.includes('ai.openrouter.request.rejected'));
+			assert.equal(rejectionLogs.length, 3);
+			assert.ok(rejectionLogs.some((line) => line.includes('"status":400') && line.includes('"category":"request-rejected"')));
+			assert.ok(rejectionLogs.some((line) => line.includes('"status":502') && line.includes('"category":"provider-unavailable"')));
+			assert.ok(!capturedLogs.includes(marker));
+			assert.ok(!capturedLogs.includes(modelId));
+			assert.ok(!capturedLogs.includes('private-provider-credential'));
+		} finally {
+			process.stderr.write = originalWrite as typeof process.stderr.write;
+		}
+	});
+
 	test('handshakes, reports health, and exposes credential metadata without requiring a keychain session', async () => {
 		const runtime = path.resolve(__dirname, '../../../dist/core-runtime.js');
 		const child = childProcess.spawn(process.execPath, [runtime], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -60,9 +116,6 @@ suite('Core runtime process', () => {
 			assert.equal(health.ok, true);
 			assert.equal(health.ready, true);
 
-			const status = await request<{ hasValue: boolean }>('credentials.status', { key: `aqiron.missing.${Date.now()}` });
-			assert.equal(status.hasValue, false);
-
 			await request('core.shutdown');
 		} finally {
 			child.kill();
@@ -78,6 +131,8 @@ suite('Core runtime process', () => {
 		};
 		const runtime = new CoreRuntime({ coreVersion: 'test', credentialStore: store });
 		const emit = (): void => undefined;
+		const status = await runtime.handle({ id: 'cred-status-missing', type: 'request', method: 'credentials.status', params: { key: 'missing-test-key' } }, emit);
+		assert.equal((status.result as { hasValue: boolean }).hasValue, false);
 		const set = await runtime.handle({ id: 'cred-set', type: 'request', method: 'credentials.set', params: { key: 'test-key', value: 'super-secret' } }, emit);
 		assert.deepEqual(set.result, { hasValue: true, updatedAt: (set.result as { updatedAt: string }).updatedAt });
 		assert.ok(!JSON.stringify(set).includes('super-secret'));
@@ -86,6 +141,26 @@ suite('Core runtime process', () => {
 		await runtime.handle({ id: 'cred-delete', type: 'request', method: 'credentials.delete', params: { key: 'test-key' } }, emit);
 		const deleted = await runtime.handle({ id: 'cred-deleted', type: 'request', method: 'credentials.exists', params: { key: 'test-key' } }, emit);
 		assert.deepEqual(deleted.result, { exists: false });
+	});
+
+	test('Windows keychain access denial makes status unavailable without mutating credentials', async () => {
+		let reads = 0;
+		let writes = 0;
+		const credentialStore = new NodeCredentialStore({
+			platform: 'win32',
+			keytarFactory: () => ({
+				getPassword: async () => { reads++; throw new Error('Access is denied.\r\n'); },
+				setPassword: async () => { writes++; },
+				deletePassword: async () => { writes++; return false; },
+			}),
+		});
+		const runtime = new CoreRuntime({ coreVersion: 'credential-unavailable-test', credentialStore });
+		const response = await runtime.handle({ id: 'credential-status-unavailable', type: 'request', method: 'credentials.status', params: { key: 'missing-test-key' } }, () => undefined);
+		assert.equal(response.success, true);
+		assert.deepEqual(response.result, { hasValue: false });
+		assert.equal(reads, 1);
+		assert.equal(writes, 0, 'read-only credential status must not set or delete credentials');
+		assert.doesNotMatch(JSON.stringify(response), /Access is denied/);
 	});
 
 	test('Core clients observe credentials across runtime restarts and can delete them', async () => {
@@ -129,7 +204,7 @@ suite('Core runtime process', () => {
 	});
 
 	test('Core loads existing workspace threat history without running a scan', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-threat-history-'));
+		const root = await createWorkspaceTempDirectory('aqiron-threat-history');
 		const file = path.join(root, '.aqiron-security', 'threats.json');
 		await fs.mkdir(path.dirname(file), { recursive: true });
 		await fs.writeFile(file, JSON.stringify([{ id: 'stored-scan', title: 'Security scan - 1 finding', createdAt: '2026-10-01T00:00:00.000Z', filesScanned: 4, extraMetadata: { retained: true }, issues: [{ id: 'stored-finding', file: path.join(root, 'lib', 'main.dart'), title: 'Stored threat', message: 'Review this finding', severity: 'High', ruleId: 'custom.flutter.test', range: { startLine: 8, startColumn: 2 }, lineText: 'dangerousCall()' }] }]), 'utf8');
@@ -171,7 +246,7 @@ suite('Core runtime process', () => {
 	});
 
 	test('Core agent session storage is project-scoped, redacts secrets, and is available after Core restart', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-agent-sessions-'));
+		const root = await createWorkspaceTempDirectory('aqiron-agent-sessions');
 		const runtime = new CoreRuntime({ coreVersion: 'agent-sessions-test' });
 		const session = { id: 'session-1', title: 'Review workspace', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:01:00.000Z', model: 'model-a', intelligence: 'balanced', messages: [{ id: 'message-1', role: 'user' as const, content: 'do not persist sk-12345678901234567890', createdAt: '2026-10-01T00:00:00.000Z' }] };
 		try {
@@ -202,7 +277,7 @@ suite('Core runtime process', () => {
 	});
 
 	test('Core rag.index withAi generates and persists recommendations through Core AI without scanning', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-rag-refresh-'));
+		const root = await createWorkspaceTempDirectory('aqiron-rag-refresh');
 		const values = new Map<string, string>([
 			['aqiron.ai.settings', JSON.stringify({ selectedProvider: 'openrouter', selectedModel: 'minimax/minimax-m3.1-flash:free', temperature: 0.2, maxTokens: 1024, timeoutMs: 30_000, retries: 0, streaming: true, openRouterEndpoint: 'https://test.invalid/api/v1' })],
 			['aqiron.ai.openrouter.apiKey', 'test-secret-never-log'],
@@ -312,7 +387,7 @@ suite('Core runtime process', () => {
 	});
 
 	test('Core recommendation refresh accepts VS Code plain text output and preserves existing data on invalid output', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-rag-refresh-invalid-'));
+		const root = await createWorkspaceTempDirectory('aqiron-rag-refresh-invalid');
 		const directory = path.join(root, '.aqiron-security');
 		await fs.mkdir(directory, { recursive: true });
 		const previous = '[{"title":"Existing recommendation","detail":"Keep this until generation succeeds.","command":"Existing recommendation"}]';
@@ -425,3 +500,15 @@ suite('Core runtime process', () => {
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 });
+
+function fakeResponse(status: number, text: string): NetworkResponse {
+	const bytes = new TextEncoder().encode(text);
+	return {
+		ok: status >= 200 && status < 300,
+		status,
+		headers: { 'content-type': 'application/json' },
+		text: async () => text,
+		json: async <T>() => JSON.parse(text) as T,
+		body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(bytes); controller.close(); } }),
+	};
+}

@@ -4,7 +4,7 @@ import { CorrelatedRelationship } from '../correlation/correlationEngine';
 import { UnifiedFinding } from '../shared/finding';
 import { FileSystem } from '../shared/platform';
 import { ProjectProfile } from '../project/projectProfile';
-import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent } from '../shared/sourceProvenance';
+import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent, SourceReadBudget, SourceReadBudgetExceededError } from '../shared/sourceProvenance';
 
 export { hashSourceSpan } from '../shared/sourceProvenance';
 import { ConfidenceFactor, HypothesisEvidenceRef, HypothesisSnapshot, SecurityHypothesis } from './contracts';
@@ -26,6 +26,8 @@ export async function buildHypothesisSnapshot(input: {
 	scanProvenance?: readonly FindingSourceProvenance[];
 	capturedAt?: string;
 	cancelled?: () => boolean;
+	/** Optional operation budget shared with a later verification/read stage. */
+	readBudget?: SourceReadBudget;
 }): Promise<HypothesisSnapshot> {
 	const root = await physicalWorkspaceRoot(input.workspaceRoot, input.filesystem);
 	const findings: UnifiedFinding[] = [];
@@ -58,11 +60,12 @@ export async function buildHypothesisSnapshot(input: {
 		let readAttempted = false;
 		try {
 			const stat = await input.filesystem.stat(abs);
-			const remaining = MAX_SNAPSHOT_SOURCE_BYTES - snapshotBytes;
+			const remaining = input.readBudget ? input.readBudget.maxBytes - input.readBudget.bytesRead : MAX_SNAPSHOT_SOURCE_BYTES - snapshotBytes;
+			if (input.readBudget && stat.isFile() && stat.size <= MAX_SOURCE_FILE_BYTES && stat.size > remaining) { throw new SourceReadBudgetExceededError(); }
 			if (!stat.isFile() || stat.size > MAX_SOURCE_FILE_BYTES || stat.size > remaining || remaining <= 0) {excludedUnprovenancedFindings += group.length; continue;}
 			const readLimit = Math.min(MAX_SOURCE_FILE_BYTES, remaining);
 			readAttempted = true;
-			bytes = await input.filesystem.readFileBoundedBytes(abs, readLimit);
+			bytes = input.readBudget ? await input.readBudget.read(input.filesystem, abs, MAX_SOURCE_FILE_BYTES) : await input.filesystem.readFileBoundedBytes(abs, readLimit);
 			if (bytes.byteLength > readLimit) {
 				snapshotBytes = MAX_SNAPSHOT_SOURCE_BYTES;
 				excludedUnprovenancedFindings += group.length;
@@ -70,6 +73,7 @@ export async function buildHypothesisSnapshot(input: {
 			}
 			snapshotBytes += bytes.byteLength;
 		} catch (error) {
+			if (error instanceof SourceReadBudgetExceededError) { throw error; }
 			if (readAttempted) {
 				if (error && typeof error === 'object' && 'bytesRead' in error && Number.isSafeInteger((error as { bytesRead?: unknown }).bytesRead)) {snapshotBytes += Math.min(MAX_SNAPSHOT_SOURCE_BYTES - snapshotBytes, Number((error as { bytesRead: number }).bytesRead));}
 				else {snapshotBytes = MAX_SNAPSHOT_SOURCE_BYTES;}
@@ -80,7 +84,8 @@ export async function buildHypothesisSnapshot(input: {
 		let content: string;
 		try { content = Buffer.from(bytes).toString('utf8'); } catch {excludedUnprovenancedFindings += group.length; continue;}
 		const fileHash = hashSourceContent(content);
-		const sourceLineIndex = createSourceLineIndex(content);
+		let sourceLineIndex: ReturnType<typeof createSourceLineIndex>;
+		try { sourceLineIndex = createSourceLineIndex(content); } catch { excludedUnprovenancedFindings += group.length; continue; }
 		const spanHashes = new Map<string, string | undefined>();
 		for (const { finding, recorded } of group) {
 			const endLine = finding.endLine ?? finding.line;

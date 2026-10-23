@@ -3,17 +3,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{atomic::{AtomicU64, Ordering}, mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 struct DesktopState {
-    bridge: Arc<Mutex<Option<BridgeProcess>>>,
+    bridge: Arc<Mutex<Option<Arc<BridgeProcess>>>>,
     workspace: Arc<Mutex<Option<PathBuf>>>,
     finding_files: Arc<Mutex<HashMap<String, PathBuf>>>,
     finding_exports: Arc<Mutex<HashMap<String, Value>>>,
@@ -21,9 +21,31 @@ struct DesktopState {
 }
 
 struct BridgeProcess {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    child: Mutex<Child>,
+    stdin: Mutex<Option<ChildStdin>>,
+    pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>,
+    active_synthesis: Mutex<HashMap<String, String>>,
+    next_id: AtomicU64,
+    disconnected: Arc<Mutex<Option<String>>>,
+}
+
+const MAX_BRIDGE_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PENDING_BRIDGE_REQUESTS: usize = 64;
+
+fn bind_synthesis_cancellation_token(active: &Mutex<HashMap<String, String>>, token: &str, core_request_id: &str) -> Result<(), String> {
+    let mut active = active.lock().map_err(|_| "Desktop Core bridge unavailable")?;
+    if active.len() >= MAX_PENDING_BRIDGE_REQUESTS { return Err("Desktop Core has too many active synthesis executions".into()); }
+    if active.contains_key(token) { return Err("Desktop synthesis cancellation token is already active".into()); }
+    active.insert(token.to_owned(), core_request_id.to_owned());
+    Ok(())
+}
+
+fn resolve_synthesis_cancellation_token(active: &Mutex<HashMap<String, String>>, token: &str) -> Result<Option<String>, String> {
+    Ok(active.lock().map_err(|_| "Desktop Core bridge unavailable")?.get(token).cloned())
+}
+
+fn unbind_synthesis_cancellation_token(active: &Mutex<HashMap<String, String>>, token: &str) {
+    if let Ok(mut active) = active.lock() { active.remove(token); }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -105,25 +127,115 @@ impl Drop for BridgeProcess {
         // EOF asks the Node bridge to stop Core and emit its final disconnect event.
         // Keep stdout open until that orderly shutdown has completed to avoid racing
         // a final bridge write against a closed pipe.
-        self.stdin.take();
+        if let Ok(mut pending) = self.pending.lock() {
+            for (_, sender) in pending.drain() { let _ = sender.send(Err("Aqiron Core bridge was disposed".into())); }
+        }
+        if let Ok(mut stdin) = self.stdin.lock() { stdin.take(); }
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            match self.child.get_mut().map(|child| child.try_wait()) {
+                Ok(Ok(Some(_))) => return,
+                Ok(Ok(None)) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
                 _ => break,
             }
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Ok(child) = self.child.get_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
 impl BridgeProcess {
-    fn write_request(&mut self, request: &Value) -> Result<(), std::io::Error> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| std::io::Error::new(ErrorKind::BrokenPipe, "Desktop bridge stdin is closed"))?;
-        writeln!(stdin, "{request}")?;
-        stdin.flush()
+    fn request(&self, app: &AppHandle, method: &str, params: Value, cancellation_token: Option<String>) -> Result<Value, String> {
+        let id = format!("desktop-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        if method == "hypotheses.ai.execute" && cancellation_token.as_ref().map_or(true, |token| !token.starts_with("desktop-hypothesis-") || token.len() > 128) { return Err("Desktop synthesis cancellation token is invalid".into()); }
+        if method != "hypotheses.ai.execute" && cancellation_token.is_some() { return Err("A cancellation token is valid only for synthesis execution".into()); }
+        let (sender, receiver) = mpsc::channel();
+        {
+            let mut pending = self.pending.lock().map_err(|_| "Desktop Core bridge unavailable")?;
+            if pending.len() >= MAX_PENDING_BRIDGE_REQUESTS { return Err("Desktop Core has too many pending requests".into()); }
+            if let Some(reason) = self.disconnected.lock().map_err(|_| "Desktop Core bridge unavailable")?.clone() { return Err(reason); }
+            if let Some(token) = cancellation_token.as_ref() {
+                bind_synthesis_cancellation_token(&self.active_synthesis, token, &id)?;
+            }
+            pending.insert(id.clone(), sender);
+        }
+        let request = json!({"id": id, "method": method, "params": params});
+        if request.to_string().len() > MAX_BRIDGE_FRAME_BYTES {
+            if let Ok(mut pending) = self.pending.lock() { pending.remove(&id); }
+            if let Some(token) = cancellation_token.as_ref() { unbind_synthesis_cancellation_token(&self.active_synthesis, token); }
+            return Err("Desktop Core request exceeds the bridge frame limit".into());
+        }
+        let write_result = match self.stdin.lock() {
+            Ok(mut stdin) => match stdin.as_mut() { Some(stdin) => writeln!(stdin, "{request}").and_then(|_| stdin.flush()).map_err(|_| "Desktop Core bridge disconnected"), None => Err("Desktop Core bridge disconnected") },
+            Err(_) => Err("Desktop Core bridge unavailable"),
+        };
+        if let Err(error) = write_result {
+            if let Ok(mut pending) = self.pending.lock() { pending.remove(&id); }
+            if let Some(token) = cancellation_token.as_ref() { unbind_synthesis_cancellation_token(&self.active_synthesis, token); }
+            return Err(error.to_owned());
+        }
+        let result = match receiver.recv_timeout(Duration::from_secs(120)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(mut pending) = self.pending.lock() { pending.remove(&id); }
+                if method != "core.cancel" { let _ = self.request(app, "core.cancel", json!({"requestId": id}), None); }
+                Err("Desktop Core request timed out".into())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("Aqiron Core disconnected".into()),
+        };
+        if let Some(token) = cancellation_token.as_ref() { unbind_synthesis_cancellation_token(&self.active_synthesis, token); }
+        result
+    }
+
+    fn cancel_synthesis(&self, app: &AppHandle, token: &str) -> Result<Value, String> {
+        let target = resolve_synthesis_cancellation_token(&self.active_synthesis, token)?;
+        let Some(request_id) = target else { return Ok(json!({"cancelled": false})); };
+        self.request(app, "core.cancel", json!({"requestId": request_id}), None)
+    }
+}
+
+fn dispatch_bridge_message(pending: &Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>, line: &str, mut emit_event: impl FnMut(&Value)) -> bool {
+    let Ok(message) = serde_json::from_str::<Value>(line) else { return false; };
+    if message.get("type").and_then(Value::as_str) == Some("event") {
+        if let Some(event) = message.get("event") { emit_event(event); }
+        return true;
+    }
+    if message.get("type").and_then(Value::as_str) != Some("response") { return false; }
+    let Some(id) = message.get("id").and_then(Value::as_str) else { return false; };
+    let Some(success) = message.get("success").and_then(Value::as_bool) else { return false; };
+    if (success && !message.get("result").is_some()) || (!success && message.get("error").and_then(Value::as_str).is_none()) { return false; }
+    let sender = pending.lock().ok().and_then(|mut items| items.remove(id));
+    if let Some(sender) = sender {
+        let result = if success {
+            Ok(message.get("result").cloned().unwrap_or(Value::Null))
+        } else {
+            Err(message.get("error").and_then(Value::as_str).unwrap_or("Core request failed").to_owned())
+        };
+        let _ = sender.send(result);
+    }
+    true
+}
+
+fn fail_pending(pending: &Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>, disconnected: &Arc<Mutex<Option<String>>>, reason: &str) {
+    if let Ok(mut state) = disconnected.lock() { *state = Some(reason.to_owned()); }
+    if let Ok(mut requests) = pending.lock() {
+        for (_, sender) in requests.drain() { let _ = sender.send(Err(reason.to_owned())); }
+    }
+}
+
+fn read_bounded_line(reader: &mut impl BufRead, output: &mut Vec<u8>) -> std::io::Result<usize> {
+    output.clear();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() { return Ok(output.len()); }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let count = newline.map_or(available.len(), |index| index + 1);
+        if output.len().saturating_add(count) > MAX_BRIDGE_FRAME_BYTES { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Desktop Core frame exceeds limit")); }
+        output.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if newline.is_some() { return Ok(output.len()); }
     }
 }
 
@@ -133,6 +245,7 @@ async fn core_request(
     state: State<'_, DesktopState>,
     method: String,
     params: Value,
+    request_id: Option<String>,
 ) -> Result<Value, String> {
     let app = app.clone();
     let bridge = state.bridge.clone();
@@ -141,7 +254,7 @@ async fn core_request(
     let finding_exports = state.finding_exports.clone();
     let report_artifacts = state.report_artifacts.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        core_request_blocking(app, bridge, workspace, finding_files, finding_exports, report_artifacts, method, params)
+        core_request_blocking(app, bridge, workspace, finding_files, finding_exports, report_artifacts, method, params, request_id)
     })
     .await
     .map_err(|e| format!("Desktop Core task failed: {e}"))?
@@ -149,21 +262,32 @@ async fn core_request(
 
 fn core_request_blocking(
     app: AppHandle,
-    bridge_state: Arc<Mutex<Option<BridgeProcess>>>,
+    bridge_state: Arc<Mutex<Option<Arc<BridgeProcess>>>>,
     workspace_state: Arc<Mutex<Option<PathBuf>>>,
     finding_files: Arc<Mutex<HashMap<String, PathBuf>>>,
     finding_exports: Arc<Mutex<HashMap<String, Value>>>,
     report_artifacts: Arc<Mutex<HashMap<String, PathBuf>>>,
     method: String,
     supplied_params: Value,
+    request_id: Option<String>,
 ) -> Result<Value, String> {
-    const ALLOWED_METHODS: [&str; 19] = ["project.detect", "project.profile", "scan.start", "rag.index", "ai.providers", "ai.models", "ai.chat", "ai.cancel", "credentials.status", "credentials.set", "credentials.delete", "workspace.rules.get", "workspace.rules.set", "workspace.threat-history.get", "workspace.threat-history.delete", "workspace.agent-sessions.get", "workspace.agent-sessions.set", "workspace.recommendations.get", "workspace.reports.get"];
+    const ALLOWED_METHODS: [&str; 24] = ["project.detect", "project.profile", "scan.start", "rag.index", "ai.providers", "ai.models", "ai.chat", "ai.cancel", "core.cancel", "credentials.status", "credentials.set", "credentials.delete", "workspace.rules.get", "workspace.rules.set", "workspace.threat-history.get", "workspace.threat-history.delete", "workspace.agent-sessions.get", "workspace.agent-sessions.set", "workspace.recommendations.get", "workspace.reports.get", "hypotheses.ai.prepare", "hypotheses.ai.approve", "hypotheses.ai.deny", "hypotheses.ai.execute"];
     if !ALLOWED_METHODS.contains(&method.as_str()) {
         return Err("Unsupported Core method".into());
     }
+    if request_id.is_some() && method != "hypotheses.ai.execute" { return Err("Custom request IDs are reserved for synthesis execution cancellation".into()); }
+    if request_id.as_ref().is_some_and(|id| !id.starts_with("desktop-hypothesis-") || id.len() > 128) { return Err("Desktop Core request ID is invalid".into()); }
+    if method == "core.cancel" && (supplied_params.as_object().map_or(true, |object| object.len() != 1) || supplied_params.get("requestId").and_then(Value::as_str).map_or(true, |id| id.len() > 128 || !id.starts_with("desktop-hypothesis-"))) { return Err("Invalid synthesis cancellation request".into()); }
     let params = if method == "ai.providers" { json!({}) }
     else if method == "ai.models" { supplied_params }
-    else if method == "ai.chat" || method == "ai.cancel" { supplied_params }
+    else if method == "ai.chat" || method == "ai.cancel" || method == "core.cancel" { supplied_params }
+    else if method == "hypotheses.ai.prepare" {
+        let workspace = workspace_state.lock().map_err(|_| "Workspace selection unavailable")?.clone().ok_or("Select a project folder first")?;
+        let mut params = supplied_params;
+        if let Some(object) = params.as_object_mut() { object.insert("workspaceRoot".into(), json!(node_compatible_path(&workspace))); }
+        params
+    }
+    else if method == "hypotheses.ai.approve" || method == "hypotheses.ai.deny" || method == "hypotheses.ai.execute" { supplied_params }
     else if method.starts_with("credentials.") { supplied_params }
     else {
         let workspace = workspace_state.lock().map_err(|_| "Workspace selection unavailable")?.clone().ok_or("Select a project folder first")?;
@@ -179,26 +303,18 @@ fn core_request_blocking(
         else if method == "scan.start" { desktop_scan_params(&workspace, &supplied_params) }
         else { json!({ "workspaceRoot": workspace, "trusted": true }) }
     };
-    let mut slot = bridge_state
-        .lock()
-        .map_err(|_| "Desktop Core bridge unavailable")?;
-    if slot.is_none() {
-        *slot = Some(start_bridge()?);
-    }
-    let bridge = slot.as_mut().ok_or("Desktop Core bridge failed to start")?;
-    let id = format!(
-        "desktop-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_millis()
-    );
-    let request = json!({"id": id, "method": method, "params": params});
-    if let Err(error) = bridge.write_request(&request) {
-        slot.take();
-        return Err(format!("Desktop Core bridge disconnected: {error}"));
-    }
-    match read_response(&app, bridge, &id) {
+    let bridge = {
+        let mut slot = bridge_state.lock().map_err(|_| "Desktop Core bridge unavailable")?;
+        if slot.is_none() { *slot = Some(start_bridge(app.clone())?); }
+        slot.as_ref().cloned().ok_or("Desktop Core bridge failed to start")?
+    };
+    let result = if method == "core.cancel" {
+        let token = params.get("requestId").and_then(Value::as_str).ok_or("Invalid synthesis cancellation request")?;
+        bridge.cancel_synthesis(&app, token)
+    } else {
+        bridge.request(&app, &method, params, request_id)
+    };
+    match result {
         Ok(result) => {
             if method == "workspace.reports.get" {
                 if let Some(root) = workspace_state.lock().ok().and_then(|value| value.clone()) {
@@ -236,7 +352,9 @@ fn core_request_blocking(
             Ok(result)
         },
         Err(error) => {
-            slot.take();
+            if let Ok(mut slot) = bridge_state.lock() {
+                if slot.as_ref().map_or(false, |current| Arc::ptr_eq(current, &bridge)) { slot.take(); }
+            }
             Err(error)
         }
     }
@@ -365,7 +483,7 @@ async fn select_workspace(
     .map_err(|e| format!("Workspace picker failed: {e}"))?
 }
 
-fn start_bridge() -> Result<BridgeProcess, String> {
+fn start_bridge(app: AppHandle) -> Result<Arc<BridgeProcess>, String> {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = manifest
         .join("../../..")
@@ -387,19 +505,30 @@ fn start_bridge() -> Result<BridgeProcess, String> {
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("Unable to start Aqiron Core bridge: {e}"))?;
-    Ok(BridgeProcess {
-        stdin: Some(child
+    let stdin = child
             .stdin
             .take()
-            .ok_or("Desktop bridge stdin unavailable")?),
-        stdout: BufReader::new(
+            .ok_or("Desktop bridge stdin unavailable")?;
+    let mut stdout = BufReader::new(
             child
                 .stdout
                 .take()
-                .ok_or("Desktop bridge stdout unavailable")?,
-        ),
-        child,
-    })
+                .ok_or("Desktop bridge stdout unavailable")?);
+    let pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let disconnected = Arc::new(Mutex::new(None));
+    let process = Arc::new(BridgeProcess { child: Mutex::new(child), stdin: Mutex::new(Some(stdin)), pending: pending.clone(), active_synthesis: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1), disconnected: disconnected.clone() });
+    std::thread::spawn(move || {
+        let mut line = Vec::new();
+        loop {
+            match read_bounded_line(&mut stdout, &mut line) {
+                Ok(0) => { fail_pending(&pending, &disconnected, "Aqiron Core disconnected"); break; }
+                Ok(_) if line.last() == Some(&b'\n') && std::str::from_utf8(&line).ok().is_some_and(|text| dispatch_bridge_message(&pending, text, |event| { let _ = app.emit("desktop-core-event", event); })) => {}
+                Ok(_) => { fail_pending(&pending, &disconnected, "Malformed response from Aqiron Core bridge"); break; }
+                Err(_) => { fail_pending(&pending, &disconnected, "Aqiron Core bridge frame invalid or oversized"); break; }
+            }
+        }
+    });
+    Ok(process)
 }
 
 fn resolve_node_binary(configured: Option<OsString>) -> OsString {
@@ -436,40 +565,6 @@ fn node_compatible_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn read_response(app: &AppHandle, bridge: &mut BridgeProcess, id: &str) -> Result<Value, String> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if bridge
-            .stdout
-            .read_line(&mut line)
-            .map_err(|e| format!("Desktop bridge connection lost: {e}"))?
-            == 0
-        {
-            return Err("Aqiron Core disconnected".into());
-        }
-        let message: Value = serde_json::from_str(&line)
-            .map_err(|e| format!("Invalid desktop bridge response: {e}"))?;
-        if message.get("type").and_then(Value::as_str) == Some("event") {
-            if let Some(event) = message.get("event") {
-                let _ = app.emit("desktop-core-event", event);
-            }
-            continue;
-        }
-        if message.get("id").and_then(Value::as_str) != Some(id) {
-            continue;
-        }
-        if message.get("success").and_then(Value::as_bool) == Some(true) {
-            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-        }
-        return Err(message
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("Core request failed")
-            .to_owned());
-    }
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -487,7 +582,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-	use super::{canonical_project_path, clear_saved_project, desktop_bridge_command, desktop_scan_params, load_project_path, node_compatible_path, persist_selected_project, resolve_node_binary, save_project_path};
+	use super::{bind_synthesis_cancellation_token, canonical_project_path, clear_saved_project, desktop_bridge_command, desktop_scan_params, dispatch_bridge_message, fail_pending, load_project_path, node_compatible_path, persist_selected_project, read_bounded_line, resolve_node_binary, resolve_synthesis_cancellation_token, save_project_path, unbind_synthesis_cancellation_token, MAX_BRIDGE_FRAME_BYTES};
+	use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
 	use std::path::{Path, PathBuf};
 
@@ -496,6 +592,59 @@ mod tests {
 		let directory = std::env::temp_dir().join(format!("aqiron-desktop-project-{}-{unique}", std::process::id()));
 		std::fs::create_dir_all(&directory).unwrap();
 		directory
+	}
+
+	#[test]
+	fn bridge_response_dispatch_correlates_out_of_order_and_ignores_duplicate_or_unknown_ids() {
+		let pending = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+		let (first_tx, first_rx) = std::sync::mpsc::channel();
+		let (second_tx, second_rx) = std::sync::mpsc::channel();
+		pending.lock().unwrap().insert("execute-1".to_owned(), first_tx);
+		pending.lock().unwrap().insert("cancel-1".to_owned(), second_tx);
+		assert!(dispatch_bridge_message(&pending, r#"{"type":"response","id":"cancel-1","success":true,"result":{"cancelled":true}}"#, |_| {}));
+		assert!(dispatch_bridge_message(&pending, r#"{"type":"response","id":"unknown","success":true,"result":null}"#, |_| {}));
+		assert!(dispatch_bridge_message(&pending, r#"{"type":"response","id":"execute-1","success":true,"result":{"state":"cancelled"}}"#, |_| {}));
+		assert!(dispatch_bridge_message(&pending, r#"{"type":"response","id":"execute-1","success":true,"result":{"state":"wrong"}}"#, |_| {}));
+		assert_eq!(second_rx.recv().unwrap().unwrap()["cancelled"], true);
+		assert_eq!(first_rx.recv().unwrap().unwrap()["state"], "cancelled");
+		assert!(pending.lock().unwrap().is_empty(), "resolved requests are removed exactly once");
+	}
+
+	#[test]
+	fn malformed_and_late_bridge_responses_fail_closed_without_reassigning_waiters() {
+		let pending = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+		let disconnected = std::sync::Arc::new(std::sync::Mutex::new(None));
+		let (sender, receiver) = std::sync::mpsc::channel();
+		pending.lock().unwrap().insert("active".to_owned(), sender);
+		assert!(!dispatch_bridge_message(&pending, r#"{"type":"response","id":"active","success":true}"#, |_| {}));
+		fail_pending(&pending, &disconnected, "Malformed response from Aqiron Core bridge");
+		assert_eq!(receiver.recv().unwrap().unwrap_err(), "Malformed response from Aqiron Core bridge");
+		assert_eq!(disconnected.lock().unwrap().as_deref(), Some("Malformed response from Aqiron Core bridge"));
+		assert!(dispatch_bridge_message(&pending, r#"{"type":"response","id":"active","success":true,"result":{}}"#, |_| {}));
+		assert!(pending.lock().unwrap().is_empty());
+	}
+
+	#[test]
+	fn bridge_reader_accepts_exact_frame_limit_and_rejects_one_byte_over_without_unbounded_buffering() {
+		let exact = format!("{}\n", "x".repeat(MAX_BRIDGE_FRAME_BYTES - 1));
+		let mut exact_reader = std::io::BufReader::new(std::io::Cursor::new(exact.into_bytes()));
+		let mut frame = Vec::new();
+		assert_eq!(read_bounded_line(&mut exact_reader, &mut frame).unwrap(), MAX_BRIDGE_FRAME_BYTES);
+		let oversized = format!("{}\n", "x".repeat(MAX_BRIDGE_FRAME_BYTES));
+		let mut oversized_reader = std::io::BufReader::new(std::io::Cursor::new(oversized.into_bytes()));
+		assert_eq!(read_bounded_line(&mut oversized_reader, &mut frame).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+	}
+
+	#[test]
+	fn cancellation_tokens_map_only_to_active_core_ids_and_are_removed_at_terminal_response() {
+		let active = std::sync::Mutex::new(HashMap::new());
+		bind_synthesis_cancellation_token(&active, "desktop-hypothesis-ui-token", "desktop-41").unwrap();
+		assert_eq!(resolve_synthesis_cancellation_token(&active, "desktop-hypothesis-ui-token").unwrap().as_deref(), Some("desktop-41"));
+		assert!(bind_synthesis_cancellation_token(&active, "desktop-hypothesis-ui-token", "desktop-42").is_err(), "an active token cannot point at two executions");
+		unbind_synthesis_cancellation_token(&active, "desktop-hypothesis-ui-token");
+		assert_eq!(resolve_synthesis_cancellation_token(&active, "desktop-hypothesis-ui-token").unwrap(), None);
+		bind_synthesis_cancellation_token(&active, "desktop-hypothesis-ui-token", "desktop-42").unwrap();
+		assert_eq!(resolve_synthesis_cancellation_token(&active, "desktop-hypothesis-ui-token").unwrap().as_deref(), Some("desktop-42"), "a reused UI token cannot associate a late old response because Core protocol IDs are distinct");
 	}
 
 	#[test]

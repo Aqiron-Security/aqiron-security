@@ -57,10 +57,14 @@ export interface CredentialStore {
 
 export interface NetworkRequestOptions {
 	method?: string;
+	/** Provider transports use manual redirects so credentials cannot be forwarded by fetch. */
+	redirect?: RequestRedirect;
 	headers?: Record<string, string>;
 	body?: string | Uint8Array;
 	timeoutMs?: number;
 	cancellationToken?: CancellationTokenLike;
+	/** Native cancellation for bounded provider transports. */
+	abortSignal?: AbortSignal;
 }
 
 export interface NetworkResponse {

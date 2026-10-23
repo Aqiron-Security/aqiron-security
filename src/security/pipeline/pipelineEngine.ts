@@ -13,9 +13,13 @@ export interface PipelineScanOptions {
 }
 
 export interface OrchestratedScanResult {
+	scanId: string;
 	workspaceRoot?: string;
 	target: string;
 	filesScanned: number;
+	coverageDiagnosticsAvailable?: boolean;
+	skippedFiles?: number;
+	skipReasons?: Partial<Record<string, number>>;
 	issues: ReturnType<typeof findingToIssue>[];
 	durationMs: number;
 	findings: UnifiedFinding[];
@@ -49,9 +53,12 @@ export class SecurityPipelineEngine {
 			const report = await writeReportBundle(workspaceFolder.uri.fsPath, result.report);
 			const issues = await findingsToIssues(result.findings);
 			return {
+				scanId: result.scanId,
 				workspaceRoot: result.state.workspaceRoot,
 				target: result.state.targetPath,
 				filesScanned: result.filesScanned ?? result.state.findingsCount,
+				skippedFiles: result.skippedFiles,
+				skipReasons: result.skipReasons,
 				issues,
 				durationMs: result.durationMs ?? 0,
 				findings: result.findings,

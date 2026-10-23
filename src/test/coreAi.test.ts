@@ -11,6 +11,22 @@ import { AIHttpError, AIHttpResponse, AITransport, createNetworkTransport } from
 import { resolveChatGenerationPolicy } from '../../packages/core/src/ai/services/chatGenerationPolicy';
 
 suite('Core AI', () => {
+	test('AI HTTP error categories are fixed and never incorporate constructor-supplied provider text', () => {
+		const marker = 'Input rejected: SECRET=do-not-share';
+		const cases = [
+			[401, 'authentication'], [429, 'rate-limited'], [400, 'request-rejected'], [503, 'provider-unavailable'], [408, 'transport-failure'],
+		] as const;
+		for (const [status, category] of cases) {
+			const error = new AIHttpError(status, marker, { originalMessage: marker, cause: marker });
+			assert.equal(error.status, status);
+			assert.equal(error.category, category);
+			assert.ok(!error.message.includes(marker));
+			assert.equal((error as AIHttpError & { providerError?: unknown }).providerError, undefined);
+			assert.equal((error as AIHttpError & { body?: unknown }).body, undefined);
+			assert.equal((error as AIHttpError & { cause?: unknown }).cause, undefined);
+		}
+	});
+
 	test('interactive chat generation policy is model-aware and preserves other providers', () => {
 		const supported: AIModel = { id: 'nvidia/nemotron-3.5-lightning:free', label: 'Nemotron', providerId: 'openrouter', supportedParameters: ['reasoning', 'max_tokens'], badges: ['free', 'cloud'], capabilities: ['chat', 'reasoning'] };
 		const minimax: AIModel = { ...supported, id: 'minimax/minimax-m3.1-flash:free', label: 'MiniMax M3.1 Flash' };
@@ -177,40 +193,69 @@ suite('Core AI', () => {
 		assert.strictEqual(chunks.filter((chunk) => chunk.type === 'token').map((chunk) => chunk.content).join(''), 'A concise reply.');
 	});
 
-	test('OpenRouter reports safe structured HTTP rejection metadata and preserves typed provider detail', async () => {
+	test('OpenRouter HTTP rejection exposes only fixed category and status, never provider body text', async () => {
 		const diagnostics: Array<Record<string, unknown>> = [];
-		const body = JSON.stringify({ error: { code: 400, message: 'Reasoning is mandatory for this endpoint and cannot be disabled.', metadata: { error_type: 'invalid_request', provider_code: 'bad_reasoning', raw: 'flagged source text must never be logged' } } });
+		const marker = 'SECRET=do-not-share';
+		const body = JSON.stringify({ error: { code: 400, message: `Input rejected: ${marker}`, metadata: { error_type: 'invalid_request', provider_code: 'bad_reasoning' } } });
 		const provider = new OpenRouterProvider(new CredentialService(providerStore('openrouter')), createNetworkTransport({
-			request: async () => ({ ok: false, status: 400, headers: { 'content-type': 'application/json' }, text: async () => body, json: async () => JSON.parse(body), body: null }),
+			request: async () => ({ ok: false, status: 400, headers: { 'content-type': 'application/json' }, text: async () => body, json: async () => JSON.parse(body), body: responseBody(body) }),
 		}), undefined, (entry) => diagnostics.push(entry as unknown as Record<string, unknown>));
 		let rejection: unknown;
 		await assert.rejects(async () => collect(provider.chat({ ...makeChatRequest(), model: 'minimax/minimax-m3.1-flash:free', openRouterReasoning: { enabled: false } })), (error: unknown) => {
 			rejection = error;
-			return error instanceof AIHttpError && error.status === 400 && /HTTP 400/.test(error.message);
+			return error instanceof AIHttpError && error.status === 400 && error.category === 'request-rejected' && /HTTP 400/.test(error.message);
 		});
-		assert.strictEqual(diagnostics.length, 1);
-		assert.strictEqual(diagnostics[0].modelId, 'minimax/minimax-m3.1-flash:free');
-		assert.strictEqual(diagnostics[0].errorCode, '400');
-		assert.strictEqual(diagnostics[0].errorType, 'invalid_request');
-		assert.strictEqual(diagnostics[0].providerCode, 'bad_reasoning');
-		assert.strictEqual(diagnostics[0].parameter, 'reasoning');
-		assert.ok(!JSON.stringify(diagnostics).includes('flagged source text'));
+		assert.deepStrictEqual(diagnostics, [{ status: 400, category: 'request-rejected' }]);
+		assert.ok(!JSON.stringify(diagnostics).includes(marker));
+		assert.ok(!JSON.stringify(diagnostics).includes('minimax/minimax-m3.1-flash:free'));
 		assert.ok(rejection instanceof AIHttpError);
-		assert.match(rejection.message, /Reasoning is mandatory/);
-		assert.strictEqual(rejection.providerError?.originalMessage, 'Reasoning is mandatory for this endpoint and cannot be disabled.');
-		assert.ok(!JSON.stringify(rejection).includes('flagged source text'));
+		assert.ok(!rejection.message.includes(marker));
+		assert.equal((rejection as Error & { cause?: unknown }).cause, undefined);
+		assert.ok(!Reflect.ownKeys(rejection).some((key) => ['providerError', 'originalMessage', 'body', 'cause'].includes(String(key))));
+		assert.ok(!Reflect.ownKeys(rejection).some((key) => String((rejection as Record<PropertyKey, unknown>)[key]).includes(marker)));
 	});
 
-	test('OpenRouter malformed and non-JSON HTTP error bodies remain safe and useful', async () => {
-		for (const [body, expectedFormat] of [['{not json}', 'malformed-json'], ['upstream unavailable', 'non-json']] as const) {
+	test('OpenRouter malformed responses and thrown transport errors retain only safe diagnostics', async () => {
+		for (const body of ['{not json, SECRET=do-not-share}', 'SECRET=do-not-share']) {
 			const diagnostics: Array<Record<string, unknown>> = [];
 			const provider = new OpenRouterProvider(new CredentialService(providerStore('openrouter')), createNetworkTransport({
-				request: async () => ({ ok: false, status: 400, headers: { 'content-type': 'text/plain' }, text: async () => body, json: async () => { throw new Error('not json'); }, body: null }),
+				request: async () => ({ ok: false, status: 400, headers: { 'content-type': 'text/plain' }, text: async () => body, json: async () => { throw new Error('not json'); }, body: responseBody(body) }),
 			}), undefined, (entry) => diagnostics.push(entry as unknown as Record<string, unknown>));
-			await assert.rejects(async () => collect(provider.chat(makeChatRequest())), /Provider request failed with HTTP 400\./);
-			assert.strictEqual(diagnostics[0].bodyFormat, expectedFormat);
-			assert.strictEqual(diagnostics[0].message, 'Provider request failed with HTTP 400.');
+			await assert.rejects(async () => collect(provider.chat(makeChatRequest())), (error: unknown) => error instanceof AIHttpError && error.status === 400 && error.category === 'request-rejected');
+			assert.deepStrictEqual(diagnostics, [{ status: 400, category: 'request-rejected' }]);
+			assert.ok(!JSON.stringify(diagnostics).includes('SECRET=do-not-share'));
 		}
+		const diagnostics: Array<Record<string, unknown>> = [];
+		const provider = new OpenRouterProvider(new CredentialService(providerStore('openrouter')), createNetworkTransport({ request: async () => { throw new Error('Input rejected: SECRET=do-not-share'); } }), undefined, (entry) => diagnostics.push(entry as unknown as Record<string, unknown>));
+		let transportFailure: unknown;
+		await assert.rejects(async () => collect(provider.chat(makeChatRequest())), (error: unknown) => {
+			transportFailure = error;
+			return error instanceof AIHttpError && error.status === 502 && error.category === 'provider-unavailable' && !error.message.includes('SECRET=do-not-share');
+		});
+		assert.deepStrictEqual(diagnostics, [{ status: 502, category: 'provider-unavailable' }]);
+		assert.ok(!JSON.stringify(diagnostics).includes('SECRET=do-not-share'));
+		assert.equal((transportFailure as Error & { cause?: unknown }).cause, undefined);
+		assert.ok(!Reflect.ownKeys(transportFailure as object).some((key) => String((transportFailure as Record<PropertyKey, unknown>)[key]).includes('SECRET=do-not-share')));
+	});
+
+	test('OpenRouter in-band provider error chunks do not forward provider-controlled text', async () => {
+		const marker = 'SECRET=do-not-share';
+		const provider = new OpenRouterProvider(new CredentialService(providerStore('openrouter')), transport({
+			'POST /chat/completions': sseResponse([`data: ${JSON.stringify({ error: { message: `Input rejected: ${marker}` } })}`, 'data: [DONE]']),
+		}));
+		const chunks = await collect(provider.chat(makeChatRequest()));
+		assert.ok(chunks.some((chunk) => chunk.type === 'error' && chunk.error === 'The provider returned an error response.'));
+		assert.ok(!JSON.stringify(chunks).includes(marker));
+	});
+
+	test('Claude in-band provider error chunks do not forward provider-controlled text', async () => {
+		const marker = 'SECRET=do-not-share';
+		const provider = new ClaudeProvider(new CredentialService(providerStore('claude')), transport({
+			'POST /messages': sseResponse([`data: ${JSON.stringify({ type: 'error', error: { message: `Input rejected: ${marker}` } })}`]),
+		}));
+		const chunks = await collect(provider.chat(makeChatRequest()));
+		assert.ok(chunks.some((chunk) => chunk.type === 'error' && chunk.error === 'The provider returned an error response.'));
+		assert.ok(!JSON.stringify(chunks).includes(marker));
 	});
 
 	test('OpenRouter extracts text content-part arrays and terminal completed messages', async () => {
@@ -362,14 +407,19 @@ function transport(responses: Record<string, AIHttpResponse>): AITransport {
 }
 
 function jsonResponse(body: unknown): AIHttpResponse {
+	const serialized = JSON.stringify(body);
 	return {
 		ok: true,
 		status: 200,
 		headers: {},
-		text: async () => JSON.stringify(body),
+		text: async () => serialized,
 		json: async <T = unknown>() => body as T,
-		body: null,
+		body: responseBody(serialized),
 	};
+}
+
+function responseBody(text: string): ReadableStream<Uint8Array> {
+	return new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(text)); controller.close(); } });
 }
 
 function ndjsonResponse(lines: string[]): AIHttpResponse {
