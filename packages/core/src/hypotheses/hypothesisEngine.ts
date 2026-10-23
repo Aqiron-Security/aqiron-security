@@ -133,7 +133,7 @@ export async function buildHypothesisSnapshot(input: {
 		relationships: relationships.map(relationshipKey).sort(),
 	}));
 	const id = `snapshot:${fingerprint.slice(0, 32)}`;
-	return { id, workspaceRoot: root, scanId: input.scanId, capturedAt, fingerprint, profile: input.profile, evidence: refs, findings, relationships, excludedUnprovenancedFindings };
+	return { id, workspaceRoot: lexicalRoot, scanId: input.scanId, capturedAt, fingerprint, profile: input.profile, evidence: refs, findings, relationships, excludedUnprovenancedFindings };
 }
 
 export function safeRelativePath(root: string, input: string): string | undefined {

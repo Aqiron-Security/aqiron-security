@@ -8,8 +8,8 @@ const readline = require('node:readline');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '../../..');
-const bridgePath = path.join(root, 'dist/aqiron-desktop-bridge.js');
-const runtimePath = path.join(root, 'dist/core-runtime.js');
+const bridgePath = process.env.AQIRON_DESKTOP_BRIDGE_PATH || path.join(root, 'dist/aqiron-desktop-bridge.js');
+const runtimePath = process.env.AQIRON_CORE_RUNTIME_PATH || path.join(root, 'dist/core-runtime.js');
 const fixture = path.join(root, 'src/test/fixtures/file-scan/flutter');
 const workspaceTempDirectory = (prefix) => fs.mkdtemp(path.join(root, `.${prefix}-`));
 
@@ -58,6 +58,7 @@ test('desktop bridge dispatches credential deletion to CoreClient', { timeout: 3
 	try {
 		const result = await bridge.request('credentials.delete', { key: 'aqiron.ai.api.desktop-test' });
 		assert.equal(result.hasValue, false);
+		await bridge.waitForLog('MOCK_CREDENTIAL_DELETE:aqiron.ai.api.desktop-test');
 		assert.match(bridge.logs(), /MOCK_CREDENTIAL_DELETE:aqiron\.ai\.api\.desktop-test/);
 		const providers = await bridge.request('ai.providers', {});
 		assert.ok(Array.isArray(providers.providers), 'Desktop project selection reads provider status through CoreClient');
@@ -319,10 +320,29 @@ async function startBridge(runtime) {
 		for (const wake of waiters) wake();
 	});
 	const stderr = [];
-	child.stderr.on('data', (chunk) => stderr.push(String(chunk)));
+	const stderrWaiters = new Set();
+	child.stderr.on('data', (chunk) => {
+		stderr.push(String(chunk));
+		for (const wake of stderrWaiters) { wake(); }
+	});
 	return {
 		events,
 		logs: () => stderr.join(''),
+		waitForLog(marker, timeoutMs = 5_000) {
+			if (stderr.join('').includes(marker)) { return Promise.resolve(); }
+			return new Promise((resolve, reject) => {
+				const cleanup = () => { clearTimeout(timer); stderrWaiters.delete(check); };
+				const check = () => {
+					if (stderr.join('').includes(marker)) { cleanup(); resolve(); }
+				};
+				const timer = setTimeout(() => {
+					cleanup();
+					reject(new Error(`Timed out waiting ${timeoutMs} ms for stderr marker ${JSON.stringify(marker)}. Captured stderr: ${stderr.join('') || '<empty>'}`));
+				}, timeoutMs);
+				stderrWaiters.add(check);
+				check();
+			});
+		},
 		closeInput: () => child.stdin.end(),
 		waitForExit: async () => {
 			if (child.exitCode === null) await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 2_000))]);

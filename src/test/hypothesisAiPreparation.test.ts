@@ -82,6 +82,29 @@ suite('Hypothesis AI disclosure preparation', () => {
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 
+	test('preparation and approval retain lexical workspace identity when the source root resolves physically', async () => {
+		const root = await testRoot('physical-root-identity');
+		const physicalRoot = await testRoot('physical-root-target');
+		try {
+			const content = 'physical root identity evidence\n';
+			const fixture = await seedRuntime(root, content, { id: 'finding-physical-root', title: 'T', description: 'D' });
+			const physicalSource = path.join(physicalRoot, fixture.relativePath);
+			await fs.mkdir(path.dirname(physicalSource), { recursive: true });
+			await fs.writeFile(physicalSource, content);
+			const runtime = new CoreRuntime({ coreVersion: 'physical-root-identity', credentialStore: createConfiguredCredentialStore().store });
+			attachScan(runtime, root, fixture);
+			const filesystem = (runtime as unknown as { filesystem: { realpath(file: string): Promise<string> } }).filesystem;
+			const realpath = filesystem.realpath.bind(filesystem);
+			filesystem.realpath = async (file) => path.resolve(file) === path.resolve(root) ? physicalRoot : realpath(file);
+			const prepared = await prepare(runtime, root, fixture.scanId, [`finding:${fixture.finding.id}`]);
+			const retained = prepared.result as { status: string; manifest: HypothesisAiPreparedDisclosureManifest; contentFingerprint: string };
+			assert.equal(retained.status, 'prepared');
+			assert.equal(retained.manifest.workspaceIdentity, path.resolve(root));
+			const approved = await runtime.approveHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint);
+			assert.equal(approved.ok, true, 'revalidation uses the same lexical scan identity and physical source root');
+		} finally { await fs.rm(root, { recursive: true, force: true }); await fs.rm(physicalRoot, { recursive: true, force: true }); }
+	});
+
 	test('prepares a bounded no-excerpt preview from retained Core scan state without provider, credential, scan, or persistence side effects', async () => {
 		const root = await testRoot('preview-default');
 		let providerCalls = 0;

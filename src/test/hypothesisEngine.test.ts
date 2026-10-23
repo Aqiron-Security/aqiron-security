@@ -74,6 +74,7 @@ suite('Core deterministic hypothesis engine', function () {
 			filesystem.readFileBoundedBytes = async (file, limit) => { bytesReadFrom = file; return await nativeBoundedRead(file, limit); };
 			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: lexicalRoot, scanId: 'lexical-scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(lexicalRoot), filesystem, scanProvenance: makeProvenance(finding, lexicalRoot, content) });
 			assert.equal(bytesReadFrom, physicalFile, 'bounded reads use the physical root after lexical provenance validation');
+			assert.equal(snapshot.workspaceRoot, path.resolve(lexicalRoot), 'snapshot identity remains the lexical scan/provenance workspace');
 			assert.equal(snapshot.findings.length, 1);
 			assert.equal(snapshot.evidence.find((ref) => ref.kind === 'source-span')?.file, relativeFile);
 		} finally { await fs.rm(lexicalRoot, { recursive: true, force: true }); await fs.rm(physicalRoot, { recursive: true, force: true }); }
