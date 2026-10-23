@@ -33,13 +33,14 @@ export async function buildHypothesisSnapshot(input: {
 	// root. Keep that identity for path validation, then use the physical root only
 	// for filesystem reads and symlink containment checks.
 	const lexicalRoot = path.resolve(input.workspaceRoot);
-	const root = await physicalWorkspaceRoot(lexicalRoot, input.filesystem);
+	const root = await resolveHypothesisPhysicalWorkspaceRoot(lexicalRoot, input.filesystem);
 	const findings: UnifiedFinding[] = [];
 	const refs: HypothesisEvidenceRef[] = [];
 	const findingIds = new Set<string>();
 	const findingRelativePaths = new Map<string, string>();
 	const provenance = new Map((input.scanProvenance ?? []).map((item) => [item.findingId, item]));
 	let excludedUnprovenancedFindings = 0;
+	const staleEvidenceIds = new Set<string>();
 	const byFile = new Map<string, Array<{ finding: UnifiedFinding; relative: string; recorded: FindingSourceProvenance }>>();
 	for (const finding of input.findings.slice(0, MAX_FINDINGS)) {
 		if (input.cancelled?.()) {throw new Error('Core request cancelled.');}
@@ -101,7 +102,14 @@ export async function buildHypothesisSnapshot(input: {
 				try { spanHashes.set(spanKey, sourceLineIndex.hashSpan(finding.line, endLine)); } catch { spanHashes.set(spanKey, undefined); }
 			}
 			const hash = spanHashes.get(spanKey);
-			if (!hash || recorded.contentHash !== hash || recorded.sourceContentHash !== fileHash) {excludedUnprovenancedFindings += 1; continue;}
+			if (!hash || recorded.contentHash !== hash || recorded.sourceContentHash !== fileHash) {
+				if (hash && (recorded.contentHash !== hash || recorded.sourceContentHash !== fileHash)) {
+					staleEvidenceIds.add(`finding:${finding.id}`);
+					staleEvidenceIds.add(`span:${relative}:${finding.line}-${endLine}:${recorded.contentHash.slice(0, 16)}`);
+				}
+				excludedUnprovenancedFindings += 1;
+				continue;
+			}
 			const sourceRef: HypothesisEvidenceRef = {
 				id: `span:${relative}:${finding.line}-${endLine}:${hash.slice(0, 16)}`,
 				kind: 'source-span', source: 'Core filesystem snapshot', file: relative,
@@ -133,7 +141,7 @@ export async function buildHypothesisSnapshot(input: {
 		relationships: relationships.map(relationshipKey).sort(),
 	}));
 	const id = `snapshot:${fingerprint.slice(0, 32)}`;
-	return { id, workspaceRoot: lexicalRoot, scanId: input.scanId, capturedAt, fingerprint, profile: input.profile, evidence: refs, findings, relationships, excludedUnprovenancedFindings };
+	return { id, workspaceRoot: lexicalRoot, scanId: input.scanId, capturedAt, fingerprint, profile: input.profile, evidence: refs, findings, relationships, excludedUnprovenancedFindings, ...(staleEvidenceIds.size ? { staleEvidenceIds: [...staleEvidenceIds].sort() } : {}) };
 }
 
 export function safeRelativePath(root: string, input: string): string | undefined {
@@ -146,7 +154,7 @@ export function safeRelativePath(root: string, input: string): string | undefine
 	return relative.split(path.sep).join('/');
 }
 
-async function physicalWorkspaceRoot(root: string, filesystem: FileSystem): Promise<string> {
+export async function resolveHypothesisPhysicalWorkspaceRoot(root: string, filesystem: FileSystem): Promise<string> {
 	if (!filesystem.realpath || !filesystem.lstat) {throw new Error('Hypothesis generation requires filesystem realpath and lstat support.');}
 	const resolved = await filesystem.realpath(path.resolve(root));
 	const stat = await filesystem.lstat(resolved);

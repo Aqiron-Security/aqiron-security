@@ -88,18 +88,26 @@ suite('Hypothesis AI disclosure preparation', () => {
 		try {
 			const content = 'physical root identity evidence\n';
 			const fixture = await seedRuntime(root, content, { id: 'finding-physical-root', title: 'T', description: 'D' });
-			const physicalSource = path.join(physicalRoot, fixture.relativePath);
+			const canonicalPhysicalRoot = await fs.realpath(physicalRoot);
+			const physicalSource = path.join(canonicalPhysicalRoot, fixture.relativePath);
 			await fs.mkdir(path.dirname(physicalSource), { recursive: true });
 			await fs.writeFile(physicalSource, content);
 			const runtime = new CoreRuntime({ coreVersion: 'physical-root-identity', credentialStore: createConfiguredCredentialStore().store });
 			attachScan(runtime, root, fixture);
-			const filesystem = (runtime as unknown as { filesystem: { realpath(file: string): Promise<string> } }).filesystem;
+			const filesystem = (runtime as unknown as { filesystem: { realpath(file: string): Promise<string>; readFileBoundedBytes(file: string, maxBytes: number): Promise<Uint8Array> } }).filesystem;
 			const realpath = filesystem.realpath.bind(filesystem);
-			filesystem.realpath = async (file) => path.resolve(file) === path.resolve(root) ? physicalRoot : realpath(file);
-			const prepared = await prepare(runtime, root, fixture.scanId, [`finding:${fixture.finding.id}`]);
+			const boundedRead = filesystem.readFileBoundedBytes.bind(filesystem);
+			const boundedReadPaths: string[] = [];
+			const pathKey = (value: string) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+			filesystem.realpath = async (file) => pathKey(file) === pathKey(root) ? canonicalPhysicalRoot : realpath(file);
+			filesystem.readFileBoundedBytes = async (file, maxBytes) => {boundedReadPaths.push(file); return await boundedRead(file, maxBytes);};
+			const prepared = await prepare(runtime, root, fixture.scanId, [fixture.spanId], true);
 			const retained = prepared.result as { status: string; manifest: HypothesisAiPreparedDisclosureManifest; contentFingerprint: string };
 			assert.equal(retained.status, 'prepared');
 			assert.equal(retained.manifest.workspaceIdentity, path.resolve(root));
+			assert.equal(retained.manifest.evidence[0]?.excerptText, content.trim());
+			assert.equal(retained.manifest.evidence[0]?.sourcePath, fixture.relativePath);
+			assert.ok(boundedReadPaths.includes(physicalSource), 'snapshot and excerpt reads use the canonical physical root');
 			const approved = await runtime.approveHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint);
 			assert.equal(approved.ok, true, 'revalidation uses the same lexical scan identity and physical source root');
 		} finally { await fs.rm(root, { recursive: true, force: true }); await fs.rm(physicalRoot, { recursive: true, force: true }); }
@@ -193,7 +201,13 @@ suite('Hypothesis AI disclosure preparation', () => {
 			assert.equal((unknownModel.result as { status: string; diagnostic: { code: string } }).diagnostic.code, 'provider-capability-unsupported');
 			await fs.writeFile(path.join(root, fixture.relativePath), 'changed after scan\n');
 			const stale = await prepare(runtime, root, fixture.scanId, [fixture.spanId]);
-			assert.equal((stale.result as { status: string; diagnostic: { code: string } }).diagnostic.code, 'evidence-unavailable');
+			assert.equal((stale.result as { status: string; diagnostic: { code: string } }).diagnostic.code, 'evidence-stale');
+			const inaccessibleRuntime = new CoreRuntime({ coreVersion: 'inaccessible-evidence', credentialStore: createConfiguredCredentialStore().store });
+			attachScan(inaccessibleRuntime, root, fixture);
+			const inaccessibleFs = (inaccessibleRuntime as unknown as { filesystem: { stat(file: string): Promise<{ isFile(): boolean; size: number }> } }).filesystem;
+			inaccessibleFs.stat = async () => {throw new Error('access denied');};
+			const inaccessible = await prepare(inaccessibleRuntime, root, fixture.scanId, [`finding:${fixture.finding.id}`]);
+			assert.equal((inaccessible.result as { status: string; diagnostic: { code: string } }).diagnostic.code, 'evidence-unavailable', 'an unreadable path is not mislabeled as verified stale content');
 			const malformed = await runtime.handle({ id: 'prep-extra', type: 'request', method: 'hypotheses.ai.prepare', params: { workspaceRoot: root, scanId: fixture.scanId, providerId: 'openai', modelId: 'gpt', evidenceIds: [`finding:${fixture.finding.id}`], sourceText: 'forged' } }, () => undefined);
 			assert.equal(malformed.success, false);
 			assert.equal(malformed.error?.code, 'CORE_INVALID_REQUEST');

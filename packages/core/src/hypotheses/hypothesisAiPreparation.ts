@@ -4,7 +4,7 @@ import { AIProviderId } from '../shared/ai';
 import { FileSystem } from '../shared/platform';
 import { createSourceLineIndex, hashSourceContent, SourceReadBudget, SourceReadBudgetExceededError } from '../shared/sourceProvenance';
 import { HYPOTHESIS_AI_PREPARATION_LIMITS as LIMITS, HypothesisAiCommitControl, HypothesisAiPreparationDiagnosticCode, HypothesisAiPrepareRequest, HypothesisAiPrepareResult, HypothesisAiPreparedDisclosureManifest, HypothesisAiPreparedEvidencePreview, HypothesisAiProposedContent, HypothesisEvidenceRef, HypothesisSnapshot } from './contracts';
-import { relationshipKey, safeRelativePath, validateEvidenceReference } from './hypothesisEngine';
+import { relationshipKey, resolveHypothesisPhysicalWorkspaceRoot, safeRelativePath, validateEvidenceReference } from './hypothesisEngine';
 import { hypothesisAiModelCapability, HypothesisAiBoundExecutionRequest, HypothesisAiProviderConfigurationSnapshot } from './hypothesisAiConfiguration';
 import type { HypothesisAiRequestContext } from './contracts';
 
@@ -279,7 +279,7 @@ export async function prepareHypothesisAiDisclosure(input: {
 	const selected: HypothesisEvidenceRef[] = [];
 	for (const id of request.evidenceIds) {
 		const ref = byId.get(id);
-		if (!ref) {return rejected('evidence-unavailable', 'A selected evidence reference is not present in the current Core snapshot.');}
+		if (!ref) {const stale = snapshot.staleEvidenceIds?.includes(id) === true; return rejected(stale ? 'evidence-stale' : 'evidence-unavailable', stale ? 'A selected evidence reference no longer matches scanner-recorded source content.' : 'A selected evidence reference is not present in the current Core snapshot.');}
 		if (!validateEvidenceReference(snapshot, ref)) {return rejected('evidence-stale', 'A selected evidence reference failed Core snapshot validation.');}
 		selected.push({ ...ref });
 	}
@@ -296,6 +296,9 @@ export async function prepareHypothesisAiDisclosure(input: {
 	let sourceBytes = 0;
 	let excerptBytes = 0;
 	if (request.includeSourceExcerpts === true) {
+		let physicalRoot: string;
+		try { physicalRoot = await resolveHypothesisPhysicalWorkspaceRoot(snapshot.workspaceRoot, filesystem); }
+		catch { return rejected('excerpt-unavailable', 'The selected source root could not be resolved safely.'); }
 		const spansByPath = new Map<string, { relative: string; refs: HypothesisEvidenceRef[] }>();
 		for (const ref of selected.filter((item) => item.kind === 'source-span')) {
 			const relative = ref.file && safeRelativePath(snapshot.workspaceRoot, ref.file);
@@ -308,8 +311,8 @@ export async function prepareHypothesisAiDisclosure(input: {
 		for (const { relative, refs } of spansByPath.values()) {
 			if (input.cancelled?.()) {throw new Error('Core request cancelled.');}
 			if (refs.some((ref) => !ref.fileContentHash || !ref.contentHash || !ref.startLine || !ref.endLine)) {return rejected('excerpt-unavailable', 'A selected source span lacks verified path, range, or provenance.');}
-			if (!await isSafeSourcePath(snapshot.workspaceRoot, relative, filesystem) || !filesystem.readFileBoundedBytes) {return rejected('excerpt-unavailable', 'A selected source file is missing or cannot be read safely.');}
-			const absolute = path.resolve(snapshot.workspaceRoot, relative);
+			if (!await isSafeSourcePath(physicalRoot, relative, filesystem) || !filesystem.readFileBoundedBytes) {return rejected('excerpt-unavailable', 'A selected source file is missing or cannot be read safely.');}
+			const absolute = path.resolve(physicalRoot, relative);
 			let bytes: Uint8Array;
 			try {
 				const stat = await filesystem.stat(absolute);

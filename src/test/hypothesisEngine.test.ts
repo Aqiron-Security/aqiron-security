@@ -68,12 +68,14 @@ suite('Core deterministic hypothesis engine', function () {
 			const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file: path.join(lexicalRoot, relativeFile), line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.lexical-path', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
 			const filesystem = createFileSystem();
 			const nativeRealpath = filesystem.realpath!;
-			filesystem.realpath = async (value) => path.resolve(value) === path.resolve(lexicalRoot) ? physicalRoot : nativeRealpath(value);
+			const canonicalPhysicalRoot = await fs.realpath(physicalRoot);
+			const pathKey = (value: string) => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+			filesystem.realpath = async (value) => pathKey(value) === pathKey(lexicalRoot) ? canonicalPhysicalRoot : nativeRealpath(value);
 			let bytesReadFrom: string | undefined;
 			const nativeBoundedRead = filesystem.readFileBoundedBytes!;
 			filesystem.readFileBoundedBytes = async (file, limit) => { bytesReadFrom = file; return await nativeBoundedRead(file, limit); };
 			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: lexicalRoot, scanId: 'lexical-scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(lexicalRoot), filesystem, scanProvenance: makeProvenance(finding, lexicalRoot, content) });
-			assert.equal(bytesReadFrom, physicalFile, 'bounded reads use the physical root after lexical provenance validation');
+			assert.equal(bytesReadFrom, path.join(canonicalPhysicalRoot, relativeFile), 'bounded reads use the canonical physical root after lexical provenance validation');
 			assert.equal(snapshot.workspaceRoot, path.resolve(lexicalRoot), 'snapshot identity remains the lexical scan/provenance workspace');
 			assert.equal(snapshot.findings.length, 1);
 			assert.equal(snapshot.evidence.find((ref) => ref.kind === 'source-span')?.file, relativeFile);

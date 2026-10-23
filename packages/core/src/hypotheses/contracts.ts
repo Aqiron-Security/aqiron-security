@@ -115,6 +115,8 @@ export interface HypothesisSnapshot {
 	findings: UnifiedFinding[];
 	relationships: CorrelatedRelationship[];
 	excludedUnprovenancedFindings?: number;
+	/** Evidence IDs whose scanner-recorded source hashes were verified to have changed. */
+	staleEvidenceIds?: string[];
 }
 
 export type HypothesisDiagnosticCode = 'no-evidence' | 'invalid-evidence' | 'candidate-rejected' | 'candidate-deduplicated' | 'no-supported-rule';

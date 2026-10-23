@@ -53,6 +53,18 @@ test('reports counts and preserves failure when the suite ran and tests failed',
 	assert.match(result.stdout, /runner outcome: failure/);
 });
 
+test('prints sanitized failed test titles and error summaries', () => {
+	const result = runVerifier('failure', {
+		tests: 2, passes: 1, failures: 1, pending: 0,
+		failureDetails: [{ title: 'apiKey: synthetic_title_key', error: 'Bearer abc123456789 and api_key=synthetic_api_key and AIzaSySyntheticGoogleKey0123456789 failed' }],
+	});
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /Failed test: apiKey: \[redacted\]/);
+	assert.match(result.stdout, /Bearer \[redacted\]/);
+	assert.match(result.stdout, /api_key=\[redacted\]/);
+	assert.doesNotMatch(result.stdout, /abc123456789|synthetic_title_key|synthetic_api_key|AIzaSySyntheticGoogleKey0123456789/);
+});
+
 test('keeps an executed runner failure without a summary explicitly unverified', () => {
 	const result = runVerifier('failure', undefined);
 	assert.equal(result.status, 1);
