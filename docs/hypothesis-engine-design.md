@@ -1,8 +1,20 @@
 # Aqiron Hypothesis Engine: Architecture and Repository Audit
 
+> **Historical audit and proposal.** The canonical reference for implemented reasoning behavior, security invariants, and future roadmap is [Hypothesis Reasoning Engine](hypothesis_reasoning.md). Proposal content below is historical design context and must not be read as implemented capability.
+
+## Milestone 20 — deterministic reasoning boundary
+
+The operational implementation now includes one deliberately narrow deterministic rule: `malware-artifact-attribution-v1`. It emits an investigative question only when both findings, both current source spans, and the current correlation reference validate against the same Core snapshot. Its `reasoningBasis` records the Core rule ID, exact supporting evidence IDs, and bounded limitations. Candidate confidence remains low because the available correlation is heuristic and execution, reachability, exploitability, and vulnerability status are not established. No candidate is a confirmed vulnerability, and this path does not create or modify `UnifiedFinding` records. For the full current architecture and roadmap, see [Hypothesis Reasoning Engine](hypothesis_reasoning.md).
+
+Evidence Engine V1 remains the source-span fact layer: it records Core-owned scanner observations and checks their workspace, scan, finding, path, span, and digest association and freshness. Milestone 20 consumes those verified references; it does not change Evidence Engine V1 observations or add evidence types. Deterministic candidate IDs use workspace, normalized question, asset, and semantic evidence keys (source/rule/path/span/digests and relationship type/endpoints), excluding random canonical observation IDs and scan-local finding IDs. Store merges preserve validated/rejected historical records intact on an ID collision and retain review state for other matching records.
+
+Stale, unavailable, malformed, duplicate/ambiguous, or snapshot-unbound references cannot support a candidate. This rule does not currently model explicit contradictory facts; absent contradiction data is described as “none observed” and is not treated as proof. It does not infer business-logic vulnerabilities from generic findings or heuristic attack paths.
+
+Controlled validation, reproducible verification, and human research/reviewer workflows remain deferred and require their own policy, evidence model, audit trail, and product decisions. Production hypothesis AI synthesis remains disabled by the fixed Core gate; Milestone 20 adds no configuration switch or alternate execution route. AI suspicion, confidence, and prose do not establish vulnerability status.
+
 ## 1. Executive summary and scope
 
-This document designs a first version of a project-scoped Hypothesis Engine owned by Aqiron Core and consumable through the shared Core protocol. It is an architecture proposal only. No runtime, client, persistence, or UI code is changed by this design.
+This document records the original architecture audit and proposal for a project-scoped Hypothesis Engine owned by Aqiron Core. It is historical design context; current implemented reasoning behavior is described in the Milestone 20 section above. The proposal's broader validation, human workflow, and AI synthesis stages are not implied to be implemented or enabled.
 
 A hypothesis is a traceable, falsifiable, evidence-backed security proposition that still requires investigation. It is not a scanner finding and is never a confirmed vulnerability merely because an AI model proposed it. Only a separate explicit validation workflow, backed by validated evidence and an authorized security review, may create or link a confirmed `UnifiedFinding`.
 

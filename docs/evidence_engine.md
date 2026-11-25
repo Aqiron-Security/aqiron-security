@@ -1,5 +1,9 @@
 # Evidence Engine V1
 
+## Relationship to Milestone 20
+
+Evidence Engine V1 facts remain unchanged: its observations are Core-captured, append-only source-span records with scan/workspace/finding association and explicit freshness rechecks. Milestone 20 is a separate deterministic reasoning layer that consumes verified snapshot references and records its rule and exact evidence IDs in each generated candidate. The current rule is limited to a low-confidence malware-to-artifact attribution question; it does not establish a vulnerability or change scanner findings. See the [canonical Hypothesis Reasoning Engine reference](hypothesis_reasoning.md) for current behavior and deferred work. Controlled validation and human research workflows remain future work. Production AI synthesis remains disabled.
+
 ## Purpose and scope
 
 Evidence Engine V1 stores and rechecks bounded source-span observations produced during Core native workspace scans. Its role is to preserve a Core-owned link between a native scanner finding and the exact source bytes observed for that finding, then make changed or unavailable source explicit when a hypothesis snapshot is built.

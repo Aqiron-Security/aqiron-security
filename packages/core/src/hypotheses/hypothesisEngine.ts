@@ -263,9 +263,10 @@ export function generateDeterministicHypotheses(snapshot: HypothesisSnapshot): S
 		];
 		const claim = `Does the malware indicator reported by ${source.sourceTool} belong to the mobile artifact associated with ${target.sourceTool}?`;
 		// Keep V1 candidate identity independent of random canonical observation IDs.
-		const stableKey = sha256(JSON.stringify({ workspace: snapshot.workspaceRoot, claim: normalizeClaim(claim), asset: targetEvidence.file, evidence: evidence.map(stableEvidenceKey).sort() }));
+		const stableKey = sha256(JSON.stringify({ workspace: snapshot.workspaceRoot, claim: normalizeClaim(claim), asset: targetEvidence.file, evidence: evidence.map((ref) => stableEvidenceKey(ref, snapshot)).sort() }));
 		candidates.push({
 			id: `hyp:${stableKey.slice(0, 32)}`,
+			reasoningBasis: { engine: 'core-deterministic', ruleId: 'malware-artifact-attribution-v1', evidenceIds: evidence.map((ref) => ref.id).sort(), limitations: ['Correlation is heuristic and does not establish artifact attribution.', 'Execution, reachability, exploitability, and vulnerability status are not established.'] },
 			title: 'Verify malware indicator attribution to mobile artifact',
 			description: claim,
 			attackPath: 'Potential indicator-to-artifact association reported by correlation; execution or reachability is not established.',
@@ -297,9 +298,22 @@ export function confidenceBand(factors: readonly ConfidenceFactor[]): 'low' | 'm
 function stripSensitiveEvidence(finding: UnifiedFinding): UnifiedFinding {
 	return { ...finding, rawEvidence: undefined };
 }
-function stableEvidenceKey(ref: HypothesisEvidenceRef): string {
-	return ref.kind === 'source-span' && ref.referenceOrigin === 'canonical'
-		? `span:${ref.file}:${ref.startLine}-${ref.endLine}:${ref.contentHash?.slice(0, 16)}` : ref.id;
+function stableEvidenceKey(ref: HypothesisEvidenceRef, snapshot: HypothesisSnapshot): string {
+	if (ref.kind === 'source-span') {return `span:${ref.file}:${ref.startLine}-${ref.endLine}:${ref.contentHash}`;}
+	if (ref.kind === 'finding') {return `finding:${ref.source}:${ref.ruleId}:${ref.file}:${ref.startLine}-${ref.endLine}:${ref.contentHash}`;}
+	const relation = snapshot.relationships.find((item) => relationshipKey(item) === ref.relationshipId);
+	if (!relation) {return `invalid-relationship:${ref.relationshipId}`;}
+	return semanticRelationshipKey(relation, snapshot);
+}
+
+/** Preserves direction by default; only correlation types built symmetrically are normalized. */
+export function semanticRelationshipKey(relation: CorrelatedRelationship, snapshot: HypothesisSnapshot): string {
+	const endpoints = [relation.sourceId, relation.targetId].map((id) => {
+		const findingRef = snapshot.evidence.find((item) => item.kind === 'finding' && item.findingId === id);
+		return findingRef ? stableEvidenceKey(findingRef, snapshot) : `missing:${id}`;
+	});
+	if (relation.type === 'same-file') {endpoints.sort();}
+	return `relationship:${relation.type}:${endpoints[0]}|${endpoints[1]}`;
 }
 function normalizeClaim(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
 function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }

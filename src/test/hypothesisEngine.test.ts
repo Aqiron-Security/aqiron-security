@@ -8,7 +8,7 @@ import { createFinding } from '../../packages/core/src/findings/finding';
 import { UnifiedFinding } from '../../packages/core/src/shared/finding';
 import { createEmptyProjectProfile } from '../../packages/core/src/project/projectProfile';
 import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
-import { buildHypothesisSnapshot, generateDeterministicHypotheses, hashSourceSpan, safeRelativePath, validateEvidenceReference } from '../../packages/core/src/hypotheses/hypothesisEngine';
+import { buildHypothesisSnapshot, generateDeterministicHypotheses, hashSourceSpan, safeRelativePath, semanticRelationshipKey, validateEvidenceReference } from '../../packages/core/src/hypotheses/hypothesisEngine';
 import { HypothesisStoreError, HypothesisStoreService, transition } from '../../packages/core/src/hypotheses/hypothesisStore';
 import { FileSystem } from '../../packages/core/src/shared/platform';
 import { AITransport } from '../../packages/core/src/ai/utils/request';
@@ -49,6 +49,21 @@ suite('Core deterministic hypothesis engine', function () {
 			assert.ok(!JSON.stringify(hypotheses).includes('do-not-persist'));
 			assert.equal(generateDeterministicHypotheses({ ...first, relationships: [] }).length, 0);
 			assert.equal(generateDeterministicHypotheses({ ...first, relationships: [relation, relation] }).length, 1);
+			assert.equal(hypotheses[0].reasoningBasis?.engine, 'core-deterministic');
+			assert.equal(hypotheses[0].reasoningBasis?.ruleId, 'malware-artifact-attribution-v1');
+			assert.deepEqual(hypotheses[0].reasoningBasis?.evidenceIds, hypotheses[0].evidence.map((ref) => ref.id).sort());
+			assert.ok(hypotheses[0].reasoningBasis?.limitations.length);
+			const rescannedIds = new Map(first.findings.map((finding) => [finding.id, `rescanned-${finding.id}`]));
+			const rescannedRelationships = first.relationships.map((item) => ({ ...item, sourceId: rescannedIds.get(item.sourceId)!, targetId: rescannedIds.get(item.targetId)! }));
+			const rescannedRelationshipId = crypto.createHash('sha256').update([rescannedRelationships[0].type, rescannedRelationships[0].sourceId, rescannedRelationships[0].targetId].join('|')).digest('hex').slice(0, 24);
+			const rescanned = { ...first, id: 'snapshot:rescanned', scanId: 'scan-b', findings: first.findings.map((finding) => ({ ...finding, id: rescannedIds.get(finding.id)! })), relationships: rescannedRelationships,
+				evidence: first.evidence.map((ref) => ref.kind === 'finding' ? { ...ref, id: `finding:${rescannedIds.get(ref.findingId!)}`, findingId: rescannedIds.get(ref.findingId!) }
+					: ref.kind === 'source-span' ? { ...ref, findingId: rescannedIds.get(ref.findingId!) }
+					: { ...ref, id: `relationship:${rescannedRelationshipId}`, relationshipId: rescannedRelationshipId }) };
+			assert.equal(generateDeterministicHypotheses(rescanned)[0]?.id, hypotheses[0].id, 'scan-local finding and relationship IDs do not change semantic hypothesis identity');
+			assert.notEqual(semanticRelationshipKey(relation, first), semanticRelationshipKey({ ...relation, sourceId: relation.targetId, targetId: relation.sourceId }, first), 'reversing malware-to-artifact changes directional semantic identity');
+			const sameFileForward: CorrelatedRelationship = { ...relation, type: 'same-file' };
+			assert.equal(semanticRelationshipKey(sameFileForward, first), semanticRelationshipKey({ ...sameFileForward, sourceId: sameFileForward.targetId, targetId: sameFileForward.sourceId }, first), 'same-file endpoints normalize because the correlation engine constructs it symmetrically');
 			const stored = new HypothesisStoreService(createFileSystem());
 			await stored.mergeGeneration(root, first, hypotheses, () => false);
 			const persisted = await fs.readFile(path.join(root, '.aqiron-security', 'hypotheses.json'), 'utf8');
@@ -466,6 +481,47 @@ suite('Core deterministic hypothesis engine', function () {
 			const afterRepeatedReview = (await service.list(root)).hypotheses.find((item) => item.id === hypothesis.id)!;
 			assert.equal(afterRepeatedReview.status, 'validated');
 			assert.equal(afterRepeatedReview.review?.action, 'validate', 'an invalid repeated transition cannot replace the recorded reviewer decision');
+			const conflictingRegeneration = { ...hypothesis, title: 'Changed generated wording', description: 'Different claim', updatedAt: '2026-02-01T00:00:00.000Z', snapshotId: 'snapshot:later' };
+			await service.mergeGeneration(root, { ...testSnapshot(root), id: 'snapshot:later', capturedAt: '2026-02-01T00:00:00.000Z' }, [conflictingRegeneration], () => false);
+			const preserved = (await service.list(root)).hypotheses.find((item) => item.id === hypothesis.id)!;
+			assert.deepEqual(preserved, afterRepeatedReview, 'a colliding regeneration cannot rewrite reviewed content, evidence, timestamps, or review decision');
+			const rejectedCandidate = { ...hypothesis, id: 'hyp:rejected-history', evidence: [sourceSpan], status: 'proposed' as const };
+			const rejectedSeedSnapshot = { ...testSnapshot(root), id: 'snapshot:rejected-seed', capturedAt: '2026-03-01T00:00:00.000Z' };
+			await service.mergeGeneration(root, rejectedSeedSnapshot, [{ ...rejectedCandidate, snapshotId: rejectedSeedSnapshot.id }], () => false);
+			const rejected = await service.review(root, { workspaceRoot: root, hypothesisId: rejectedCandidate.id, action: 'reject' }, '2026-01-02T00:00:00.000Z');
+			assert.equal(rejected.applied, true);
+			const historicalRejected = rejected.hypothesis;
+			await service.mergeGeneration(root, { ...testSnapshot(root), id: 'snapshot:rejected-later', capturedAt: '2026-04-02T00:00:00.000Z' }, [{ ...rejectedCandidate, title: 'Regenerated rejected title', description: 'Changed rejected claim', updatedAt: '2026-04-02T00:00:00.000Z', snapshotId: 'snapshot:rejected-later' }], () => false);
+			assert.deepEqual((await service.list(root)).hypotheses.find((item) => item.id === rejectedCandidate.id), historicalRejected, 'a rejected record remains completely unchanged after colliding regeneration');
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('validates reasoningBasis evidence IDs as unique and order-independent while accepting legacy records', async () => {
+		const root = await testRoot('reasoning-basis-validation');
+		try {
+			const base = testHypothesis();
+			const secondRef = { ...base.evidence[0]!, id: 'finding:second', findingId: 'second' };
+			const hypothesis = { ...base, evidence: [base.evidence[0]!, secondRef], reasoningBasis: { engine: 'core-deterministic' as const, ruleId: 'test-rule-v1', evidenceIds: [secondRef.id, base.evidence[0]!.id], limitations: ['Investigative lead only.'] } };
+			const store = new HypothesisStoreService(createFileSystem());
+			await store.mergeGeneration(root, testSnapshot(root), [hypothesis], () => false);
+			assert.deepEqual((await store.list(root)).hypotheses[0].reasoningBasis?.evidenceIds, hypothesis.reasoningBasis.evidenceIds, 'valid reordered basis IDs are accepted');
+			const persistedPath = path.join(root, '.aqiron-security', 'hypotheses.json');
+			const persisted = JSON.parse(await fs.readFile(persistedPath, 'utf8'));
+			delete persisted.hypotheses[0].reasoningBasis;
+			await fs.writeFile(persistedPath, JSON.stringify(persisted));
+			assert.equal((await store.list(root)).hypotheses[0].reasoningBasis, undefined, 'legacy record without reasoningBasis remains readable');
+			for (const evidenceIds of [[base.evidence[0]!.id, 'finding:missing'], [base.evidence[0]!.id], [base.evidence[0]!.id, base.evidence[0]!.id], undefined]) {
+				const invalid = JSON.parse(JSON.stringify(persisted));
+				invalid.hypotheses[0].reasoningBasis = { engine: 'core-deterministic', ruleId: 'test-rule-v1', ...(evidenceIds === undefined ? {} : { evidenceIds }), limitations: ['Investigative lead only.'] };
+				await fs.writeFile(persistedPath, JSON.stringify(invalid));
+				await assert.rejects(store.list(root), (error: unknown) => error instanceof HypothesisStoreError, 'mismatched, missing, or duplicate evidence IDs are rejected');
+			}
+			const duplicateEvidenceIds = JSON.parse(JSON.stringify(persisted));
+			duplicateEvidenceIds.hypotheses[0].evidence[0].id = 'A';
+			duplicateEvidenceIds.hypotheses[0].evidence[1].id = 'A';
+			duplicateEvidenceIds.hypotheses[0].reasoningBasis = { engine: 'core-deterministic', ruleId: 'test-rule-v1', evidenceIds: ['A', 'B'], limitations: ['Investigative lead only.'] };
+			await fs.writeFile(persistedPath, JSON.stringify(duplicateEvidenceIds));
+			await assert.rejects(store.list(root), (error: unknown) => error instanceof HypothesisStoreError, 'persisted evidence IDs must be unique independently of reasoningBasis IDs');
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 

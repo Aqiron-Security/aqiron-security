@@ -322,7 +322,9 @@ export function transition(status: HypothesisStatus, action: HypothesisReviewInp
 }
 
 function preserveReview(previous: SecurityHypothesis, candidate: SecurityHypothesis): SecurityHypothesis {
-	if (previous.status === 'validated' || previous.status === 'rejected') {return { ...candidate, status: previous.status, createdAt: previous.createdAt, review: previous.review, evidenceFreshness: 'current' };}
+	// A reviewed terminal record is historical. Re-generation with a colliding
+	// semantic ID must not replace its claim, evidence, timestamps, or decision.
+	if (previous.status === 'validated' || previous.status === 'rejected') {return previous;}
 	if (previous.status === 'dismissed' || previous.status === 'investigating') {return { ...candidate, status: previous.status, createdAt: previous.createdAt, review: previous.review };}
 	if (previous.status === 'stale') {
 		const restoredStatus = previous.review?.action === 'dismiss' ? 'dismissed' : previous.review?.action === 'investigate' ? 'investigating' : candidate.status;
@@ -551,8 +553,9 @@ function isHypothesis(value: unknown): value is SecurityHypothesis {
 		|| !isStringList(value.assumptions, 10, 500) || !isStringList(value.verificationSteps, 10, 500)
 		|| (value.falsificationCriteria !== undefined && !isStringList(value.falsificationCriteria, 10, 300))
 		|| !isAsset(value.asset) || !isConfidence(value.confidence)) {return false;}
-	const allowedKeys = new Set(['id','title','description','weakness','attackPath','asset','evidence','rationale','confidence','assumptions','contradictions','impact','verificationSteps','falsificationCriteria','status','evidenceFreshness','createdAt','updatedAt','snapshotId','relatedFindingIds','relatedRuleIds','relatedHypothesisIds','origin','review']);
+	const allowedKeys = new Set(['id','reasoningBasis','title','description','weakness','attackPath','asset','evidence','rationale','confidence','assumptions','contradictions','impact','verificationSteps','falsificationCriteria','status','evidenceFreshness','createdAt','updatedAt','snapshotId','relatedFindingIds','relatedRuleIds','relatedHypothesisIds','origin','review']);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key))) {return false;}
+	if (value.reasoningBasis !== undefined && !isReasoningBasis(value.reasoningBasis, value.evidence)) {return false;}
 	if (value.evidenceFreshness !== undefined && !['current','stale','provenance-unavailable'].includes(String(value.evidenceFreshness))) {return false;}
 	if (![...value.evidence, ...value.contradictions].every(isEvidenceRef)) {return false;}
 	if (value.review !== undefined && !isReview(value.review)) {return false;}
@@ -562,6 +565,19 @@ function isHypothesis(value: unknown): value is SecurityHypothesis {
 		&& (value.weakness === undefined || isBoundedString(value.weakness, 120))
 		&& (value.attackPath === undefined || isBoundedString(value.attackPath, 500))
 		&& (value.impact === undefined || isBoundedString(value.impact, 500));
+}
+function isReasoningBasis(value: unknown, evidence: Array<{ id: string }>): boolean {
+	if (!isRecord(value) || Object.keys(value).some((key) => !['engine','ruleId','evidenceIds','limitations'].includes(key))
+		|| value.engine !== 'core-deterministic' || !isBoundedString(value.ruleId, 80, 1)
+		|| !isStringList(value.evidenceIds, 20, 500) || value.evidenceIds.length === 0
+		|| !Array.isArray(value.limitations) || value.limitations.length > 5
+		|| !value.limitations.every((item: unknown) => isBoundedString(item, 300, 1))) {return false;}
+	const ids = value.evidenceIds as string[];
+	const evidenceIds = evidence.map((item) => item.id);
+	const basisSet = new Set(ids);
+	const evidenceSet = new Set(evidenceIds);
+	return basisSet.size === ids.length && evidenceSet.size === evidenceIds.length
+		&& ids.length === evidenceIds.length && ids.every((id) => evidenceSet.has(id));
 }
 function isRecord(value: unknown): value is Record<string, any> { return Boolean(value && typeof value === 'object' && !Array.isArray(value)); }
 function isTimestamp(value: unknown): value is string { return typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value)); }

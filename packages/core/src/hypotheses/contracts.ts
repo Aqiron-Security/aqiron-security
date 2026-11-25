@@ -85,6 +85,8 @@ export type ConfidenceFactor =
 
 export interface SecurityHypothesis {
 	id: string;
+	/** Deterministic Core rule and exact snapshot references that produced this lead. */
+	reasoningBasis?: { engine: 'core-deterministic'; ruleId: string; evidenceIds: string[]; limitations: string[] };
 	title: string;
 	description: string;
 	weakness?: string;
