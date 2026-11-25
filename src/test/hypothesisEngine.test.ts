@@ -16,6 +16,7 @@ import * as sourceProvenance from '../../packages/core/src/shared/sourceProvenan
 import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent, MAX_SOURCE_LINE_INDEX_LINES } from '../../packages/core/src/shared/sourceProvenance';
 import { NativeWorkspaceScanner } from '../../packages/core/src/scanners/native/nativeScanner';
 import { createNodeFileSystem } from '../../packages/core/src/runtime/nodeAdapters';
+import { EvidenceEngine } from '../../packages/core/src/evidence/evidenceEngine';
 
 suite('Core deterministic hypothesis engine', function () {
 	// These integration tests exercise filesystem persistence, cross-process
@@ -80,6 +81,101 @@ suite('Core deterministic hypothesis engine', function () {
 			assert.equal(snapshot.findings.length, 1);
 			assert.equal(snapshot.evidence.find((ref) => ref.kind === 'source-span')?.file, relativeFile);
 		} finally { await fs.rm(lexicalRoot, { recursive: true, force: true }); await fs.rm(physicalRoot, { recursive: true, force: true }); }
+	});
+
+	test('resolves only the exact canonical observation and keeps missing associations explicitly legacy', async () => {
+		const root = await testRoot('canonical-evidence-link');
+		try {
+			const file = path.join(root, 'source.ts');
+			const content = 'const canonicalLink = true;\n';
+			await fs.writeFile(file, content);
+			const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file, line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.canonical', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+			const scanProvenance = makeProvenance(finding, root, content);
+			const evidenceEngine = new EvidenceEngine(createNodeFileSystem());
+			const captured = await evidenceEngine.captureScan(root, 'canonical-scan', scanProvenance);
+			const input = { workspaceRoot: root, scanId: 'canonical-scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createNodeFileSystem(), evidenceEngine, scanProvenance };
+			const snapshot = await buildHypothesisSnapshot(input);
+			const span = snapshot.evidence.find((item) => item.kind === 'source-span')!;
+			assert.equal(span.id, captured[0].id);
+			assert.equal(span.referenceOrigin, 'canonical');
+			assert.equal(span.canonicalFreshness, 'current');
+			assert.equal(validateEvidenceReference(snapshot, span), true);
+			const otherScan = await buildHypothesisSnapshot({ ...input, scanId: 'different-scan' });
+			const legacy = otherScan.evidence.find((item) => item.kind === 'source-span')!;
+			assert.equal(legacy.referenceOrigin, 'legacy');
+			assert.ok(!legacy.id.startsWith('ev1_'));
+			await fs.writeFile(file, 'const canonicalLink = false;\n');
+			const stale = await buildHypothesisSnapshot(input);
+			assert.equal(stale.evidence.some((item) => item.kind === 'source-span'), false, 'changed scan provenance is excluded before association resolution');
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('fails closed on conflicting or ambiguous canonical associations and keeps unmatched scans legacy', async () => {
+		const root = await testRoot('canonical-conflicts');
+		try {
+			const file = path.join(root, 'source.ts'), content = 'const bound = true;\n';
+			await fs.writeFile(file, content);
+			const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file, line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.canonical-conflict', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+			const scanProvenance = makeProvenance(finding, root, content);
+			const engine = new EvidenceEngine(createNodeFileSystem());
+			const observation = (await engine.captureScan(root, 'bound-scan', scanProvenance))[0];
+			const input = { workspaceRoot: root, scanId: 'bound-scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createNodeFileSystem(), scanProvenance };
+			const base = await buildHypothesisSnapshot(input);
+			const legacy = await buildHypothesisSnapshot({ ...input, evidenceEngine: { findForFinding: async () => [], recheck: async () => ({ status: 'not-rechecked' }) } as unknown as EvidenceEngine });
+			assert.equal(legacy.evidence.find((item) => item.kind === 'source-span')?.referenceOrigin, 'legacy');
+			assert.equal(generateDeterministicHypotheses(base).map((item) => item.id).join(), generateDeterministicHypotheses({ ...base, evidence: base.evidence.map((ref) => ref.kind === 'source-span' ? { ...ref, id: observation.id, referenceOrigin: 'canonical' as const, canonicalFreshness: 'current' as const } : ref) }).map((item) => item.id).join(), 'V1 IDs are independent of canonical observation IDs');
+			const conflicting = [
+				{ ...observation, source: { ...observation.source, path: 'other.ts' } },
+				{ ...observation, source: { ...observation.source, startLine: 2 } },
+				{ ...observation, source: { ...observation.source, fileContentHash: 'a'.repeat(64) } },
+				{ ...observation, source: { ...observation.source, spanContentHash: 'b'.repeat(64) } },
+			];
+			for (const item of conflicting) {
+				const evidenceEngine = { findForFinding: async () => [item], recheck: async () => ({ status: 'current' }) } as unknown as EvidenceEngine;
+				const snapshot = await buildHypothesisSnapshot({ ...input, evidenceEngine });
+				assert.equal(snapshot.findings.length, 0);
+				assert.equal(snapshot.evidence.some((ref) => ref.kind === 'source-span' && ref.freshness === 'current'), false);
+			}
+			for (const associations of [[observation, observation], [{ ...observation, scanId: 'other-scan' }], [{ ...observation, workspaceIdentity: `${root}-other` }]]) {
+				const evidenceEngine = { findForFinding: async () => associations, recheck: async () => ({ status: 'current' }) } as unknown as EvidenceEngine;
+				const snapshot = await buildHypothesisSnapshot({ ...input, evidenceEngine });
+				assert.equal(snapshot.findings.length, 0, 'ambiguous or out-of-bound associations cannot downgrade to legacy');
+			}
+			for (const status of ['stale', 'unavailable'] as const) {
+				const evidenceEngine = { findForFinding: async () => [observation], recheck: async () => ({ status, reason: status === 'stale' ? 'content-changed' : 'read-failed' }) } as unknown as EvidenceEngine;
+				const snapshot = await buildHypothesisSnapshot({ ...input, evidenceEngine });
+				const span = snapshot.evidence.find((ref) => ref.kind === 'source-span')!;
+				assert.equal(span.canonicalFreshness, status);
+				assert.equal(span.freshness, 'stale');
+				assert.equal(validateEvidenceReference(snapshot, span), false);
+			}
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('reference marker validation rejects contradictory and malformed canonical freshness', async () => {
+		const root = await testRoot('reference-markers');
+		try {
+			await fs.writeFile(path.join(root, 'source.ts'), 'const marker = true;\n');
+			const finding = createFinding({ title: 'Observed', description: 'Observed issue', severity: 'Low', cwe: [], owasp: [], file: path.join(root, 'source.ts'), line: 1, column: 1, sourceTool: 'Aqiron', ruleId: 'test.marker', confidence: 'Low', remediation: 'Review', tags: [], rawEvidence: {} });
+			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: 'marker-scan', findings: [finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createNodeFileSystem(), scanProvenance: makeProvenance(finding, root, 'const marker = true;\n') });
+			const span = snapshot.evidence.find((ref) => ref.kind === 'source-span')!;
+			assert.equal(validateEvidenceReference(snapshot, span), true, 'markerless legacy references remain valid');
+			for (const altered of [
+				{ ...span, referenceOrigin: 'legacy' as const, canonicalFreshness: 'current' as const },
+				{ ...span, canonicalFreshness: 'current' as const },
+				{ ...span, referenceOrigin: 'canonical' as const, id: 'ev1_00000000-0000-0000-0000-000000000000' },
+				{ ...span, id: 'ev1_00000000-0000-0000-0000-000000000000', referenceOrigin: 'canonical' as const, canonicalFreshness: 'stale' as const },
+				{ ...span, id: 'ev1_00000000-0000-0000-0000-000000000000', referenceOrigin: 'canonical' as const, canonicalFreshness: 'invalid' as 'current', freshness: 'current' as const },
+			]) { assert.equal(validateEvidenceReference(snapshot, altered), false); }
+			const store = new HypothesisStoreService(createNodeFileSystem());
+			await store.mergeGeneration(root, snapshot, [{ ...testHypothesis(), evidence: [span], snapshotId: snapshot.id }], () => false);
+			const persistedPath = path.join(root, '.aqiron-security', 'hypotheses.json');
+			const persisted = JSON.parse(await fs.readFile(persistedPath, 'utf8'));
+			persisted.hypotheses[0].evidence[0].referenceOrigin = 'legacy';
+			persisted.hypotheses[0].evidence[0].canonicalFreshness = 'current';
+			await fs.writeFile(persistedPath, JSON.stringify(persisted));
+			await assert.rejects(() => store.list(root), /invalid|unsupported|schema/i, 'store validation rejects the same contradictory marker combination');
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 
 	test('rejects fabricated references, absolute/traversal paths, and stale references', async () => {
@@ -837,7 +933,9 @@ suite('Core deterministic hypothesis engine', function () {
 			const failedService = new HypothesisStoreService(createFileSystem({ failRenameAt: 2 }));
 			await assert.rejects(failedService.mergeGeneration(root, { ...snapshot, id: 'snapshot:failed' }, [], () => false));
 			assert.equal(await fs.readFile(file, 'utf8'), beforeFailedWrite);
-			assert.equal((await fs.readdir(path.dirname(file))).some((name) => String(name).endsWith('.tmp')), false, 'failed replacement removes only its own temporary file');
+			const orphanTemps = (await fs.readdir(path.dirname(file))).filter((name) => String(name).endsWith('.tmp'));
+			assert.equal(orphanTemps.length, 1, 'failed replacement leaves its temporary as an orphan');
+			assert.ok((await fs.readFile(path.join(path.dirname(file), String(orphanTemps[0])), 'utf8')).length > 0);
 			assert.equal((await service.list(root)).hypotheses[0].status, 'dismissed', 'a failed write releases both process-local and cross-process locks');
 			const otherRoot = await testRoot('isolated');
 			try { assert.equal((await service.list(otherRoot)).hypotheses.length, 0); } finally { await fs.rm(otherRoot, { recursive: true, force: true }); }
@@ -1163,7 +1261,7 @@ function createFileSystem(options: { failRenameAt?: number; failBackupCleanup?: 
 			finally {await handle.close();}
 		},
 		writeFile: async (file, contents, encoding) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, contents, encoding); },
-		writeFileExclusive: async (file, contents, encoding) => { await fs.writeFile(file, contents, { encoding, flag: 'wx' }); },
+		writeFileExclusive: async (file, contents, encoding) => { const handle = await fs.open(file, 'wx'); try { await handle.writeFile(contents, { encoding }); } finally { await handle.close(); } },
 		mkdir: async (directory, options) => { await fs.mkdir(directory, options); },
 		readdir: async (directory, options) => await fs.readdir(directory, options as any) as any,
 		stat: async (file) => { const stat = await fs.stat(file); return { isFile: () => stat.isFile(), isDirectory: () => stat.isDirectory(), size: stat.size, mtimeMs: stat.mtimeMs }; },

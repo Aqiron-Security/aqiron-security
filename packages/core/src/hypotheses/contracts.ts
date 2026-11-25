@@ -22,6 +22,9 @@ export interface HypothesisEvidenceRef {
 	relationshipId?: string;
 	observedAt: string;
 	freshness: 'current' | 'stale';
+	/** Canonical observation IDs are independently addressable; legacy is explicit for historical span keys. */
+	referenceOrigin?: 'canonical' | 'legacy';
+	canonicalFreshness?: 'current' | 'stale' | 'unavailable';
 }
 
 /**

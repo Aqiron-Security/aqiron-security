@@ -9,6 +9,8 @@ This document uses **Current** for behavior demonstrated by this repository, **N
 
 ## Current architecture
 
+Evidence Engine V1 captures verified native scanner provenance into immutable observations in `.aqiron-security/evidence.json` and bridges exact workspace-, scan-, finding-, locator-, and digest-matched observations into hypothesis snapshots. Contradictory or ambiguous associations fail closed; legacy span references remain available when no canonical association exists, and stale or unavailable canonical evidence cannot validate as current. Clients do not write evidence records or supply canonical provenance. See the [canonical Evidence Engine V1 technical reference](../evidence_engine.md) for the implemented contract and limitations.
+
 The repository is still a VS Code extension package with an embedded Core source tree. Root scripts build/typecheck/lint both `src` and `packages/core/src`; `@aqiron/core` is private and exports its TypeScript source. The extension bundles a separate Node Core runtime.
 
 ```mermaid

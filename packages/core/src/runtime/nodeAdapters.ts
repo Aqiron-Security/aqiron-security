@@ -72,7 +72,13 @@ export function createNodeFileSystem(): FileSystem {
 			await writeFileAsync(file, contents, encoding as BufferEncoding | undefined);
 		},
 		writeFileExclusive: async (file: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void> => {
-			await fs.promises.writeFile(file, contents, { encoding: encoding as BufferEncoding | undefined, flag: 'wx' });
+			const handle = await fs.promises.open(file, 'wx');
+			try { await handle.writeFile(contents, { encoding: encoding as BufferEncoding | undefined }); await handle.close(); }
+			catch (error) {
+				try { await handle.close(); } catch { /* continue cleanup after close errors */ }
+				// Keep a partial orphan. Pathname unlink is not ownership-safe after an ambiguous write failure.
+				throw error;
+			}
 		},
 		mkdir: async (directory: string, options?: { recursive?: boolean }): Promise<void> => {
 			await mkdirAsync(directory, options);
