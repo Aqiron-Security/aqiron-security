@@ -5,6 +5,7 @@
   "include": [
     "src/test/hypothesisAi*.test.ts",
     "src/test/hypothesisEngine.test.ts",
+		"src/test/evidenceEngine.test.ts",
     "src/test/coreProtocolFraming.test.ts",
     "src/test/coreClient.test.ts",
     "src/test/coreAiTransport.test.ts",

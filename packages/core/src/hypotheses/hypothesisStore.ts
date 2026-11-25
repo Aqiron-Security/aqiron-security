@@ -255,36 +255,28 @@ export class HypothesisStoreService {
 		if (!Number.isSafeInteger(store.generation) || (store.generation ?? -1) < 0) {throw new HypothesisStoreError('Hypothesis store generation is invalid; existing data was preserved.');}
 		if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_CHARS) {throw new HypothesisStoreError('Hypothesis store exceeds the 5 MB safety limit; existing data was preserved.');}
 		if (!this.filesystem.writeFileExclusive) {throw new HypothesisStoreError('Filesystem exclusive-create support is required for safe hypothesis persistence.');}
-		let createdTemporary = false;
-		try {
-			await this.filesystem.writeFileExclusive(temporary, serialized, 'utf8');
-			createdTemporary = true;
-			await assertSafeStoreTarget(root, temporary, this.filesystem, false);
-			if (!(await this.filesystem.exists(target))) {
-				throwIfCancelled(signal);
-				if (commitControl && !commitControl.beginCommit()) {throwIfCancelled(signal); throw Object.assign(new Error('Core request cancelled before persistence commit.'), { code: 'CORE_REQUEST_CANCELLED' });}
-				await this.filesystem.rename(temporary, target);
-				commitControl?.markCommitted();
-				return;
-			}
-			const backup = `${target}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.bak`;
-			await this.filesystem.rename(target, backup);
-			try {
-				throwIfCancelled(signal);
-				if (commitControl && !commitControl.beginCommit()) {throwIfCancelled(signal); throw Object.assign(new Error('Core request cancelled before persistence commit.'), { code: 'CORE_REQUEST_CANCELLED' });}
-				await this.filesystem.rename(temporary, target);
-				commitControl?.markCommitted();
-			} catch (error) {
-				try { await this.filesystem.rename(backup, target); }
-				catch { throw Object.assign(new Error(`Could not replace hypothesis store. The previous store is preserved at ${backup}; recover it before continuing.`), { code: 'HYPOTHESIS_STORE_RECOVERY_REQUIRED' }); }
-				throw error;
-			}
-			try { await this.filesystem.unlink?.(backup); } catch { /* committed replacement is valid; orphan backup remains recoverable */ }
-		} finally {
-			if (createdTemporary && this.filesystem.unlink) {
-				try { await assertSafeStoreTarget(root, temporary, this.filesystem, false); await this.filesystem.unlink(temporary); } catch { /* absent or unsafe temporary files are preserved for recovery */ }
-			}
+		await this.filesystem.writeFileExclusive(temporary, serialized, 'utf8');
+		await assertSafeStoreTarget(root, temporary, this.filesystem, false);
+		if (!(await this.filesystem.exists(target))) {
+			throwIfCancelled(signal);
+			if (commitControl && !commitControl.beginCommit()) {throwIfCancelled(signal); throw Object.assign(new Error('Core request cancelled before persistence commit.'), { code: 'CORE_REQUEST_CANCELLED' });}
+			await this.filesystem.rename(temporary, target);
+			commitControl?.markCommitted();
+			return;
 		}
+		const backup = `${target}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.bak`;
+		await this.filesystem.rename(target, backup);
+		try {
+			throwIfCancelled(signal);
+			if (commitControl && !commitControl.beginCommit()) {throwIfCancelled(signal); throw Object.assign(new Error('Core request cancelled before persistence commit.'), { code: 'CORE_REQUEST_CANCELLED' });}
+			await this.filesystem.rename(temporary, target);
+			commitControl?.markCommitted();
+		} catch (error) {
+			try { await this.filesystem.rename(backup, target); }
+			catch { throw Object.assign(new Error(`Could not replace hypothesis store. The previous store is preserved at ${backup}; recover it before continuing.`), { code: 'HYPOTHESIS_STORE_RECOVERY_REQUIRED' }); }
+			throw error;
+		}
+		try { await this.filesystem.unlink?.(backup); } catch { /* committed replacement is valid; orphan backup remains recoverable */ }
 	}
 
 	private async recoverBackup(target: string): Promise<void> {
@@ -354,7 +346,7 @@ function hashSpanFromLines(lines: readonly string[], startLine: number, endLine:
 	if (Buffer.byteLength(span, 'utf8') > 64_000) {return undefined;}
 	return crypto.createHash('sha256').update(span, 'utf8').digest('hex');
 }
-async function withWorkspaceLock<T>(root: string, filesystem: FileSystem, task: (safeRoot: string) => Promise<T>): Promise<T> {
+export async function withWorkspaceLock<T>(root: string, filesystem: FileSystem, task: (safeRoot: string) => Promise<T>): Promise<T> {
 	const safeRoot = await physicalWorkspaceRoot(root, filesystem);
 	const directory = path.join(safeRoot, '.aqiron-security');
 	await assertSafeStoreDirectory(safeRoot, directory, filesystem, true);
@@ -511,7 +503,7 @@ async function assertSafeStoreDirectory(root: string, directory: string, filesys
 		if (stat.isSymbolicLink() || !stat.isDirectory()) {throw new HypothesisStoreError('The .aqiron-security path must be a real directory, not a symlink.');}
 	} catch (error) {
 		if (!isMissing(error) || !create) {throw error;}
-		await filesystem.mkdir(directory);
+		try { await filesystem.mkdir(directory); } catch (createError) { if (!isAlreadyExists(createError)) {throw createError;} }
 		const stat = await filesystem.lstat(directory);
 		if (stat.isSymbolicLink() || !stat.isDirectory()) {throw new HypothesisStoreError('The .aqiron-security path changed during creation.');}
 	}
@@ -587,7 +579,7 @@ function isConfidence(value: unknown): boolean {
 		&& Array.isArray(value.factors) && value.factors.length <= 12 && value.factors.every(isConfidenceFactor);
 }
 function isEvidenceRef(value: unknown): boolean {
-	if (!isRecord(value) || Object.keys(value).some((key) => !['id','kind','source','file','startLine','endLine','contentHash','fileContentHash','findingId','ruleId','relationshipId','observedAt','freshness'].includes(key))) {return false;}
+	if (!isRecord(value) || Object.keys(value).some((key) => !['id','kind','source','file','startLine','endLine','contentHash','fileContentHash','findingId','ruleId','relationshipId','observedAt','freshness','referenceOrigin','canonicalFreshness'].includes(key))) {return false;}
 	if (!isBoundedString(value.id, 500, 1) || !['finding','relationship','source-span'].includes(String(value.kind)) || !isBoundedString(value.source, 100, 1) || !isTimestamp(value.observedAt) || !['current','stale'].includes(String(value.freshness))) {return false;}
 	if (value.file !== undefined && (!isBoundedString(value.file, 300, 1) || path.isAbsolute(value.file) || /^[a-z]:/i.test(value.file) || value.file.startsWith('/') || value.file.includes('\\') || value.file.split('/').some((part: string) => part === '..' || part === ''))) {return false;}
 	if (value.startLine !== undefined && (!Number.isInteger(value.startLine) || value.startLine < 1 || value.startLine > 10_000_000)) {return false;}
@@ -595,9 +587,17 @@ function isEvidenceRef(value: unknown): boolean {
 	if (value.contentHash !== undefined && (!isBoundedString(value.contentHash, 64, 64) || !/^[a-f0-9]{64}$/.test(value.contentHash))) {return false;}
 	if (value.fileContentHash !== undefined && (!isBoundedString(value.fileContentHash, 64, 64) || !/^[a-f0-9]{64}$/.test(value.fileContentHash))) {return false;}
 	for (const key of ['findingId','ruleId','relationshipId']) {if (value[key] !== undefined && !isBoundedString(value[key], 200, 1)) {return false;}}
+	if (!validReferenceMarkers(value) || (value.referenceOrigin !== undefined && value.kind !== 'source-span')) {return false;}
 	if (value.kind === 'finding') {return isBoundedString(value.findingId, 200, 1) && isBoundedString(value.ruleId, 200, 1);}
 	if (value.kind === 'relationship') {return isBoundedString(value.relationshipId, 200, 1);}
 	return isBoundedString(value.file, 300, 1) && Number.isInteger(value.startLine) && Number.isInteger(value.endLine) && isBoundedString(value.contentHash, 64, 64) && isBoundedString(value.findingId, 200, 1);
+}
+function validReferenceMarkers(value: Record<string, any>): boolean {
+	if (value.referenceOrigin === undefined) { return value.canonicalFreshness === undefined && !value.id.startsWith('ev1_'); }
+	if (value.referenceOrigin === 'legacy') { return value.canonicalFreshness === undefined && !value.id.startsWith('ev1_'); }
+	if (value.referenceOrigin !== 'canonical' || !/^ev1_[0-9a-f-]{36}$/.test(value.id)) { return false; }
+	if (!['current','stale','unavailable'].includes(String(value.canonicalFreshness))) { return false; }
+	return value.canonicalFreshness === 'current' ? value.freshness === 'current' : value.freshness === 'stale';
 }
 function isReview(value: unknown): boolean {
 	return isRecord(value) && Object.keys(value).every((key) => ['at','action','note','evidenceRefs'].includes(key))

@@ -5,6 +5,7 @@ import { UnifiedFinding } from '../shared/finding';
 import { FileSystem } from '../shared/platform';
 import { ProjectProfile } from '../project/projectProfile';
 import { createSourceLineIndex, FindingSourceProvenance, hashSourceContent, SourceReadBudget, SourceReadBudgetExceededError } from '../shared/sourceProvenance';
+import type { EvidenceEngine } from '../evidence/evidenceEngine';
 
 export { hashSourceSpan } from '../shared/sourceProvenance';
 import { ConfidenceFactor, HypothesisEvidenceRef, HypothesisSnapshot, SecurityHypothesis } from './contracts';
@@ -22,6 +23,7 @@ export async function buildHypothesisSnapshot(input: {
 	relationships: readonly CorrelatedRelationship[];
 	profile: ProjectProfile;
 	filesystem: FileSystem;
+	evidenceEngine?: EvidenceEngine;
 	/** Content hashes captured by the scanner at scan time, keyed by relative path and inclusive line range. */
 	scanProvenance?: readonly FindingSourceProvenance[];
 	capturedAt?: string;
@@ -110,11 +112,27 @@ export async function buildHypothesisSnapshot(input: {
 				excludedUnprovenancedFindings += 1;
 				continue;
 			}
-			const sourceRef: HypothesisEvidenceRef = {
+			let sourceRef: HypothesisEvidenceRef = {
 				id: `span:${relative}:${finding.line}-${endLine}:${hash.slice(0, 16)}`,
 				kind: 'source-span', source: 'Core filesystem snapshot', file: relative,
-				startLine: finding.line, endLine, contentHash: hash, fileContentHash: recorded.sourceContentHash, findingId: finding.id, observedAt: recorded.observedAt, freshness: 'current',
+				startLine: finding.line, endLine, contentHash: hash, fileContentHash: recorded.sourceContentHash, findingId: finding.id, observedAt: recorded.observedAt, freshness: 'current', referenceOrigin: 'legacy',
 			};
+			if (input.evidenceEngine) {
+				const matches = await input.evidenceEngine.findForFinding(root, input.scanId, finding.id);
+				if (matches.length > 1) { excludedUnprovenancedFindings += 1; continue; }
+				if (matches.length === 1) {
+					const observation = matches[0];
+					if (observation.workspaceIdentity !== root || observation.scanId !== input.scanId || observation.originatingFindingId !== finding.id
+						|| observation.source.path !== relative || observation.source.startLine !== finding.line || observation.source.endLine !== endLine
+						|| observation.source.spanContentHash !== recorded.contentHash || observation.source.fileContentHash !== recorded.sourceContentHash) {
+						excludedUnprovenancedFindings += 1;
+						continue;
+					}
+					const current = await input.evidenceEngine.recheck(root, observation);
+					sourceRef = { ...sourceRef, id: observation.id, source: 'Core Evidence Engine', observedAt: observation.observedAt,
+						freshness: current.status === 'current' ? 'current' : 'stale', referenceOrigin: 'canonical', canonicalFreshness: current.status === 'current' ? 'current' : current.status === 'stale' ? 'stale' : 'unavailable' };
+				}
+			}
 			const findingRef: HypothesisEvidenceRef = {
 				id: `finding:${finding.id}`, kind: 'finding', source: finding.sourceTool, file: relative,
 				startLine: finding.line, endLine, contentHash: hash, findingId: finding.id, ruleId: finding.ruleId,
@@ -194,15 +212,26 @@ export function relationshipKey(relationship: CorrelatedRelationship): string {
 }
 
 export function validateEvidenceReference(snapshot: HypothesisSnapshot, ref: HypothesisEvidenceRef): boolean {
-	if (!ref || ref.freshness !== 'current') {return false;}
+	if (!ref || ref.freshness !== 'current' || ref.canonicalFreshness === 'stale' || ref.canonicalFreshness === 'unavailable') {return false;}
+	if (!validReferenceMarkers(ref)) {return false;}
+	if (ref.referenceOrigin !== undefined && ref.kind !== 'source-span') {return false;}
 	const recorded = snapshot.evidence.find((candidate) => candidate.id === ref.id && candidate.kind === ref.kind);
-	if (!recorded || ['source', 'file', 'startLine', 'endLine', 'contentHash', 'fileContentHash', 'findingId', 'ruleId', 'relationshipId', 'observedAt', 'freshness'].some((key) => (recorded as unknown as Record<string, unknown>)[key] !== (ref as unknown as Record<string, unknown>)[key])) {return false;}
+	if (!recorded || ['source', 'file', 'startLine', 'endLine', 'contentHash', 'fileContentHash', 'findingId', 'ruleId', 'relationshipId', 'observedAt', 'freshness', 'referenceOrigin', 'canonicalFreshness'].some((key) => (recorded as unknown as Record<string, unknown>)[key] !== (ref as unknown as Record<string, unknown>)[key])) {return false;}
 	if (ref.file !== undefined && !safeRelativePath(snapshot.workspaceRoot, ref.file)) {return false;}
 	if ((ref.startLine !== undefined && (!Number.isInteger(ref.startLine) || ref.startLine < 1)) || (ref.endLine !== undefined && (!Number.isInteger(ref.endLine) || ref.endLine < (ref.startLine ?? 1)))) {return false;}
 	if (ref.kind === 'finding') {return Boolean(ref.findingId && snapshot.findings.some((finding) => finding.id === ref.findingId && finding.ruleId === ref.ruleId));}
 	if (ref.kind === 'relationship') {return Boolean(ref.relationshipId && snapshot.relationships.some((relationship) => relationshipKey(relationship) === ref.relationshipId));}
-	if (ref.kind === 'source-span') {return Boolean(ref.file && ref.contentHash && /^[a-f0-9]{64}$/.test(ref.contentHash) && ref.fileContentHash && /^[a-f0-9]{64}$/.test(ref.fileContentHash));}
+	if (ref.kind === 'source-span') {return Boolean(ref.file && ref.contentHash && /^[a-f0-9]{64}$/.test(ref.contentHash) && ref.fileContentHash && /^[a-f0-9]{64}$/.test(ref.fileContentHash)
+		&& (ref.referenceOrigin !== 'canonical' || /^ev1_[0-9a-f-]{36}$/.test(ref.id))
+		&& (ref.referenceOrigin !== 'legacy' || !/^ev1_/.test(ref.id)));}
 	return false;
+}
+
+function validReferenceMarkers(ref: HypothesisEvidenceRef): boolean {
+	if (ref.referenceOrigin === undefined) { return ref.canonicalFreshness === undefined && !ref.id.startsWith('ev1_'); }
+	if (ref.referenceOrigin === 'legacy') { return ref.canonicalFreshness === undefined && !ref.id.startsWith('ev1_'); }
+	return ref.referenceOrigin === 'canonical' && /^ev1_[0-9a-f-]{36}$/.test(ref.id)
+		&& (ref.canonicalFreshness === 'current' ? ref.freshness === 'current' : (ref.canonicalFreshness === 'stale' || ref.canonicalFreshness === 'unavailable') && ref.freshness === 'stale');
 }
 
 /** V1 allows only an explicit malware-to-artifact relation, and phrases it as an attribution question, not a vulnerability claim. */
@@ -233,7 +262,8 @@ export function generateDeterministicHypotheses(snapshot: HypothesisSnapshot): S
 			{ kind: 'preconditions', value: 'unknown', detail: 'Exploit or execution preconditions are not represented by this correlation.' },
 		];
 		const claim = `Does the malware indicator reported by ${source.sourceTool} belong to the mobile artifact associated with ${target.sourceTool}?`;
-		const stableKey = sha256(JSON.stringify({ workspace: snapshot.workspaceRoot, claim: normalizeClaim(claim), asset: targetEvidence.file, evidence: evidence.map((ref) => ref.id).sort() }));
+		// Keep V1 candidate identity independent of random canonical observation IDs.
+		const stableKey = sha256(JSON.stringify({ workspace: snapshot.workspaceRoot, claim: normalizeClaim(claim), asset: targetEvidence.file, evidence: evidence.map(stableEvidenceKey).sort() }));
 		candidates.push({
 			id: `hyp:${stableKey.slice(0, 32)}`,
 			title: 'Verify malware indicator attribution to mobile artifact',
@@ -266,6 +296,10 @@ export function confidenceBand(factors: readonly ConfidenceFactor[]): 'low' | 'm
 
 function stripSensitiveEvidence(finding: UnifiedFinding): UnifiedFinding {
 	return { ...finding, rawEvidence: undefined };
+}
+function stableEvidenceKey(ref: HypothesisEvidenceRef): string {
+	return ref.kind === 'source-span' && ref.referenceOrigin === 'canonical'
+		? `span:${ref.file}:${ref.startLine}-${ref.endLine}:${ref.contentHash?.slice(0, 16)}` : ref.id;
 }
 function normalizeClaim(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
 function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }

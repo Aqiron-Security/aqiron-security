@@ -20,7 +20,7 @@
     "test": "npm run test:focused && npm run desktop:test",
     "build": "npm run check-types && npm run core:build && npm run desktop:build",
     "test:compile": "tsc -p tsconfig.acceptance.json",
-    "test:focused": "npm run core:build && npm run test:compile && mocha --ui tdd \".ci-compiled-tests/src/test/hypothesisAi*.test.js\" .ci-compiled-tests/src/test/hypothesisEngine.test.js .ci-compiled-tests/src/test/coreProtocolFraming.test.js .ci-compiled-tests/src/test/coreClient.test.js .ci-compiled-tests/src/test/coreAiTransport.test.js .ci-compiled-tests/src/test/coreRuntime.test.js .ci-compiled-tests/src/test/cli.test.js",
+    "test:focused": "npm run core:build && npm run test:compile && mocha --ui tdd \".ci-compiled-tests/src/test/hypothesisAi*.test.js\" .ci-compiled-tests/src/test/hypothesisEngine.test.js .ci-compiled-tests/src/test/evidenceEngine.test.js .ci-compiled-tests/src/test/coreProtocolFraming.test.js .ci-compiled-tests/src/test/coreClient.test.js .ci-compiled-tests/src/test/coreAiTransport.test.js .ci-compiled-tests/src/test/coreRuntime.test.js .ci-compiled-tests/src/test/cli.test.js",
     "desktop:test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml --bin aqiron-security-desktop"
   },
   "devDependencies": {

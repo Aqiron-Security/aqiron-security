@@ -8,7 +8,7 @@ export interface FileSystem {
 	/** Read raw bytes with an adapter-enforced byte ceiling; errors may expose bytesRead including the overflow probe. */
 	readFileBoundedBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
 	writeFile(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
-	/** Create a new file only if the path does not already exist. */
+	/** Create a new file only if absent. A write failure may leave a partial orphan; neither adapters nor callers may unlink its pathname after an ambiguous failure. */
 	writeFileExclusive?(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
 	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
 	readdir(path: string, options?: { withFileTypes?: boolean }): Promise<Array<string | { name: string; isDirectory(): boolean; isFile(): boolean }>>;

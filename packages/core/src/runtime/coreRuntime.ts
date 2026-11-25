@@ -39,6 +39,7 @@ import { CoreProtocolFrame, MAX_CORE_PROTOCOL_FRAME_BYTES } from './protocolFram
 import { buildHypothesisAiBoundRequest, createHypothesisAiBoundRequestPlan, hypothesisAiModelCapability, HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION, resolveHypothesisAiProviderConfiguration, sameHypothesisAiProviderConfiguration, HypothesisAiProviderConfigurationSnapshot } from '../hypotheses/hypothesisAiConfiguration';
 import { createHypothesisAiRequestContext } from '../hypotheses/aiProposalValidation';
 import { createHypothesisAiExecutor } from '../hypotheses/hypothesisAiExecutor';
+import { EvidenceEngine } from '../evidence/evidenceEngine';
 
 /**
  * Release gate for the production composition. Keep this source-controlled and
@@ -98,6 +99,7 @@ export class CoreRuntime {
 	private readonly nativeScanner: NativeWorkspaceScanner;
 	private readonly workspaceRules = new WorkspaceRuleStore(this.filesystem);
 	private readonly hypotheses = new HypothesisStoreService(this.filesystem);
+	private readonly evidence = new EvidenceEngine(this.filesystem);
 	private readonly hypothesisAiPreparations = new HypothesisAiPreparationRegistry();
 	private readonly productionHypothesisAiExecutor: HypothesisAiExecutor;
 	/** Process-local key used only to detect in-process credential rotation; never persisted or disclosed. */
@@ -329,7 +331,7 @@ export class CoreRuntime {
 		let snapshot: Awaited<ReturnType<typeof buildHypothesisSnapshot>>;
 		try { snapshot = await buildHypothesisSnapshot({
 			workspaceRoot: root, scanId, findings: scan.findings, relationships: scan.correlation?.relationships ?? [],
-			profile, filesystem: this.filesystem, scanProvenance: scanRecord?.sourceProvenance, capturedAt: scan.state.completedAt, cancelled: () => Boolean(cancellationToken?.isCancellationRequested),
+			profile, filesystem: this.filesystem, evidenceEngine: this.evidence, scanProvenance: scanRecord?.sourceProvenance, capturedAt: scan.state.completedAt, cancelled: () => Boolean(cancellationToken?.isCancellationRequested),
 		}); } finally { release(); }
 		if (cancellationToken?.isCancellationRequested) throw new Error('Core request cancelled.');
 		if (snapshot.findings.length === 0) {
@@ -359,7 +361,7 @@ export class CoreRuntime {
 		try {
 			const snapshot = await buildHypothesisSnapshot({
 				workspaceRoot: root, scanId: request.scanId, findings: scan.findings, relationships: scan.correlation?.relationships ?? [],
-				profile: createEmptyProjectProfile(root), filesystem: this.filesystem, scanProvenance: scanRecord?.sourceProvenance,
+				profile: createEmptyProjectProfile(root), filesystem: this.filesystem, evidenceEngine: this.evidence, scanProvenance: scanRecord?.sourceProvenance,
 				capturedAt: scan.state.completedAt, cancelled: () => Boolean(cancellationToken?.isCancellationRequested), readBudget,
 			});
 			if (normalizeWorkspaceIdentity(snapshot.workspaceRoot) !== normalizeWorkspaceIdentity(root) || snapshot.scanId !== request.scanId) {
@@ -435,7 +437,7 @@ export class CoreRuntime {
 		try {
 			const snapshot = await buildHypothesisSnapshot({
 				workspaceRoot: root, scanId: manifest.scanId, findings: scan.findings, relationships: scan.correlation?.relationships ?? [],
-				profile: createEmptyProjectProfile(root), filesystem: this.filesystem, scanProvenance: scanRecord.sourceProvenance,
+				profile: createEmptyProjectProfile(root), filesystem: this.filesystem, evidenceEngine: this.evidence, scanProvenance: scanRecord.sourceProvenance,
 				capturedAt: scan.state.completedAt,
 			});
 			const evidenceIsCurrent = snapshot.id === manifest.snapshotId && snapshot.fingerprint === manifest.snapshotFingerprint
@@ -734,6 +736,11 @@ export class CoreRuntime {
 			aiAnalysis: undefined,
 			reportGenerator: this.reportGenerator,
 		});
+		// Persist only provenance produced by Core's native scanner and re-verified
+		// against bounded bytes on disk. Clients and scanner payloads never supply IDs.
+		if (result.sourceProvenance?.length && !cancellationToken?.isCancellationRequested) {
+			await this.evidence.captureScan(request.workspaceRoot, scanId, result.sourceProvenance);
+		}
 		const state: ScanState = { scanId, workspaceRoot: request.workspaceRoot, targetPath: request.targetPath ?? request.workspaceRoot, mode: request.mode ?? 'deep', stage: 'Idle', stageProgress: 100, scanners: [], findingsCount: result.findings.length, riskScore: result.findings.length ? Math.min(100, result.findings.length * 15) : 0, cancelled: false, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), reportStatus: 'completed', finalState: 'completed' };
 			const response: CoreScanStartResult = { scanId: result.scanId, state, findings: result.findings, report: result.report, filesScanned: result.filesScanned, skippedFiles: result.skippedFiles, skipReasons: result.skipReasons, durationMs: result.durationMs, toolResults: result.toolResults, correlation: result.correlation, graph: result.graph, telemetry: result.telemetry };
 		this.scans.set(scanId, { state, result: response, sourceProvenance: result.sourceProvenance, excludedProvenanceCount: result.excludedProvenanceCount });
