@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { AqironIssue } from '../models/issue';
 import type { ResolvedWorkspaceScanPolicy } from '../../packages/core/src/shared/workspaceScanPolicy';
-import { getResolvedCustomRules } from '../scanner/rules';
 
 export const supportedExtensions = new Set([
 	'.dart',
@@ -139,7 +138,7 @@ export function resolveWorkspaceScanPolicy(root: string): ResolvedWorkspaceScanP
 		excludedFileNamePatterns: [...workspaceExcludedFileNamePatterns],
 		aqExclusionPatterns: getAqExclusions(root),
 		maxFileSizeBytes: getMaxFileSizeBytes(),
-		customRules: getResolvedCustomRules(),
+		customRules: [],
 		skipGeneratedFiles: !shouldScanGeneratedFiles(),
 		skipMinifiedFiles: true,
 		skipCompiledFiles: true,

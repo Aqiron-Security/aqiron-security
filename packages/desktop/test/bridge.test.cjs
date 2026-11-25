@@ -8,8 +8,8 @@ const readline = require('node:readline');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '../../..');
-const bridgePath = process.env.AQIRON_DESKTOP_BRIDGE_PATH || path.join(root, 'dist/aqiron-desktop-bridge.js');
-const runtimePath = process.env.AQIRON_CORE_RUNTIME_PATH || path.join(root, 'dist/core-runtime.js');
+const bridgePath = process.env.AQIRON_DESKTOP_BRIDGE_PATH || path.join(root, '.aqiron-build/node/aqiron-desktop-bridge.js');
+const runtimePath = process.env.AQIRON_CORE_RUNTIME_PATH || path.join(root, '.aqiron-build/node/core-runtime.js');
 const fixture = path.join(root, 'src/test/fixtures/file-scan/flutter');
 const workspaceTempDirectory = (prefix) => fs.mkdtemp(path.join(root, `.${prefix}-`));
 

@@ -24,9 +24,17 @@ suite('RAG signals', () => {
 	});
 
 	test('keeps valid entries when an imported catalog includes invalid entries', () => {
-		const result = validateRegexCatalog({ version: 1, updatedAt: new Date().toISOString(), sources: [{ id: 'mixed', name: 'mixed', type: 'vetted-json', url: 'workspace://mixed', status: 'pending', rejected: [], patterns: [builtInRegexSignals[0], { ...builtInRegexSignals[0], id: 'unsafe', pattern: 'a{1001}' }] }] });
+		const result = validateRegexCatalog({ version: 1, updatedAt: new Date().toISOString(), sources: [{ id: 'mixed', name: 'mixed', type: 'vetted-json', url: 'workspace://mixed', status: 'pending', rejected: [], patterns: [builtInRegexSignals[0], { ...builtInRegexSignals[0], id: 'unsafe', pattern: 'a{1001}' }, null, { id: 'missing-fields' }] }] } as never);
 		assert.strictEqual(result.accepted.sources[0].patterns.length, 1);
-		assert.strictEqual(result.rejected.length, 1);
+		assert.strictEqual(result.rejected.length, 3);
+	});
+
+	test('rejects malformed imported source records without discarding valid sources', () => {
+		const valid = { id: 'valid', name: 'valid', type: 'vetted-json' as const, url: 'workspace://valid', status: 'pending' as const, rejected: [], patterns: [builtInRegexSignals[0]] };
+		const result = validateRegexCatalog({ version: 1, updatedAt: new Date().toISOString(), sources: [valid, null, { ...valid, patterns: null }] } as never);
+		assert.equal(result.accepted.sources.length, 1);
+		assert.equal(result.accepted.sources[0].patterns.length, 1);
+		assert.equal(result.rejected.length, 2);
 	});
 
 	test('synchronizes only validated trusted source patterns', async () => {

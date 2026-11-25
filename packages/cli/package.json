@@ -1,0 +1,13 @@
+{
+  "name": "@aqiron/cli",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Aqiron Security command-line client",
+  "main": "src/main.ts",
+  "types": "src/main.ts",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "npm run core:build --workspace=aqiron-security",
+    "scan": "npm run cli --workspace=aqiron-security --"
+  }
+}

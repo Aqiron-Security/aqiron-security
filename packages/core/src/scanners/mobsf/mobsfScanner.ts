@@ -85,7 +85,14 @@ async function readMobSfApiKey(context: ScannerContext): Promise<string> {
 	if (configured) {
 		return configured;
 	}
-	return context.credentialStore ? (await context.credentialStore.get('mobsfApiKey'))?.trim() ?? '' : '';
+	if (!context.credentialStore) {return '';}
+	try {return (await context.credentialStore.get('mobsfApiKey'))?.trim() ?? '';}
+	catch (error) {
+		// A missing/unavailable OS credential backend means MobSF is unconfigured
+		// for this scan. It must not abort unrelated Core scanners (notably CLI).
+		if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'CREDENTIAL_STORE_UNAVAILABLE') {return '';}
+		throw error;
+	}
 }
 
 async function uploadFile(context: ScannerContext, baseUrl: string, apiKey: string, file: string, timeoutMs: number): Promise<MobSfUploadResponse> {

@@ -1,6 +1,5 @@
 :root {
-	/* Aqiron semantic palette. VS Code values remain the first choice where they
-	 * provide better host integration, with Aqiron fallbacks for consistency. */
+	/* Aqiron semantic palette shared by Desktop views. */
 	--aq-color-canvas: #06080d;
 	--aq-color-surface-1: #0b1018;
 	--aq-color-surface-2: #111824;
@@ -8,7 +7,7 @@
 	--aq-color-border-subtle: #1b2738;
 	--aq-color-border: #243247;
 	--aq-color-border-strong: #344863;
-	--aq-color-text-primary: var(--vscode-foreground, #f4f7fb);
+	--aq-color-text-primary: #f4f7fb;
 	--aq-color-text-secondary: #a9b5c7;
 	--aq-color-text-muted: #748197;
 	--aq-color-brand-primary: #55d9ff;

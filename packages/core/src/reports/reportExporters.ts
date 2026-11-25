@@ -903,10 +903,13 @@ function formatEvidence(evidence: unknown): string {
 function loadReportLogo(workspaceRoot: string): Buffer | undefined {
 	const candidates = [
 		path.join(workspaceRoot, 'assets', 'logos', 'aqiron-security-logo-pdf.jpg'),
-		path.resolve(__dirname, '..', '..', '..', '..', 'assets', 'logos', 'aqiron-security-logo-pdf.jpg'),
 		path.resolve(__dirname, '..', 'assets', 'logos', 'aqiron-security-logo-pdf.jpg'),
 		path.resolve(process.cwd(), 'assets', 'logos', 'aqiron-security-logo-pdf.jpg'),
 	];
+	for (let directory = __dirname; ; directory = path.dirname(directory)) {
+		candidates.push(path.join(directory, 'assets', 'logos', 'aqiron-security-logo-pdf.jpg'));
+		if (path.dirname(directory) === directory) {break;}
+	}
 	for (const candidate of candidates) {
 		try {
 			if (fs.existsSync(candidate)) return fs.readFileSync(candidate);

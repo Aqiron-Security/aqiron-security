@@ -82,6 +82,7 @@ out
 .nuxt
 dist
 apps/desktop/src-tauri/target/
+src-tauri/target/
 .output
 
 # Gatsby files
@@ -145,3 +146,11 @@ vite.config.ts.timestamp-*
 
 #codex
 .codex/
+
+# Focused acceptance compilation output
+.ci-compiled-tests/
+.vite/
+
+
+# Aqiron build output
+.aqiron-build/

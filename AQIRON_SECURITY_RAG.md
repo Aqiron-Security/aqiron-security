@@ -1,5 +1,7 @@
 # Aqiron Security Workspace RAG
 
+> **Historical implementation notes:** this document describes the former extension-host RAG integration. Aqiron Desktop and CLI now use Core-owned RAG interfaces; current product architecture is documented in [docs/architecture/desktop-cli-core.md](docs/architecture/desktop-cli-core.md). Extension-specific paths below are historical.
+
 This document describes the current workspace Retrieval-Augmented Generation (RAG) implementation. It is based on the code in `src/rag/`, `packages/core/src/rag/`, the webview provider, and the current tests. It documents implemented behavior only; broader AI or cloud-platform ideas are not treated as features.
 
 ## Purpose

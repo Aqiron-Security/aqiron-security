@@ -63,13 +63,15 @@ suite('Host-neutral Core client', () => {
 		assert.deepEqual(transport.methods, ['hypotheses.ai.approve', 'hypotheses.ai.deny', 'hypotheses.ai.execute']);
 	});
 
-	test('the host-neutral client has no VS Code or scanner implementation dependencies', () => {
+	test('Desktop and CLI share a host-neutral Core client without scanner implementation dependencies', () => {
 		const clientRoot = path.resolve(__dirname, '../../../packages/core/src/client');
 		const sources = ['coreClient.ts', 'coreProcessManager.ts', 'index.ts'].map((file) => fsSyncRead(path.join(clientRoot, file))).join('\n');
 		assert.doesNotMatch(sources, /from\s+['"]vscode['"]/i);
 		assert.doesNotMatch(sources, /(?:scannerManager|NativeWorkspaceScanner|from\s+['"].*\/scanners)/i);
-		const extensionSource = fsSyncRead(path.resolve(__dirname, '../../../src/extension.ts'));
-		assert.match(extensionSource, /CoreClient.*from ['"]\.\.\/packages\/core\/src\/client['"]/);
+		const desktopEntry = fsSyncRead(path.resolve(__dirname, '../../../packages/desktop/src/main.ts'));
+		const cliEntry = fsSyncRead(path.resolve(__dirname, '../../../packages/cli/src/cli.ts'));
+		assert.match(desktopEntry, /CoreClient.*from ['"]\.\.\/\.\.\/core\/src\/client['"]/);
+		assert.match(cliEntry, /CoreClient.*from ['"]\.\.\/\.\.\/core\/src\/client['"]/);
 	});
 });
 

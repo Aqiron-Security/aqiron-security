@@ -1,121 +1,19 @@
 const esbuild = require("esbuild");
-
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
-
-/**
- * @type {import('esbuild').Plugin}
- */
-const esbuildProblemMatcherPlugin = {
-	name: 'esbuild-problem-matcher',
-
-	setup(build) {
-		build.onStart(() => {
-			console.log('[watch] build started');
-		});
-		build.onEnd((result) => {
-			result.errors.forEach(({ text, location }) => {
-				console.error(`✘ [ERROR] ${text}`);
-				console.error(`    ${location.file}:${location.line}:${location.column}:`);
-			});
-			console.log('[watch] build finished');
-		});
-	},
-};
-
+const options = { bundle: true, minify: production, sourcemap: !production, sourcesContent: false, logLevel: 'info' };
+const targets = [
+  { entryPoints: ['packages/core/src/runtime/main.ts'], platform: 'node', format: 'cjs', outfile: '.aqiron-build/node/core-runtime.js', external: ['keytar'] },
+  { entryPoints: ['packages/cli/src/main.ts'], platform: 'node', format: 'cjs', outfile: '.aqiron-build/node/aqiron-cli.js', banner: { js: '#!/usr/bin/env node' }, external: ['keytar'] },
+  { entryPoints: ['packages/desktop/src/main.ts'], platform: 'node', format: 'cjs', outfile: '.aqiron-build/node/aqiron-desktop-bridge.js', external: ['keytar'] },
+];
 async function main() {
-	const extensionCtx = await esbuild.context({
-		entryPoints: [
-			'src/extension.ts'
-		],
-		bundle: true,
-		format: 'cjs',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
-		platform: 'node',
-		outfile: 'dist/extension.js',
-		external: ['vscode'],
-		logLevel: 'silent',
-		plugins: [
-			/* add to the end of plugins array */
-			esbuildProblemMatcherPlugin,
-		],
-	});
-	const runtimeCtx = await esbuild.context({
-		entryPoints: [
-			'packages/core/src/runtime/main.ts'
-		],
-		bundle: true,
-		format: 'cjs',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
-		platform: 'node',
-		outfile: 'dist/core-runtime.js',
-		external: ['keytar'],
-		logLevel: 'silent',
-		plugins: [
-			esbuildProblemMatcherPlugin,
-		],
-	});
-	const cliCtx = await esbuild.context({
-		entryPoints: ['packages/cli/src/main.ts'],
-		bundle: true,
-		format: 'cjs',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
-		platform: 'node',
-		outfile: 'dist/aqiron-cli.js',
-		banner: { js: '#!/usr/bin/env node' },
-		external: ['keytar'],
-		logLevel: 'silent',
-		plugins: [esbuildProblemMatcherPlugin],
-	});
-	const desktopBridgeCtx = await esbuild.context({
-		entryPoints: ['packages/desktop/src/main.ts'],
-		bundle: true,
-		format: 'cjs',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
-		platform: 'node',
-		outfile: 'dist/aqiron-desktop-bridge.js',
-		external: ['keytar'],
-		logLevel: 'silent',
-		plugins: [esbuildProblemMatcherPlugin],
-	});
-	const webviewCtx = await esbuild.context({
-		entryPoints: [
-			'src/webview/ui/index.tsx'
-		],
-		bundle: true,
-		format: 'iife',
-		minify: production,
-		sourcemap: !production,
-		sourcesContent: false,
-		platform: 'browser',
-		outfile: 'dist/webview.js',
-		logLevel: 'silent',
-		loader: {
-			'.css': 'css',
-			'.ttf': 'file',
-		},
-		assetNames: '[name]-[hash]',
-		plugins: [
-			esbuildProblemMatcherPlugin,
-		],
-	});
-	if (watch) {
-		await Promise.all([extensionCtx.watch(), runtimeCtx.watch(), cliCtx.watch(), desktopBridgeCtx.watch(), webviewCtx.watch()]);
-	} else {
-		await Promise.all([extensionCtx.rebuild(), runtimeCtx.rebuild(), cliCtx.rebuild(), desktopBridgeCtx.rebuild(), webviewCtx.rebuild()]);
-		await Promise.all([extensionCtx.dispose(), runtimeCtx.dispose(), cliCtx.dispose(), desktopBridgeCtx.dispose(), webviewCtx.dispose()]);
-	}
+  const contexts = await Promise.all(targets.map((target) => esbuild.context({ ...options, ...target })));
+  if (watch) {
+    await Promise.all(contexts.map((context) => context.watch()));
+    return;
+  }
+  try { await Promise.all(contexts.map((context) => context.rebuild())); }
+  finally { await Promise.all(contexts.map((context) => context.dispose())); }
 }
-
-main().catch(e => {
-	console.error(e);
-	process.exit(1);
-});
+main().catch((error) => { console.error(error); process.exit(1); });

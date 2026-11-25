@@ -10,7 +10,7 @@
 	--panel-strong: color-mix(in srgb, var(--aq-color-surface-2) 94%, transparent);
 	--line: color-mix(in srgb, var(--aq-color-border) 72%, transparent);
 	--line-strong: color-mix(in srgb, var(--aq-color-border-strong) 78%, transparent);
-	--text: var(--vscode-foreground, #eaf2ff);
+	--text: var(--aq-color-text-primary, #eaf2ff);
 	--muted: var(--aq-color-text-secondary);
 	--blue: var(--aq-color-brand-primary);
 	--purple: var(--aq-color-brand-secondary);
@@ -667,7 +667,7 @@ h3 { font-size: 13px; }
 	.aq-tabs .aq-tab { gap: 0; }
 }
 
-/* Agent density pass: container queries follow the actual VS Code webview width. */
+/* Agent density pass: container queries follow the Desktop content width. */
 .agent-tab { container: aq-agent / inline-size; gap: var(--aq-space-4); }
 .agent-tab .aq-section-header__description { font: var(--aq-type-body-small); }
 .agent-tab > .section { gap: var(--aq-space-4); padding-block: var(--aq-space-4); border-color: transparent; background: transparent; box-shadow: none; }
@@ -1126,17 +1126,17 @@ h3 { font-size: 13px; }
 	.settings-nav, .workspace-mode { transition: none; }
 }
 .hypothesis-consent { margin: 1rem 0; padding: 1rem; display: grid; gap: .75rem; }
-.hypothesis-consent-note { color: var(--vscode-descriptionForeground); margin: 0; }
+.hypothesis-consent-note { color: var(--aq-color-text-muted, #9aa8ba); margin: 0; }
 .hypothesis-consent-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; }
 .hypothesis-evidence-select { display: grid; gap: .4rem; max-height: 16rem; overflow: auto; }
-.hypothesis-evidence-select label { display: flex; align-items: flex-start; gap: .5rem; padding: .4rem; border: 1px solid var(--vscode-panel-border); border-radius: 6px; }
-.hypothesis-evidence-select small { display: block; color: var(--vscode-descriptionForeground); }
+.hypothesis-evidence-select label { display: flex; align-items: flex-start; gap: .5rem; padding: .4rem; border: 1px solid var(--aq-color-border, #273247); border-radius: 6px; }
+.hypothesis-evidence-select small { display: block; color: var(--aq-color-text-muted, #9aa8ba); }
 .hypothesis-excerpt-toggle { display: flex; gap: .5rem; align-items: center; }
-.hypothesis-disclosure-summary { max-height: 34rem; overflow: auto; border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: .8rem; }
+.hypothesis-disclosure-summary { max-height: 34rem; overflow: auto; border: 1px solid var(--aq-color-border, #273247); border-radius: 8px; padding: .8rem; }
 .hypothesis-disclosure-summary h3 { margin: .7rem 0 .25rem; }
 .hypothesis-disclosure-summary p { margin: .25rem 0 .7rem; }
 .hypothesis-disclosure-summary li { margin: .6rem 0; overflow-wrap: anywhere; }
-.hypothesis-outbound-content, .hypothesis-disclosure-summary pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; background: var(--vscode-textCodeBlock-background); padding: .6rem; }
+.hypothesis-outbound-content, .hypothesis-disclosure-summary pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; background: var(--aq-color-surface-raised, #111827); padding: .6rem; }
 
 /* Hypothesis review workbench */
 .hypothesis-view-switch { display: flex; gap: 6px; align-self: flex-start; padding: 4px; border: 1px solid var(--aq-color-border); border-radius: var(--aq-radius-control); background: var(--aq-color-surface-1); }

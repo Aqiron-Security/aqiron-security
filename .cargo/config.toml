@@ -1,0 +1,4 @@
+[build]
+# Keep native build artifacts inside the repository and separate from the
+# retired apps/desktop/src-tauri target directory.
+target-dir = ".aqiron-build/rust-target"

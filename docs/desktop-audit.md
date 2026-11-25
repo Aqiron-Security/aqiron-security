@@ -1,5 +1,7 @@
 # Desktop architecture audit
 
+> **Historical audit:** written before Desktop promotion. For current commands, architecture, and ownership, see [Desktop development](desktop-development.md) and [Desktop, CLI, and Core architecture](architecture/desktop-cli-core.md).
+
 Audited 2026-10-02 before implementation.
 
 ## Repository findings

@@ -1,5 +1,7 @@
 # Core file-scan contract
 
+> **Historical contract:** this records behavior of the retired extension adapter. Current client responsibilities are described in [Desktop, CLI, and Core architecture](desktop-cli-core.md).
+
 **Status:** `scan.file` backs VS Code current-file, save/realtime, and post-fix document scans. Agent workspace and secret scans use `scan.start`; parity guarantees remain operation-specific.
 
 ## Current

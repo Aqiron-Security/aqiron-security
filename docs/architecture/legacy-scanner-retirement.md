@@ -1,5 +1,7 @@
 # Legacy scanner retirement record
 
+> **Historical migration record:** this describes work completed while the extension was active. Aqiron is now a Desktop + CLI product; current architecture is documented in [desktop-cli-core.md](desktop-cli-core.md).
+
 **Status: complete for `WorkspaceScanner` and `scanContent`.** The extension's workspace, current-file, realtime, Agent workspace and Agent secret scans use the existing Core operations. This change removes the remaining unused local scan engine and its dependency plumbing. It does not change Core scanner behavior, request contracts, scan rules, or client presentation.
 
 ## Production call graph

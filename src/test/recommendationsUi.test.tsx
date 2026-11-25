@@ -64,13 +64,22 @@ suite('Desktop recommendations UI', () => {
 	});
 
 	test('recommendation layout wraps actions and long content at narrow widths', () => {
-		const css = fs.readFileSync(path.resolve('src/webview/ui/styles.css'), 'utf8');
+		const css = fs.readFileSync(resolveSourceCss(), 'utf8');
 		assert.match(css, /\.agent-recommendations-section \.aq-section-header \{[^}]*flex-wrap:\s*wrap/s);
 		assert.match(css, /\.agent-suggestion-card \.suggestion-copy > strong \{[^}]*overflow-wrap:\s*anywhere/s);
 		assert.match(css, /\.agent-suggestion-card \.suggestion-actions \{[^}]*flex-wrap:\s*wrap/s);
 		assert.match(css, /@container aq-agent \(max-width: 680px\)[\s\S]*?\.agent-suggestion-card \{ grid-template-columns: 1fr/);
 	});
 });
+
+function resolveSourceCss(): string {
+	for (let directory = __dirname; ; directory = path.dirname(directory)) {
+		const candidate = path.join(directory, 'src', 'webview', 'ui', 'styles.css');
+		if (fs.existsSync(candidate)) {return candidate;}
+		if (path.dirname(directory) === directory) {break;}
+	}
+	throw new Error('Could not locate src/webview/ui/styles.css from compiled test directory.');
+}
 
 function state(ragOverrides: Partial<WebviewState['rag']> = {}, suggestions: WebviewState['suggestions'] = []): WebviewState {
 	return {

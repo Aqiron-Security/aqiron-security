@@ -1,12 +1,12 @@
-import type { WebviewState } from '../../../src/webview/ui/types.js';
-import type { UnifiedFinding } from '../../../packages/core/src/shared/finding.js';
-import { countFindings, mapFinding } from '../../../packages/desktop/src/findings.js';
-import { providerName } from '../../../src/webview/ui/providerOptions.js';
-import { buildWorkspaceRecommendations } from '../../../src/agents/recommendations.js';
-import { normalizeScanCoverage, statsForHistoricalSnapshot, statsWithoutSelectedSnapshot } from '../../../src/shared/scanCoverage.js';
+import type { WebviewState } from './webview/ui/types.js';
+import type { UnifiedFinding } from '../packages/core/src/shared/finding.js';
+import { countFindings, mapFinding } from '../packages/desktop/src/findings.js';
+import { providerName } from './webview/ui/providerOptions.js';
+import { buildWorkspaceRecommendations } from './agents/recommendations.js';
+import { normalizeScanCoverage, statsForHistoricalSnapshot, statsWithoutSelectedSnapshot } from './shared/scanCoverage.js';
 import aqironLogo from '../src-tauri/icons/aqiron-security-logo.png';
-import { HypothesisAiExecutionCoordinator } from '../../../src/webview/hypothesisAiExecution';
-import type { HypothesisReviewInput, HypothesisReviewResult } from '../../../packages/core/src/hypotheses/contracts';
+import { HypothesisAiExecutionCoordinator } from './webview/hypothesisAiExecution';
+import type { HypothesisReviewInput, HypothesisReviewResult } from '../packages/core/src/hypotheses/contracts';
 type DesktopCoreEvent = { event?: string; requestId?: string; payload?: Record<string, unknown> };
 type DesktopCommand = 'project.detect' | 'project.profile' | 'scan.start' | 'rag.index' | 'ai.providers' | 'ai.models' | 'ai.chat' | 'ai.cancel' | 'core.cancel' | 'credentials.status' | 'credentials.set' | 'credentials.delete' | 'workspace.rules.get' | 'workspace.rules.set' | 'workspace.threat-history.get' | 'workspace.threat-history.delete' | 'workspace.reports.get' | 'workspace.agent-sessions.get' | 'workspace.agent-sessions.set' | 'workspace.recommendations.get' | 'hypotheses.generate' | 'hypotheses.list' | 'hypotheses.review' | 'hypotheses.ai.prepare' | 'hypotheses.ai.approve' | 'hypotheses.ai.deny' | 'hypotheses.ai.execute';
 
@@ -491,7 +491,7 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === 'object' && !Array.isArray(value)); }
 
-function isDesktopPreparationResponse(value: unknown): value is import('../../../packages/core/src/hypotheses/contracts').HypothesisAiPrepareResult {
+function isDesktopPreparationResponse(value: unknown): value is import('../packages/core/src/hypotheses/contracts').HypothesisAiPrepareResult {
 	if (!isObjectRecord(value)) return false;
 	if (value.status === 'rejected') return isObjectRecord(value.diagnostic) && typeof value.diagnostic.message === 'string';
 	if (value.status !== 'prepared' || typeof value.contentFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.contentFingerprint) || !isObjectRecord(value.manifest)) return false;

@@ -605,7 +605,7 @@ export class CoreRuntime {
 				};
 				const prompt = `Return only a JSON array of up to five actionable Aqiron security recommendations. Each item must have title and detail; include severity (Critical, High, Medium, or Low), recommended (boolean), command, and metadata fields ruleId/file/line/category only when known. Do not include analysis, reasoning, or introductory text. Do not repeat secrets. Signals: ${signals.slice(0, 40).map((signal) => `${signal.category}:${signal.provider}:${signal.file}`).join(', ')}`;
 				const system = [
-					'You are Aqiron Security, a production DevSecOps assistant inside VS Code.',
+					'You are Aqiron Security, a production DevSecOps assistant for Aqiron Desktop and CLI.',
 					'Give concrete security analysis, remediation, secure code, exploit explanations, scan summaries, and threat analysis using the supplied workspace context.',
 					'Do not claim to have run tools unless the context says they ran. Prefer actionable fixes and clearly name risk.',
 					'Reasoning depth: Medium.',
@@ -742,11 +742,7 @@ export class CoreRuntime {
 
 	private async scanFile(scanId: string, request: import('../shared/fileScan').CoreFileScanRequest, emit: (event: CoreEventMessage) => void, cancellationToken?: CancellationTokenLike): Promise<import('../shared/fileScan').CoreFileScanResult> {
 		emit({ type: 'event', event: 'scan.file.started', requestId: scanId, payload: { scanId, filePath: request.filePath } });
-		let policy = request.policy;
-		if (request.workspaceRoot && await this.workspaceRules.has(request.workspaceRoot)) {
-			policy = { ...policy, customRules: await this.workspaceRules.get(request.workspaceRoot) };
-		}
-		const result = await this.nativeScanner.scanFileContent(request.filePath, request.content, scanId, policy, cancellationToken);
+		const result = await this.nativeScanner.scanFileContent(request.filePath, request.content, scanId, request.policy, cancellationToken);
 		emit({ type: 'event', event: 'scan.file.completed', requestId: scanId, payload: { scanId, filePath: request.filePath, state: result.state, findingCount: result.findingCount, filesScanned: result.filesScanned } });
 		return result;
 	}
@@ -1188,7 +1184,7 @@ function sanitizeAgentSession(session: CoreAgentSession): CoreAgentSession {
 }
 
 function validateFileScanRequest(input: Record<string, unknown>): boolean {
-	if (typeof input.filePath !== 'string' || input.filePath.trim().length === 0 || typeof input.content !== 'string' || !isRecord(input.policy) || (input.workspaceRoot !== undefined && typeof input.workspaceRoot !== 'string')) {return false;}
+	if (Object.keys(input).some((key) => !['filePath', 'content', 'policy'].includes(key)) || typeof input.filePath !== 'string' || input.filePath.trim().length === 0 || typeof input.content !== 'string' || !isRecord(input.policy)) {return false;}
 	const policy = input.policy;
 	if (!Array.isArray(policy.supportedExtensions) || !policy.supportedExtensions.every((value) => typeof value === 'string' && value.length > 0)) {return false;}
 	if (!Array.isArray(policy.excludedPaths) || !policy.excludedPaths.every((value) => typeof value === 'string')) {return false;}

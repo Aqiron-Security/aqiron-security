@@ -515,12 +515,12 @@ async fn select_workspace(
 fn start_bridge(app: AppHandle) -> Result<Arc<BridgeProcess>, String> {
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let root = manifest
-        .join("../../..")
+        .join("..")
         .canonicalize()
         .map_err(|e| format!("Unable to resolve repository root: {e}"))?;
     let root = node_compatible_path(&root);
-    let bridge_path = root.join("dist/aqiron-desktop-bridge.js");
-    let runtime_path = root.join("dist/core-runtime.js");
+    let bridge_path = root.join(".aqiron-build/node/aqiron-desktop-bridge.js");
+    let runtime_path = root.join(".aqiron-build/node/core-runtime.js");
     if !bridge_path.is_file() {
         return Err("Desktop bridge is not built. Run npm run core:build.".into());
     }

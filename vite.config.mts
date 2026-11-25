@@ -6,13 +6,13 @@ const appDirectory = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
 	root: appDirectory,
-	publicDir: resolve(appDirectory, '../../assets'),
+	publicDir: resolve(appDirectory, 'assets'),
 	server: {
 		host: '127.0.0.1',
 		port: 1420,
 		strictPort: true,
-		fs: { allow: [resolve(appDirectory, '../..')] },
+		fs: { allow: [appDirectory] },
 	},
 	clearScreen: false,
-	build: { outDir: resolve(appDirectory, '../../dist/desktop'), emptyOutDir: true },
+	build: { outDir: resolve(appDirectory, '.aqiron-build/desktop'), emptyOutDir: true },
 });

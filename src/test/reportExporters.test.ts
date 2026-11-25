@@ -1,4 +1,7 @@
 import { strict as assert } from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { createJsonReport, createPdfReport, createSarifReport } from '../../packages/core/src/reports/reportExporters';
 import { SecurityReportModel } from '../../packages/core/src/reports/reportModels';
 import { createFinding } from '../../packages/core/src/shared/finding';
@@ -72,6 +75,20 @@ suite('Report exporters', () => {
 		assert.ok(!pdf.includes('(Report) Tj ET'));
 		assert.ok(!pdf.includes('Aqiron Risk Score'));
 		assert.ok(!pdf.includes('sk-test-12345678901234567890'));
+	});
+
+	test('embeds the report logo when process working directory is outside the repository', () => {
+		const originalDirectory = process.cwd();
+		const unrelatedDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'aqiron-report-cwd-'));
+		try {
+			process.chdir(unrelatedDirectory);
+			const pdf = createPdfReport(makeModel(), 'D:/workspace/example-app');
+			assert.ok(pdf.includes('/Subtype /Image'));
+			assert.ok(pdf.includes('/Filter /DCTDecode'));
+		} finally {
+			process.chdir(originalDirectory);
+			fs.rmSync(unrelatedDirectory, { recursive: true, force: true });
+		}
 	});
 
 	test('omits optional correlation and stray report pages when relationship data is empty', () => {

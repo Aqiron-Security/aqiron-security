@@ -1077,7 +1077,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 						<div className="chat-modal delete-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
 							<h2>Delete API key?</h2>
 							<p>This will delete <strong>{deleteApi.name}</strong>.</p>
-							<span>{window.__AQIRON_DESKTOP__ ? 'The API key will be removed from this Desktop application’s secure OS credential store and cannot be used until it is added again.' : 'The key will be removed from VS Code SecretStorage and cannot be used by Aqiron until it is added again.'}</span>
+							<span>The API key will be removed from this Desktop application’s secure OS credential store and cannot be used until it is added again.</span>
 							<div className="modal-actions"><button onClick={() => setDeleteApi(undefined)}>Cancel</button><button className="delete-action" onClick={() => { post('deleteApiCredential', deleteApi.id); setDeleteApi(undefined); }}>Delete</button></div>
 						</div>
 					</div>
@@ -1100,7 +1100,7 @@ export const SettingsTab = memo(function SettingsTab({ state, post }: { state: W
 				<div className="settings-form">
 					<label>Base URL<input value={mobSfBaseUrl} onChange={(event) => setMobSfBaseUrl(event.target.value)} placeholder="http://localhost:1337/" /></label>
 					<label>API key<input value={mobSfApiKey} onChange={(event) => setMobSfApiKey(event.target.value)} placeholder={state.mobsf.apiKeyConfigured ? 'Saved - paste new key to replace or leave blank to clear' : 'Paste MobSF API key'} type="password" /></label>
-					<p className="settings-help">MobSF runs only when both a server base URL and API key are configured. The extension no longer ships a default MobSF endpoint or key.</p>
+					<p className="settings-help">MobSF runs only when both a server base URL and API key are configured. Aqiron does not ship a default MobSF endpoint or key.</p>
 					<div className="control-row"><button onClick={saveMobSfSettings}>Save MobSF settings</button><span className={state.mobsf.apiKeyConfigured ? 'settings-status ok' : 'settings-status'}>{state.mobsf.apiKeyConfigured ? 'API key configured' : 'API key not configured'}</span></div>
 				</div>
 			</section>
