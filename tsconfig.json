@@ -1,33 +1,30 @@
 {
-	"compilerOptions": {
-		"module": "Node16",
-		"target": "ES2022",
-		"jsx": "react-jsx",
-		"lib": [
-			"ES2022",
-			"DOM"
-		],
-		"sourceMap": true,
-		"rootDir": ".",
-		"strict": true,   /* enable all strict type-checking options */
-		/* Additional Checks */
-		// "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
-		// "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
-		// "noUnusedParameters": true,  /* Report errors on unused parameters. */
-	},
-	"include": [
-		"src/**/*.ts",
-		"src/**/*.tsx",
-		"apps/desktop/src/**/*.ts",
-		"apps/desktop/**/*.ts",
-		"packages/desktop/src/**/*.ts",
-		"packages/cli/src/**/*.ts",
-		"packages/core/src/**/*.ts"
-	],
-	"exclude": [
-		"dist",
-		"out",
-		"node_modules",
-		".vscode-test"
-	]
+  "compilerOptions": {
+    "module": "Node16",
+    "target": "ES2022",
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM"],
+    "sourceMap": true,
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "src/main.tsx",
+    "src/desktopAdapter.ts",
+    "src/assets.d.ts",
+    "src/agents/recommendations.ts",
+    "src/ai/types/ai.ts",
+    "src/models/issue.ts",
+    "src/shared/scanCoverage.ts",
+    "src/webview/hypothesisAiExecution.ts",
+    "src/webview/hypothesisAiConsentMessages.ts",
+    "src/webview/ui/**/*.ts",
+    "src/webview/ui/**/*.tsx",
+    "packages/desktop/src/**/*.ts",
+    "packages/cli/src/**/*.ts",
+    "packages/core/src/**/*.ts"
+  ],
+  "exclude": ["dist", "out", "node_modules", "src/test", ".vscode-test", "apps"]
 }

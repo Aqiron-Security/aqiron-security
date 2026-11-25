@@ -1,0 +1,13 @@
+{
+  "name": "@aqiron/desktop-bridge",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Node bridge between Aqiron Desktop and Core",
+  "main": "src/main.ts",
+  "types": "src/main.ts",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "npm run core:build --workspace=aqiron-security",
+    "test": "npm run desktop:test --workspace=aqiron-security"
+  }
+}

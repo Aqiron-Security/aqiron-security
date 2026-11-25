@@ -154,6 +154,18 @@ suite('Core scanners', () => {
 		const availability = await scanner.isAvailable(context);
 		assert.strictEqual(availability.available, false);
 	});
+
+	test('MobSF credential backend unavailability does not abort unrelated Core scans', async () => {
+		const scanner = new MobSfScanner();
+		const context = fakeContext('deep', {
+			configuration: { get: (key: string) => key === 'mobsfBaseUrl' ? 'http://127.0.0.1:8000' : '' },
+			credentialStore: { get: async () => { throw Object.assign(new Error('credential backend unavailable'), { code: 'CREDENTIAL_STORE_UNAVAILABLE' }); }, set: async () => undefined, delete: async () => undefined },
+		});
+		const availability = await scanner.isAvailable(context);
+		assert.equal(availability.available, false);
+		const result = await scanner.scan(context);
+		assert.match(result.error ?? '', /API key is not configured/);
+	});
 });
 
 function fakeScanner(id: string, capabilities: Array<'source-code' | 'dependency' | 'secret' | 'binary' | 'mobile' | 'artifact' | 'config'>) {

@@ -59,9 +59,20 @@ export interface AqironIssue {
 }
 
 export interface AqironScanResult {
+	scanId?: string;
 	workspaceRoot?: string;
 	target: string;
 	filesScanned: number;
+	coverageDiagnosticsAvailable?: boolean;
+	coverageDiagnosticsPresent?: boolean;
+	coverageDiagnosticsValid?: boolean;
+	coverageStatus?: 'complete' | 'partial' | 'unavailable';
+	skippedFiles?: number;
+	skippedFilesIsLowerBound?: boolean;
+	skippedFilesCountCertainty?: 'exact' | 'lower-bound' | 'indeterminate';
+	skipCountConflict?: boolean;
+	skipReasonsTruncated?: boolean;
+	skipReasons?: Partial<Record<string, number>>;
 	issues: AqironIssue[];
 	durationMs: number;
 }
@@ -69,6 +80,16 @@ export interface AqironScanResult {
 export interface AqironWorkspaceStats {
 	filesScanned: number;
 	indexedFiles: number;
+	coverageDiagnosticsAvailable?: boolean;
+	coverageDiagnosticsPresent?: boolean;
+	coverageDiagnosticsValid?: boolean;
+	coverageStatus?: 'complete' | 'partial' | 'unavailable';
+	skippedFiles?: number;
+	skippedFilesIsLowerBound?: boolean;
+	skippedFilesCountCertainty?: 'exact' | 'lower-bound' | 'indeterminate';
+	skipCountConflict?: boolean;
+	skipReasonsTruncated?: boolean;
+	skipReasons?: Partial<Record<string, number>>;
 	scanStatus: 'Idle' | 'Scanning' | 'Complete' | 'Failed';
 	lastScanDurationMs: number;
 }

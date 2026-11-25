@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { UnifiedFinding } from '../shared/finding';
 import { TelemetryEngine } from '../telemetry';
 import { ThreatCorrelationEngine } from '../correlation';
@@ -37,7 +38,7 @@ export class CoreScanService {
 
 			const native = request.nativeScanner
 				? await request.nativeScanner.scanWorkspace(request.workspaceRoot, request.cancellationToken, request.workspacePolicy, request.customRules)
-				: { findings: [], filesScanned: 0, durationMs: 0 };
+				: { findings: [], sourceProvenance: [], excludedProvenanceCount: 0, filesScanned: 0, skippedFiles: 0, skipReasons: {}, durationMs: 0 };
 			const nativeFindings = native.findings ?? [];
 			throwIfCancelled(request.cancellationToken);
 			for (const finding of nativeFindings) {
@@ -85,6 +86,8 @@ export class CoreScanService {
 				workspaceRoot: request.workspaceRoot,
 				targetPath: request.targetPath ?? request.workspaceRoot,
 				filesScanned: native.filesScanned || scannerResults.reduce((total, result) => total + (result.filesScanned ?? 0), 0),
+				skippedFiles: native.skippedFiles ?? 0,
+				skipReasons: native.skipReasons ?? {},
 				durationMs: Date.now() - startedAt,
 				findings: correlation.findings,
 				toolResults: [
@@ -96,6 +99,8 @@ export class CoreScanService {
 				graph,
 				telemetry: telemetry.getSnapshot(),
 				report,
+				sourceProvenance: (native.sourceProvenance ?? []).filter((item) => correlation.findings.some((finding) => finding.id === item.findingId && finding.file === path.resolve(request.workspaceRoot, item.file) && finding.sourceTool === item.sourceTool && finding.ruleId === item.ruleId && finding.line === item.startLine && (finding.endLine ?? finding.line) === item.endLine)),
+				excludedProvenanceCount: native.excludedProvenanceCount ?? 0,
 			};
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);

@@ -30,7 +30,6 @@ export interface ResolvedCustomRule {
 
 /** Content is supplied explicitly; Core must not reread filePath for this operation. */
 export interface CoreFileScanRequest {
-	workspaceRoot?: string;
 	filePath: string;
 	content: string;
 	policy: ResolvedFileScanPolicy;
@@ -40,7 +39,7 @@ export interface CoreFileScanResult {
 	scanId: string;
 	filePath: string;
 	state: 'completed' | 'skipped';
-	skipReason?: 'ineligible' | 'excluded' | 'unsupported' | 'generated' | 'minified' | 'compiled' | 'size-limit';
+	skipReason?: 'ineligible' | 'excluded' | 'unsupported' | 'generated' | 'minified' | 'compiled' | 'size-limit' | 'line-limit';
 	findings: UnifiedFinding[];
 	filesScanned: 0 | 1;
 	findingCount: number;

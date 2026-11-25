@@ -30,14 +30,17 @@ export class ClaudeProvider extends BaseProvider implements AIProvider {
 		const response = await withRetry(async () => {
 			return await this.transport.request(`${this.endpoint}/messages`, {
 				method: 'POST', timeoutMs: req.timeoutMs, abortSignal: req.abortSignal, headers: await this.getApiHeaders(),
+				maxRequestBodyBytes: req.transportLimits?.maxRequestBodyBytes,
+				maxResponseBodyBytes: req.transportLimits?.maxResponseBodyBytes,
+				maxSseEventBytes: req.transportLimits?.maxSseEventBytes,
 				body: { model: req.model, max_tokens: req.maxTokens, ...(system ? { system } : {}), messages, stream: true },
 			});
 		}, { retries: req.retries, shouldRetry: isTransientError });
-		for await (const item of parseSseStream(response)) {
+		for await (const item of parseSseStream(response, undefined, req.transportLimits?.maxResponseBodyBytes, req.transportLimits?.maxSseEventBytes)) {
 			const event = item as { type?: string; delta?: { type?: string; text?: string }; error?: { message?: string } };
 			if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) yield { type: 'token', content: event.delta.text };
 			if (event.type === 'message_stop') yield { type: 'done' };
-			if (event.type === 'error') yield { type: 'error', error: event.error?.message ?? 'Claude returned an error.' };
+			if (event.type === 'error') yield { type: 'error', error: 'The provider returned an error response.' };
 		}
 	}
 

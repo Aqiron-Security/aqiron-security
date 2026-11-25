@@ -12,6 +12,29 @@ const statAsync = promisify(fs.stat);
 const accessAsync = promisify(fs.access);
 const renameAsync = promisify(fs.rename);
 
+async function readRawBounded(file: string, maxBytes: number): Promise<Uint8Array> {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {throw new RangeError('A non-negative bounded-read limit is required.');}
+	const handle = await fs.promises.open(file, 'r');
+	let total = 0;
+	try {
+		const initial = await handle.stat();
+		if (initial.size > maxBytes) {throw Object.assign(new Error(`File exceeds the ${maxBytes}-byte read limit.`), { code: 'FILE_TOO_LARGE', bytesRead: 0 });}
+		const chunks: Buffer[] = [];
+		while (total <= maxBytes) {
+			const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - total));
+			const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+			if (bytesRead === 0) {break;}
+			total += bytesRead;
+			if (total > maxBytes) {throw Object.assign(new Error(`File exceeds the ${maxBytes}-byte read limit.`), { code: 'FILE_TOO_LARGE', bytesRead: total });}
+			chunks.push(chunk.subarray(0, bytesRead));
+		}
+		return Buffer.concat(chunks, total);
+	} catch (error) {
+		if (error && typeof error === 'object') {Object.assign(error, { bytesRead: total });}
+		throw error;
+	} finally { await handle.close(); }
+}
+
 export function createNodeLogger(scope = 'aqiron-core'): Logger {
 	return {
 		debug(message: string, meta?: unknown): void {
@@ -42,9 +65,14 @@ export function createNodeFileSystem(): FileSystem {
 			}
 			return new Uint8Array(await readFileAsync(file));
 		}) as FileSystem['readFile'],
+		readFileBoundedBytes: readRawBounded,
+		readFileBounded: async (file: string, maxBytes: number, encoding: BufferEncoding): Promise<string> => Buffer.from(await readRawBounded(file, maxBytes)).toString(encoding),
 		writeFile: async (file: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void> => {
 			await mkdirAsync(path.dirname(file), { recursive: true });
 			await writeFileAsync(file, contents, encoding as BufferEncoding | undefined);
+		},
+		writeFileExclusive: async (file: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void> => {
+			await fs.promises.writeFile(file, contents, { encoding: encoding as BufferEncoding | undefined, flag: 'wx' });
 		},
 		mkdir: async (directory: string, options?: { recursive?: boolean }): Promise<void> => {
 			await mkdirAsync(directory, options);
@@ -56,11 +84,22 @@ export function createNodeFileSystem(): FileSystem {
 			const stat = await statAsync(file);
 			return { isFile: () => stat.isFile(), isDirectory: () => stat.isDirectory(), size: stat.size, mtimeMs: stat.mtimeMs };
 		},
+		lstat: async (file: string) => {
+			const stat = await fs.promises.lstat(file);
+			return { isFile: () => stat.isFile(), isDirectory: () => stat.isDirectory(), isSymbolicLink: () => stat.isSymbolicLink(), size: stat.size, mtimeMs: stat.mtimeMs };
+		},
+		realpath: async (file: string) => await fs.promises.realpath(file),
 		access: async (file: string): Promise<void> => {
 			await accessAsync(file);
 		},
 		rename: async (oldPath: string, newPath: string): Promise<void> => {
 			await renameAsync(oldPath, newPath);
+		},
+		unlink: async (file: string): Promise<void> => {
+			await fs.promises.unlink(file);
+		},
+		rmdir: async (directory: string): Promise<void> => {
+			await fs.promises.rmdir(directory);
 		},
 		exists: async (file: string): Promise<boolean> => {
 			try {
@@ -89,33 +128,78 @@ export function createNodeNetworkClient(logger: Logger = createNodeLogger('netwo
 				throw new Error('Network fetch is unavailable in this runtime.');
 			}
 			const controller = new AbortController();
-			const timer = options.timeoutMs ? setTimeout(() => controller.abort(new DOMException('Request timed out.', 'TimeoutError')), options.timeoutMs) : undefined;
-			const headers = new Headers(options.headers ?? {});
-			const response = await fetchFn(url, {
-				method: options.method ?? 'GET',
-				headers,
-				body: options.body as BodyInit | undefined,
-				signal: options.cancellationToken?.isCancellationRequested ? AbortSignal.abort() : controller.signal,
-			}).finally(() => {
-				if (timer) {
-					clearTimeout(timer);
-				}
-			});
-			logger.debug(`HTTP ${options.method ?? 'GET'} ${url}`, { status: response.status });
+			const timer = options.timeoutMs && options.timeoutMs > 0 ? setTimeout(() => controller.abort(new DOMException('Request timed out.', 'TimeoutError')), options.timeoutMs) : undefined;
+			const abortFromCaller = () => controller.abort(options.abortSignal?.reason);
+			if (options.abortSignal?.aborted) { abortFromCaller(); }
+			else { options.abortSignal?.addEventListener('abort', abortFromCaller, { once: true }); }
+			const abortFromToken = options.cancellationToken?.onCancellationRequested?.(() => controller.abort());
+			let cleaned = false;
+			const cleanup = () => {
+				if (cleaned) { return; }
+				cleaned = true;
+				if (timer) { clearTimeout(timer); }
+				options.abortSignal?.removeEventListener('abort', abortFromCaller);
+				abortFromToken?.dispose();
+			};
+			let headers: Headers;
+			try { headers = new Headers(options.headers ?? {}); }
+			catch { cleanup(); throw new Error('Network request headers are invalid.'); }
+			let response: Response;
+			try {
+				response = await fetchFn(url, {
+					method: options.method ?? 'GET', headers,
+					body: options.body as BodyInit | undefined,
+					signal: controller.signal,
+					redirect: options.redirect ?? 'follow',
+				});
+			} catch (error) { cleanup(); throw error; }
+			// Avoid logging endpoint paths or query strings, which can contain provider/model identifiers.
+			logger.debug(`HTTP ${options.method ?? 'GET'} provider request`, { status: response.status });
 			const headersObject: Record<string, string> = {};
 			response.headers.forEach((value, key) => {
 				headersObject[key] = value;
 			});
+			const body = response.body ? wrapResponseBody(response.body, cleanup, () => controller.abort()) : (cleanup(), null);
 			return {
 				ok: response.ok,
 				status: response.status,
 				headers: headersObject,
-				text: async () => await response.text(),
-				json: async <T = unknown>() => await response.json() as T,
-				body: response.body,
+				text: async () => await readWrappedResponseText(body),
+				json: async <T = unknown>() => JSON.parse(await readWrappedResponseText(body)) as T,
+				body,
 			};
 		},
 	};
+}
+
+async function readWrappedResponseText(body: ReadableStream<Uint8Array> | null): Promise<string> {
+	if (!body) { return ''; }
+	const reader = body.getReader();
+	const chunks: Uint8Array[] = [];
+	try {
+		while (true) {
+			const part = await reader.read();
+			if (part.done) { break; }
+			chunks.push(part.value);
+		}
+		return Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString('utf8');
+	} finally { try { reader.releaseLock(); } catch { /* terminal stream */ } }
+}
+
+function wrapResponseBody(source: ReadableStream<Uint8Array>, cleanup: () => void, abort: () => void): ReadableStream<Uint8Array> {
+	const reader = source.getReader();
+	let finished = false;
+	const finish = () => { if (!finished) { finished = true; cleanup(); try { reader.releaseLock(); } catch { /* closed or cancelled */ } } };
+	return new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			try {
+				const result = await reader.read();
+				if (result.done) { controller.close(); finish(); }
+				else { controller.enqueue(result.value); }
+			} catch { controller.error(new Error('Network response stream failed.')); finish(); }
+		},
+		async cancel(reason) { abort(); try { await reader.cancel(reason); } finally { finish(); } },
+	});
 }
 
 export function createNodeProcessRunner(): ProcessRunner {
@@ -216,9 +300,20 @@ export function createNodeArtifactWriter(filesystem: FileSystem): ArtifactWriter
 export class NodeCredentialStore implements CredentialStore {
 	private readonly service = 'aqiron-security';
 	private keytar?: Keytar;
+	constructor(private readonly options: { platform?: NodeJS.Platform; keytarFactory?: () => Keytar } = {}) {}
 
 	async get(key: string): Promise<string | undefined> {
-		return (await (await this.getKeytar()).getPassword(this.service, key)) ?? undefined;
+		try {
+			return (await (await this.getKeytar()).getPassword(this.service, key)) ?? undefined;
+		} catch (error) {
+			// Windows may have keytar installed while the current process has no
+			// usable Credential Manager session. Treat that as unavailable storage
+			// so read-only status APIs can fail closed without breaking Core startup.
+			if ((this.options.platform ?? process.platform) === 'win32' && error instanceof Error && /^Access is denied\.?\s*$/i.test(error.message)) {
+				throw Object.assign(new Error('Native credential storage is unavailable in this session.'), { code: 'CREDENTIAL_STORE_UNAVAILABLE' });
+			}
+			throw error;
+		}
 	}
 
 	async set(key: string, value: string): Promise<void> {
@@ -234,7 +329,7 @@ export class NodeCredentialStore implements CredentialStore {
 			return this.keytar;
 		}
 		try {
-			const loaded = require(['key', 'tar'].join('')) as Keytar;
+			const loaded = this.options.keytarFactory?.() ?? require(['key', 'tar'].join('')) as Keytar;
 			if (!loaded || typeof loaded.getPassword !== 'function') {
 				throw new Error('The keychain adapter is unavailable.');
 			}

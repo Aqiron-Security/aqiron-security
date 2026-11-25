@@ -8,9 +8,10 @@ const readline = require('node:readline');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '../../..');
-const bridgePath = path.join(root, 'dist/aqiron-desktop-bridge.js');
-const runtimePath = path.join(root, 'dist/core-runtime.js');
+const bridgePath = process.env.AQIRON_DESKTOP_BRIDGE_PATH || path.join(root, '.aqiron-build/node/aqiron-desktop-bridge.js');
+const runtimePath = process.env.AQIRON_CORE_RUNTIME_PATH || path.join(root, '.aqiron-build/node/core-runtime.js');
 const fixture = path.join(root, 'src/test/fixtures/file-scan/flutter');
+const workspaceTempDirectory = (prefix) => fs.mkdtemp(path.join(root, `.${prefix}-`));
 
 test('desktop bridge detects a project, starts the real Core scan, forwards events and returns real findings', { timeout: 120_000 }, async () => {
 	const bridge = await startBridge(runtimePath);
@@ -18,14 +19,10 @@ test('desktop bridge detects a project, starts the real Core scan, forwards even
 		const profile = await bridge.request('project.detect', { workspaceRoot: fixture, trusted: true });
 		assert.ok(profile.projectTypes.includes('Flutter'));
 		await bridge.request('project.profile', { workspaceRoot: fixture, trusted: true });
-		const providers = await bridge.request('ai.providers', {});
-		assert.ok(Array.isArray(providers.providers), 'Desktop project selection reads provider status through CoreClient');
 		await bridge.request('workspace.rules.get', { workspaceRoot: fixture, trusted: true });
 		const history = await bridge.request('workspace.threat-history.get', { workspaceRoot: fixture });
 		assert.ok(Array.isArray(history.snapshots), 'Desktop can load existing workspace threat snapshots through Core');
 		assert.equal(bridge.events.some((event) => event.event?.startsWith('scan.')), false, 'project restoration detection must not start a scan');
-		const providersAfterSelection = await bridge.request('ai.providers', {});
-		assert.ok(Array.isArray(providersAfterSelection.providers), 'the Core bridge remains usable after project selection calls');
 		assert.doesNotMatch(bridge.logs(), /"operation":"core\.shutdown"/, 'successful project selection must not shut down Core');
 		assert.doesNotMatch(bridge.logs(), /EPIPE|broken pipe/i, 'successful project selection must not produce a pipe failure');
 		const result = await bridge.request('scan.start', { workspaceRoot: fixture, trusted: true, mode: 'quick', includeExternalScanners: false });
@@ -42,7 +39,7 @@ test('desktop bridge detects a project, starts the real Core scan, forwards even
 });
 
 test('desktop bridge dispatches credential deletion to CoreClient', { timeout: 30_000 }, async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-desktop-credentials-'));
+	const directory = await workspaceTempDirectory('aqiron-desktop-credentials');
 	const mockRuntime = path.join(directory, 'credential-runtime.js');
 	await fs.writeFile(mockRuntime, [
 		"const readline = require('node:readline');",
@@ -50,9 +47,10 @@ test('desktop bridge dispatches credential deletion to CoreClient', { timeout: 3
 		"const request = JSON.parse(line);",
 		"if (request.method === 'credentials.delete') process.stderr.write('MOCK_CREDENTIAL_DELETE:' + request.params.key + '\\n');",
 		"if (request.method === 'ai.models') process.stderr.write('MOCK_AI_MODELS:' + request.params.providerId + '\\n');",
+		"if (request.method === 'ai.providers') process.stderr.write('MOCK_AI_PROVIDERS\\n');",
 		"if (request.method === 'ai.cancel') process.stderr.write('MOCK_AI_CANCEL:' + request.params.sessionId + '\\n');",
 		"if (request.method === 'ai.chat') { process.stderr.write('MOCK_AI_CHAT:' + request.params.providerId + ':' + request.params.model + '\\n'); process.stdout.write(JSON.stringify({ type: 'event', event: 'ai.token', requestId: request.params.sessionId, payload: { content: 'reply' } }) + '\\n'); process.stdout.write(JSON.stringify({ type: 'event', event: 'ai.completed', requestId: request.params.sessionId, payload: { text: 'reply' } }) + '\\n'); }",
-		"const result = request.method === 'core.handshake' ? { protocolVersion: 1, coreVersion: 'test', status: 'compatible' } : request.method === 'ai.models' ? { models: [{ id: 'test-model', label: 'Test model', providerId: request.params.providerId, badges: [], capabilities: [] }], status: { providerId: request.params.providerId, connected: true, message: 'Ready' } } : request.method === 'ai.cancel' ? { cancelled: true } : { hasValue: false };",
+		"const result = request.method === 'core.handshake' ? { protocolVersion: 1, coreVersion: 'test', status: 'compatible' } : request.method === 'ai.providers' ? { providers: ['openai'], configuredProviders: [] } : request.method === 'ai.models' ? { models: [{ id: 'test-model', label: 'Test model', providerId: request.params.providerId, badges: [], capabilities: [] }], status: { providerId: request.params.providerId, connected: true, message: 'Ready' } } : request.method === 'ai.cancel' ? { cancelled: true } : { hasValue: false };",
 		"process.stdout.write(JSON.stringify({ id: request.id, type: 'response', success: true, result }) + '\\n');",
 		"});",
 	].join('\n'));
@@ -60,7 +58,13 @@ test('desktop bridge dispatches credential deletion to CoreClient', { timeout: 3
 	try {
 		const result = await bridge.request('credentials.delete', { key: 'aqiron.ai.api.desktop-test' });
 		assert.equal(result.hasValue, false);
+		await bridge.waitForLog('MOCK_CREDENTIAL_DELETE:aqiron.ai.api.desktop-test');
 		assert.match(bridge.logs(), /MOCK_CREDENTIAL_DELETE:aqiron\.ai\.api\.desktop-test/);
+		const providers = await bridge.request('ai.providers', {});
+		assert.ok(Array.isArray(providers.providers), 'Desktop project selection reads provider status through CoreClient');
+		assert.match(bridge.logs(), /MOCK_AI_PROVIDERS/);
+		const providersAfterSelection = await bridge.request('ai.providers', {});
+		assert.ok(Array.isArray(providersAfterSelection.providers), 'the Core bridge remains usable after project selection calls');
 		const models = await bridge.request('ai.models', { providerId: 'openai' });
 		assert.equal(models.models[0]?.providerId, 'openai');
 		assert.match(bridge.logs(), /MOCK_AI_MODELS:openai/);
@@ -75,7 +79,7 @@ test('desktop bridge dispatches credential deletion to CoreClient', { timeout: 3
 });
 
 test('desktop bridge reads and writes Core-owned project agent sessions and recommendations', { timeout: 30_000 }, async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-desktop-agent-state-'));
+	const directory = await workspaceTempDirectory('aqiron-desktop-agent-state');
 	const bridge = await startBridge(runtimePath);
 	const session = { id: 'session-1', title: 'Existing review', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:01:00.000Z', model: 'model-a', intelligence: 'balanced', messages: [{ id: 'message-1', role: 'user', content: 'Review this project', createdAt: '2026-10-01T00:00:00.000Z' }] };
 	try {
@@ -107,7 +111,7 @@ test('desktop recommendation reads are project-scoped through Core and do not sc
 });
 
 test('desktop bridge forwards recommendation refresh to Core rag.index with AI enabled and does not scan', { timeout: 30_000 }, async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-desktop-rag-refresh-'));
+	const directory = await workspaceTempDirectory('aqiron-desktop-rag-refresh');
 	const mockRuntime = path.join(directory, 'rag-runtime.js');
 	await fs.writeFile(mockRuntime, [
 		"const readline = require('node:readline');",
@@ -130,7 +134,7 @@ test('desktop bridge forwards recommendation refresh to Core rag.index with AI e
 });
 
 test('desktop bridge preserves recommendation request failures for an explicit UI error state', { timeout: 30_000 }, async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-desktop-recommendation-error-'));
+	const directory = await workspaceTempDirectory('aqiron-desktop-recommendation-error');
 	const mockRuntime = path.join(directory, 'recommendation-runtime.js');
 	await fs.writeFile(mockRuntime, [
 		"const readline = require('node:readline');",
@@ -147,7 +151,7 @@ test('desktop bridge preserves recommendation request failures for an explicit U
 });
 
 test('desktop bridge deletes a persisted threat snapshot through Core and preserves other snapshots', { timeout: 30_000 }, async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-desktop-threat-delete-'));
+	const directory = await workspaceTempDirectory('aqiron-desktop-threat-delete');
 	const securityDirectory = path.join(directory, '.aqiron-security');
 	await fs.mkdir(securityDirectory, { recursive: true });
 	const file = path.join(securityDirectory, 'threats.json');
@@ -190,9 +194,10 @@ test('desktop bridge surfaces Core startup failures to the caller', { timeout: 3
 });
 
 test('desktop bridge reports a Core crash during a request as a disconnect', { timeout: 30_000 }, async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-desktop-crash-'));
+	const directory = await workspaceTempDirectory('aqiron-desktop-crash');
 	const mockRuntime = path.join(directory, 'crash-runtime.js');
 	await fs.writeFile(mockRuntime, [
+		"process.stderr.write('MOCK_CORE_START\\n');",
 		"const readline = require('node:readline');",
 		"readline.createInterface({ input: process.stdin }).on('line', line => {",
 		"const request = JSON.parse(line);",
@@ -203,7 +208,9 @@ test('desktop bridge reports a Core crash during a request as a disconnect', { t
 	].join('\n'));
 	const bridge = await startBridge(mockRuntime);
 	try {
-		await assert.rejects(bridge.request('scan.start', { workspaceRoot: fixture, trusted: true }), /exited unexpectedly|unavailable|crash/i);
+		const request = bridge.request('scan.start', { workspaceRoot: fixture, trusted: true });
+		await bridge.waitForLog('MOCK_CORE_START');
+		await assert.rejects(request, /exited unexpectedly|unavailable|crash/i);
 	} finally {
 		await bridge.close();
 		await fs.rm(directory, { recursive: true, force: true });
@@ -211,7 +218,7 @@ test('desktop bridge reports a Core crash during a request as a disconnect', { t
 });
 
 test('desktop bridge waits for an active request before orderly Core shutdown', { timeout: 30_000 }, async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-desktop-shutdown-'));
+	const directory = await workspaceTempDirectory('aqiron-desktop-shutdown');
 	const mockRuntime = path.join(directory, 'delayed-runtime.js');
 	await fs.writeFile(mockRuntime, [
 		"const readline = require('node:readline');",
@@ -241,23 +248,147 @@ test('desktop bridge waits for an active request before orderly Core shutdown', 
 	}
 });
 
+test('desktop Core bridge routes cancellation while execution is pending and correlates the later execution result', { timeout: 30_000 }, async () => {
+	const directory = await workspaceTempDirectory('aqiron-desktop-hypothesis-cancel');
+	const mockRuntime = path.join(directory, 'hypothesis-runtime.js');
+	await fs.writeFile(mockRuntime, [
+		"process.stderr.write('MOCK_CORE_START\\n');",
+		"const readline = require('node:readline');",
+		"const timers = new Map();",
+		"readline.createInterface({ input: process.stdin }).on('line', line => {",
+		"const request = JSON.parse(line);",
+		"const send = (id, result) => process.stdout.write(JSON.stringify({ id, type: 'response', success: true, result }) + '\\n');",
+		"if (request.method === 'core.handshake') send(request.id, { protocolVersion: 1, coreVersion: 'test', status: 'compatible' });",
+		"else if (request.method === 'core.health') send(request.id, { ready: true });",
+		"else if (request.method === 'hypotheses.ai.execute') { process.stderr.write('EXECUTE_PENDING:' + request.id + '\\n'); timers.set(request.id, () => send(request.id, { ok: false, state: 'cancelled', reason: 'cancelled' })); }",
+		"else if (request.method === 'core.cancel') { process.stderr.write('CANCEL_RECEIVED:' + request.params.requestId + '\\n'); send(request.id, { cancelled: true, requestId: request.params.requestId }); setImmediate(() => timers.get(request.params.requestId)?.()); }",
+		"else if (request.method === 'core.shutdown') { send(request.id, { ok: true }); setTimeout(() => process.exit(0), 5); }",
+		"});",
+	].join('\n'));
+	const bridge = await startBridge(mockRuntime);
+	try {
+		const execution = bridge.request('hypotheses.ai.execute', { preparationId: 'prep', contentFingerprint: 'f'.repeat(64) });
+		await bridge.waitForLog('MOCK_CORE_START');
+		const receiveDeadline = Date.now() + 5_000;
+		while (!bridge.logs().includes('EXECUTE_PENDING:') && Date.now() < receiveDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.ok(bridge.logs().includes('EXECUTE_PENDING:'), `fake Core did not receive execution; bridge log: ${bridge.logs()}`);
+		const requestId = /EXECUTE_PENDING:([^\r\n]+)/.exec(bridge.logs())?.[1];
+		assert.ok(requestId, 'the fake Core accepted an in-flight execution request');
+		const cancellation = await bridge.request('core.cancel', { requestId });
+		assert.equal(cancellation.cancelled, true);
+		const result = await execution;
+		assert.equal(result.state, 'cancelled');
+		assert.match(bridge.logs(), new RegExp(`CANCEL_RECEIVED:${requestId}`));
+	} finally { await bridge.close(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('desktop bridge forwards only Core lifecycle references and keeps denial separate from execution', { timeout: 30_000 }, async () => {
+	const directory = await workspaceTempDirectory('aqiron-desktop-hypothesis-consent');
+	const mockRuntime = path.join(directory, 'hypothesis-consent-runtime.js');
+	await fs.writeFile(mockRuntime, [
+		"process.stderr.write('MOCK_CORE_START\\n');",
+		"const readline = require('node:readline');",
+		"const calls = [];",
+		"readline.createInterface({ input: process.stdin }).on('line', line => {",
+		"const request = JSON.parse(line); calls.push(request.method);",
+		"const send = result => process.stdout.write(JSON.stringify({ id: request.id, type: 'response', success: true, result }) + '\\n');",
+		"if (request.method === 'core.handshake') send({ protocolVersion: 1, coreVersion: 'test', status: 'compatible' });",
+		"else if (request.method === 'core.health') send({ ready: true });",
+		"else if (request.method === 'hypotheses.ai.prepare') send({ status: 'prepared', contentFingerprint: 'f'.repeat(64), manifest: { preparationId: 'retained-preparation', disclosure: 'Core-owned disclosure' } });",
+		"else if (request.method === 'hypotheses.ai.approve') send({ ok: true, state: 'approved' });",
+		"else if (request.method === 'hypotheses.ai.deny') send({ ok: true, state: 'denied' });",
+		"else if (request.method === 'hypotheses.ai.execute') { process.stderr.write('UNEXPECTED_EXECUTION\\n'); send({ ok: false, state: 'failed' }); }",
+		"else if (request.method === 'core.shutdown') { send({ ok: true }); setTimeout(() => process.exit(0), 5); }",
+		"});",
+	].join('\n'));
+	const bridge = await startBridge(mockRuntime);
+	try {
+		const disclosure = await bridge.request('hypotheses.ai.prepare', { workspaceRoot: fixture, scanId: 'scan-id', providerId: 'openai', modelId: 'test-model', evidenceIds: ['finding:one'], includeSourceExcerpts: false });
+		await bridge.waitForLog('MOCK_CORE_START');
+		assert.equal(disclosure.manifest.disclosure, 'Core-owned disclosure');
+		const approved = await bridge.request('hypotheses.ai.approve', { preparationId: disclosure.manifest.preparationId, contentFingerprint: disclosure.contentFingerprint });
+		assert.deepEqual(approved, { ok: true, state: 'approved' });
+		const denied = await bridge.request('hypotheses.ai.deny', { preparationId: 'another-retained-id', contentFingerprint: 'a'.repeat(64) });
+		assert.deepEqual(denied, { ok: true, state: 'denied' });
+		assert.doesNotMatch(bridge.logs(), /UNEXPECTED_EXECUTION/);
+	} finally { await bridge.close(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('desktop CoreClient bridge forwards hypothesis list, detail, generation, and reviewer operations', { timeout: 30_000 }, async () => {
+	const directory = await workspaceTempDirectory('aqiron-desktop-hypothesis-routes');
+	const mockRuntime = path.join(directory, 'hypothesis-routes-runtime.js');
+	await fs.writeFile(mockRuntime, [
+		"process.stderr.write('MOCK_CORE_START\\n');",
+		"const readline = require('node:readline');",
+		"readline.createInterface({ input: process.stdin }).on('line', line => {",
+		"const request = JSON.parse(line);",
+		"const send = result => process.stdout.write(JSON.stringify({ id: request.id, type: 'response', success: true, result }) + '\\n');",
+		"process.stderr.write('HYPOTHESIS_ROUTE:' + request.method + ':' + JSON.stringify(request.params) + '\\n');",
+		"if (request.method === 'core.handshake') send({ protocolVersion: 1, coreVersion: 'test', status: 'compatible' });",
+		"else if (request.method === 'core.health') send({ ready: true });",
+		"else if (request.method === 'hypotheses.generate') send({ status: 'generated', scanId: request.params.scanId, hypotheses: [], diagnostics: [] });",
+		"else if (request.method === 'hypotheses.list') send({ hypotheses: [{ id: 'hyp:listed', status: 'proposed' }], storeVersion: 1 });",
+		"else if (request.method === 'hypotheses.get') send({ hypothesis: { id: request.params.hypothesisId, status: 'proposed' } });",
+		"else if (request.method === 'hypotheses.review') send({ hypothesis: { id: request.params.hypothesisId, status: request.params.action === 'validate' ? 'validated' : 'proposed' }, applied: request.params.action === 'validate' });",
+		"else if (request.method === 'core.shutdown') { send({ ok: true }); setTimeout(() => process.exit(0), 5); }",
+		"});",
+	].join('\n'));
+	const bridge = await startBridge(mockRuntime);
+	try {
+		const generated = await bridge.request('hypotheses.generate', { workspaceRoot: directory, scanId: 'scan:one' });
+		await bridge.waitForLog('MOCK_CORE_START');
+		assert.equal(generated.status, 'generated');
+		assert.equal(generated.scanId, 'scan:one');
+		const listed = await bridge.request('hypotheses.list', { workspaceRoot: directory, includeStale: true });
+		assert.equal(listed.hypotheses[0]?.id, 'hyp:listed');
+		const detail = await bridge.request('hypotheses.get', { workspaceRoot: directory, hypothesisId: 'hyp:listed' });
+		assert.equal(detail.hypothesis.id, 'hyp:listed');
+		const reviewed = await bridge.request('hypotheses.review', { workspaceRoot: directory, hypothesisId: 'hyp:listed', action: 'validate' });
+		assert.equal(reviewed.applied, true);
+		assert.equal(reviewed.hypothesis.status, 'validated');
+		assert.match(bridge.logs(), /HYPOTHESIS_ROUTE:hypotheses\.list/);
+		assert.match(bridge.logs(), /HYPOTHESIS_ROUTE:hypotheses\.get/);
+		assert.match(bridge.logs(), /HYPOTHESIS_ROUTE:hypotheses\.generate/);
+		assert.match(bridge.logs(), /HYPOTHESIS_ROUTE:hypotheses\.review/);
+	} finally { await bridge.close(); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 async function startBridge(runtime) {
 	const child = spawn(process.execPath, [bridgePath], { cwd: root, env: { ...process.env, AQIRON_CORE_RUNTIME_PATH: runtime }, stdio: ['pipe', 'pipe', 'pipe'] });
 	const lines = readline.createInterface({ input: child.stdout });
 	const queue = [];
-	let wake;
+	const waiters = new Set();
 	const events = [];
 	lines.on('line', (line) => {
 		const message = JSON.parse(line);
 		if (message.type === 'event') { events.push(message.event); }
 		else { queue.push(message); }
-		wake?.();
+		for (const wake of waiters) wake();
 	});
 	const stderr = [];
-	child.stderr.on('data', (chunk) => stderr.push(String(chunk)));
+	const stderrWaiters = new Set();
+	child.stderr.on('data', (chunk) => {
+		stderr.push(String(chunk));
+		for (const wake of stderrWaiters) { wake(); }
+	});
 	return {
 		events,
 		logs: () => stderr.join(''),
+		waitForLog(marker, timeoutMs = 5_000) {
+			if (stderr.join('').includes(marker)) { return Promise.resolve(); }
+			return new Promise((resolve, reject) => {
+				const cleanup = () => { clearTimeout(timer); stderrWaiters.delete(check); };
+				const check = () => {
+					if (stderr.join('').includes(marker)) { cleanup(); resolve(); }
+				};
+				const timer = setTimeout(() => {
+					cleanup();
+					reject(new Error(`Timed out waiting ${timeoutMs} ms for stderr marker ${JSON.stringify(marker)}. Captured stderr: ${stderr.join('') || '<empty>'}`));
+				}, timeoutMs);
+				stderrWaiters.add(check);
+				check();
+			});
+		},
 		closeInput: () => child.stdin.end(),
 		waitForExit: async () => {
 			if (child.exitCode === null) await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 2_000))]);
@@ -272,11 +403,12 @@ async function startBridge(runtime) {
 					if (index >= 0) {
 						const response = queue.splice(index, 1)[0];
 						if (response.success) return response.result;
-						throw new Error(response.error || 'Desktop bridge request failed');
+						throw new Error(`${response.error || 'Desktop bridge request failed'}\nBridge child: ${process.execPath} ${bridgePath}\nWorking directory: ${root}\nCore runtime: ${runtime}\nBridge exit: code=${child.exitCode}, signal=${child.signalCode}\nCaptured stderr: ${stderr.join('') || '<empty>'}`);
 					}
 					await new Promise((resolve, reject) => {
-						const timer = setTimeout(() => reject(new Error(`Bridge response timed out. ${stderr.join('')}`)), Math.max(1, deadline - Date.now()));
-						wake = () => { clearTimeout(timer); wake = undefined; resolve(); };
+						const wake = () => { clearTimeout(timer); waiters.delete(wake); resolve(); };
+						const timer = setTimeout(() => { waiters.delete(wake); reject(new Error(`Bridge response timed out. ${stderr.join('')}`)); }, Math.max(1, deadline - Date.now()));
+						waiters.add(wake);
 					});
 				}
 				throw new Error('Desktop bridge response timed out');

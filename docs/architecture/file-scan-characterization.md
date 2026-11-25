@@ -1,5 +1,7 @@
 # File and Agent Scan Characterization
 
+> **Historical characterization:** this covers the retired VS Code command path. Current Desktop scans use the Core protocol; see [Desktop, CLI, and Core architecture](desktop-cli-core.md).
+
 Status: original characterization baseline. The current-file command and save/realtime path now use `scan.file`; Agent `workspace.scan` now uses Core `scan.start`; Agent `secrets.scan` remains on its characterized legacy path. Historical details below describe the implementation at characterization time where explicitly stated.
 
 ## Runtime call graphs

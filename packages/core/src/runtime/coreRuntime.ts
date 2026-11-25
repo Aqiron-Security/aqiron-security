@@ -1,12 +1,14 @@
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import { AIService } from '../ai/services/aiService';
 import { resolveChatGenerationPolicy } from '../ai/services/chatGenerationPolicy';
 import { AIVulnerabilityAnalysis, AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
 import { AIReviewService } from '../ai/analysis/aiReview';
 import { createNetworkTransport } from '../ai/utils/request';
 import { createNodeFileSystem, createNodeLogger, createNodeNetworkClient, createNodeProcessRunner, NodeCredentialStore } from './nodeAdapters';
-import { CORE_PROTOCOL_VERSION, CoreAgentSession, CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreMessage, CoreMethod, CoreMethodResults, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreRequestMessage, CoreResponseMessage, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreRuntimeServicesState, CoreReportGenerateRequest } from './protocol';
+import { CORE_PROTOCOL_VERSION, CoreAgentSession, CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreMessage, CoreMethod, CoreMethodParams, CoreMethodResults, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreRequestMessage, CoreResponseMessage, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreRuntimeServicesState, CoreReportGenerateRequest } from './protocol';
 import { ProjectDetectorOptions, detectProjectProfile } from '../project/projectDetector';
+import { createEmptyProjectProfile } from '../project/projectProfile';
 import { SecurityContextBuilder } from '../context';
 import { RagIndexService, RagRetrievalService } from '../rag';
 import { ScannerManager } from '../scanners';
@@ -26,17 +28,44 @@ import { CredentialStore } from '../shared/platform';
 import { WorkspaceRuleStore } from '../shared/workspaceRules';
 import { aiSecretKeys } from '../ai/services/credentialService';
 import { parseRecommendationSourceDetailed } from '../shared/recommendations';
+import { HypothesisStoreService } from '../hypotheses/hypothesisStore';
+import { buildHypothesisSnapshot, generateDeterministicHypotheses } from '../hypotheses/hypothesisEngine';
+import { HypothesisGenerationDiagnostics, HypothesisGenerationResult, HypothesisReviewInput, HypothesisReviewResult, SecurityHypothesis } from '../hypotheses/contracts';
+import { FindingSourceProvenance } from '../shared/sourceProvenance';
+import { SourceReadBudget, SourceReadBudgetExceededError } from '../shared/sourceProvenance';
+import { HYPOTHESIS_AI_PREPARATION_LIMITS } from '../hypotheses/contracts';
+import { HypothesisAiExecutor, HypothesisAiLifecycleResult, HypothesisAiPreparationRegistry, prepareHypothesisAiDisclosure } from '../hypotheses/hypothesisAiPreparation';
+import { CoreProtocolFrame, MAX_CORE_PROTOCOL_FRAME_BYTES } from './protocolFraming';
+import { buildHypothesisAiBoundRequest, createHypothesisAiBoundRequestPlan, hypothesisAiModelCapability, HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION, resolveHypothesisAiProviderConfiguration, sameHypothesisAiProviderConfiguration, HypothesisAiProviderConfigurationSnapshot } from '../hypotheses/hypothesisAiConfiguration';
+import { createHypothesisAiRequestContext } from '../hypotheses/aiProposalValidation';
+import { createHypothesisAiExecutor } from '../hypotheses/hypothesisAiExecutor';
 
-interface CoreRuntimeOptions {
+/**
+ * Release gate for the production composition. Keep this source-controlled and
+ * closed until the separate provider-activation review is accepted. It must
+ * never be controlled by a client, protocol field, environment variable, or CLI.
+ */
+const PRODUCTION_HYPOTHESIS_AI_EXECUTION_ENABLED = false;
+
+export interface CoreRuntimeOptions {
 	coreVersion: string;
 	protocolVersion?: number;
+	// Deliberately excludes dependency injection. This is the supported package API.
+}
+
+/** Internal-only constructor dependencies used by source-level tests. */
+interface CoreRuntimeTestOptions extends CoreRuntimeOptions {
 	credentialStore?: CredentialStore;
 	aiTransport?: AITransport;
+	/** Test-only seam; not accepted by the public runCoreRuntime composition. */
+	hypothesisAiExecutor?: HypothesisAiExecutor;
 }
 
 interface ScanStateRecord {
 	state: ScanState;
 	result?: CoreScanStartResult;
+	sourceProvenance?: FindingSourceProvenance[];
+	excludedProvenanceCount?: number;
 }
 
 interface ActiveRequest {
@@ -68,6 +97,12 @@ export class CoreRuntime {
 	private readonly scannerManager = new ScannerManager();
 	private readonly nativeScanner: NativeWorkspaceScanner;
 	private readonly workspaceRules = new WorkspaceRuleStore(this.filesystem);
+	private readonly hypotheses = new HypothesisStoreService(this.filesystem);
+	private readonly hypothesisAiPreparations = new HypothesisAiPreparationRegistry();
+	private readonly productionHypothesisAiExecutor: HypothesisAiExecutor;
+	/** Process-local key used only to detect in-process credential rotation; never persisted or disclosed. */
+	private readonly hypothesisAiCredentialVersionKey = crypto.randomBytes(32);
+	private snapshotBuildActive = false;
 	private readonly reportGenerator = new ReportGenerator();
 	private readonly pipeline = new CoreScanService();
 	private readonly events = new PipelineEventBus();
@@ -76,9 +111,16 @@ export class CoreRuntime {
 	private readonly runtimeState: CoreRuntimeServicesState;
 	private shutdownRequested = false;
 
-	constructor(private readonly options: CoreRuntimeOptions) {
+	constructor(private readonly options: CoreRuntimeTestOptions) {
 		this.credentialStore = options.credentialStore ?? new NodeCredentialStore();
 		this.transport = options.aiTransport ?? createNetworkTransport(this.networkClient);
+		// Assemble the production-intended pipeline from Core's own transport and
+		// store. The immutable source gate below keeps it unreachable in release
+		// composition until a separately reviewed activation change.
+		this.productionHypothesisAiExecutor = createHypothesisAiExecutor(this.transport, this.hypotheses, (diagnostic) => {
+			if (diagnostic.outcome === 'failed') {this.logger.warn('hypothesis.ai.execution.diagnostic', diagnostic);}
+			else {this.logger.info('hypothesis.ai.execution.diagnostic', diagnostic);}
+		});
 		this.nativeScanner = new NativeWorkspaceScanner(this.filesystem);
 		this.aiService = new AIService({
 			credentialStore: this.credentialStore,
@@ -99,9 +141,9 @@ export class CoreRuntime {
 		this.scannerManager.register(new TrivyScanner());
 	}
 
-	async handle(input: unknown, emit: (event: CoreEventMessage) => void): Promise<CoreResponseMessage> {
+	async handle(input: unknown, emit: (event: CoreEventMessage) => void, rawRequestBytes?: number): Promise<CoreResponseMessage> {
 		const requestId = isRecord(input) && typeof input.id === 'string' ? input.id : 'unknown';
-		if (!validateRequest(input)) {
+		if (!validateRequest(input, rawRequestBytes)) {
 			return this.fail(requestId, 'CORE_INVALID_REQUEST', 'Malformed Core request or params.');
 		}
 		const message = input;
@@ -146,6 +188,31 @@ export class CoreRuntime {
 					return this.ok(message.id, 'workspace.agent-sessions.set', await this.saveWorkspaceAgentSessions(message.params.workspaceRoot, message.params.sessions));
 				case 'workspace.recommendations.get':
 					return this.ok(message.id, 'workspace.recommendations.get', await this.workspaceRecommendations(message.params.workspaceRoot));
+				case 'hypotheses.generate':
+					return this.ok(message.id, 'hypotheses.generate', await this.generateHypotheses(message.params.workspaceRoot, message.params.scanId, source.token));
+				case 'hypotheses.ai.prepare':
+					return this.ok(message.id, 'hypotheses.ai.prepare', await this.prepareHypothesisAi(message.params, source.token));
+				case 'hypotheses.ai.approve':
+					return this.ok(message.id, 'hypotheses.ai.approve', await this.approveHypothesisAiPreparation(message.params.preparationId, message.params.contentFingerprint));
+				case 'hypotheses.ai.deny':
+					return this.ok(message.id, 'hypotheses.ai.deny', this.denyHypothesisAiPreparation(message.params.preparationId, message.params.contentFingerprint));
+				case 'hypotheses.ai.execute': {
+					const controller = new AbortController();
+					const cancellation = source.token.onCancellationRequested?.(() => controller.abort());
+					try {return this.ok(message.id, 'hypotheses.ai.execute', await this.executeHypothesisAiPreparation(message.params.preparationId, message.params.contentFingerprint, { signal: controller.signal }));}
+					finally {cancellation?.dispose();}
+				}
+				case 'hypotheses.list': {
+					const store = await this.hypotheses.list(this.resolveHypothesisRoot(message.params.workspaceRoot));
+					const selected = store.hypotheses.filter((item) => (!message.params.status || item.status === message.params.status) && (message.params.includeStale || message.params.status === 'stale' || item.status !== 'stale'));
+					return this.ok(message.id, 'hypotheses.list', { hypotheses: selected, storeVersion: store.version });
+				}
+				case 'hypotheses.get': {
+					const store = await this.hypotheses.list(this.resolveHypothesisRoot(message.params.workspaceRoot));
+					return this.ok(message.id, 'hypotheses.get', { hypothesis: store.hypotheses.find((item) => item.id === message.params.hypothesisId) });
+				}
+				case 'hypotheses.review':
+					return this.ok(message.id, 'hypotheses.review', await this.reviewHypothesis(message.params));
 				case 'rag.index':
 					return this.ok(message.id, 'rag.index', await this.indexRag(message.params, source.token));
 				case 'rag.status':
@@ -236,11 +303,172 @@ export class CoreRuntime {
 
 	private async shutdown(): Promise<{ ok: true }> {
 		this.shutdownRequested = true;
+		this.hypothesisAiPreparations.dispose();
 		return { ok: true };
 	}
 
 	private async detectProject(request: CoreProjectDetectRequest): Promise<ProjectProfile> {
 		return await detectProjectProfile(request.workspaceRoot, this.filesystem, this.projectOptions(request.workspaceRoot));
+	}
+
+	private resolveHypothesisRoot(workspaceRoot: string): string {
+		if (!path.isAbsolute(workspaceRoot) || workspaceRoot.includes('\0')) throw Object.assign(new Error('A canonical absolute workspace root is required.'), { code: 'HYPOTHESIS_INVALID_WORKSPACE' });
+		return path.resolve(workspaceRoot);
+	}
+
+	private async generateHypotheses(workspaceRoot: string, scanId: string, cancellationToken?: CancellationTokenLike): Promise<HypothesisGenerationResult> {
+		const root = this.resolveHypothesisRoot(workspaceRoot);
+		const scanRecord = this.scans.get(scanId);
+		const scan = scanRecord?.result;
+		if (!scan || scan.state.finalState !== 'completed' || normalizeWorkspaceIdentity(scan.state.workspaceRoot) !== normalizeWorkspaceIdentity(root)) {
+			return { status: 'no-evidence', scanId, hypotheses: [], diagnostics: [{ code: 'no-evidence', count: 1, message: 'No completed Core scan evidence is available for this workspace and scan ID.' }] };
+		}
+		if (cancellationToken?.isCancellationRequested) throw new Error('Core request cancelled.');
+		const profile = await detectProjectProfile(root, this.filesystem, this.projectOptions(root));
+		const release = this.acquireSnapshotBuild();
+		let snapshot: Awaited<ReturnType<typeof buildHypothesisSnapshot>>;
+		try { snapshot = await buildHypothesisSnapshot({
+			workspaceRoot: root, scanId, findings: scan.findings, relationships: scan.correlation?.relationships ?? [],
+			profile, filesystem: this.filesystem, scanProvenance: scanRecord?.sourceProvenance, capturedAt: scan.state.completedAt, cancelled: () => Boolean(cancellationToken?.isCancellationRequested),
+		}); } finally { release(); }
+		if (cancellationToken?.isCancellationRequested) throw new Error('Core request cancelled.');
+		if (snapshot.findings.length === 0) {
+			await this.hypotheses.mergeGeneration(root, snapshot, [], () => Boolean(cancellationToken?.isCancellationRequested));
+			const unavailable = (snapshot.excludedUnprovenancedFindings ?? 0) + (scanRecord?.excludedProvenanceCount ?? 0);
+			return { status: 'no-evidence', scanId, snapshotId: snapshot.id, hypotheses: [], diagnostics: [{ code: 'no-evidence', count: Math.max(1, unavailable), message: unavailable ? 'Findings were excluded because scan-time provenance was missing, source changed or disappeared, reads failed or exceeded per-file/aggregate byte limits, or path/span validation failed.' : 'The completed scan has no findings with verified in-workspace source spans.' }] };
+		}
+		const candidates = generateDeterministicHypotheses(snapshot);
+		const store = await this.hypotheses.mergeGeneration(root, snapshot, candidates, () => Boolean(cancellationToken?.isCancellationRequested));
+		const generated = candidates.map((candidate) => store.hypotheses.find((item) => item.id === candidate.id) ?? candidate);
+		const diagnostics: HypothesisGenerationDiagnostics[] = candidates.length ? [] : [{ code: 'no-supported-rule', count: 1, message: 'Current verified evidence did not satisfy an allowlisted deterministic hypothesis rule.' }];
+		if ((snapshot.excludedUnprovenancedFindings ?? 0) + (scanRecord?.excludedProvenanceCount ?? 0) > 0) diagnostics.push({ code: 'invalid-evidence', count: (snapshot.excludedUnprovenancedFindings ?? 0) + (scanRecord?.excludedProvenanceCount ?? 0), message: 'Some findings were excluded because provenance was unavailable, source changed or could not be read within the per-file/aggregate raw-byte budgets, or path/span validation failed.' });
+		return { status: 'generated', scanId, snapshotId: snapshot.id, hypotheses: generated, diagnostics };
+	}
+
+	private async prepareHypothesisAi(request: CoreMethodParams['hypotheses.ai.prepare'], cancellationToken?: CancellationTokenLike): Promise<CoreMethodResults['hypotheses.ai.prepare']> {
+		const root = this.resolveHypothesisRoot(request.workspaceRoot);
+		const scanRecord = this.scans.get(request.scanId);
+		const scan = scanRecord?.result;
+		if (!scan || scan.state.finalState !== 'completed' || normalizeWorkspaceIdentity(scan.state.workspaceRoot) !== normalizeWorkspaceIdentity(root)) {
+			return { status: 'rejected', scanId: request.scanId, diagnostic: { code: 'scan-unavailable', message: 'No completed Core scan evidence is available for this workspace and scan ID.' } };
+		}
+		if (cancellationToken?.isCancellationRequested) {throw new Error('Core request cancelled.');}
+		const release = this.tryAcquireSnapshotBuild();
+		if (!release) {return { status: 'rejected', scanId: request.scanId, diagnostic: { code: 'busy', message: 'Core is already building a bounded hypothesis evidence snapshot; retry this preview later.' } };}
+		const readBudget = new SourceReadBudget(HYPOTHESIS_AI_PREPARATION_LIMITS.maxAggregateSourceBytes);
+		try {
+			const snapshot = await buildHypothesisSnapshot({
+				workspaceRoot: root, scanId: request.scanId, findings: scan.findings, relationships: scan.correlation?.relationships ?? [],
+				profile: createEmptyProjectProfile(root), filesystem: this.filesystem, scanProvenance: scanRecord?.sourceProvenance,
+				capturedAt: scan.state.completedAt, cancelled: () => Boolean(cancellationToken?.isCancellationRequested), readBudget,
+			});
+			if (normalizeWorkspaceIdentity(snapshot.workspaceRoot) !== normalizeWorkspaceIdentity(root) || snapshot.scanId !== request.scanId) {
+				return { status: 'rejected', scanId: request.scanId, diagnostic: { code: 'scan-unavailable', message: 'The canonical workspace or scan identity changed during preparation.' } };
+			}
+			if (cancellationToken?.isCancellationRequested) {throw new Error('Core request cancelled.');}
+			let providerConfiguration: HypothesisAiProviderConfigurationSnapshot;
+			try {
+				providerConfiguration = await resolveHypothesisAiProviderConfiguration({ store: this.credentialStore, providerId: request.providerId, modelId: request.modelId, credentialVersionKey: this.hypothesisAiCredentialVersionKey });
+			} catch {
+				return { status: 'rejected', scanId: request.scanId, diagnostic: { code: 'provider-configuration-unavailable', message: 'The selected provider configuration or credential cannot be safely bound for this preparation.' } };
+			}
+			return await prepareHypothesisAiDisclosure({ request, snapshot, filesystem: this.filesystem, registry: this.hypothesisAiPreparations, providerConfiguration, executionAvailable: this.hypothesisAiExecutor() !== undefined, readBudget, cancelled: () => Boolean(cancellationToken?.isCancellationRequested) });
+		} catch (error) {
+			if (error instanceof SourceReadBudgetExceededError) {return { status: 'rejected', scanId: request.scanId, diagnostic: { code: 'limits-exceeded', message: 'Selected evidence exceeded the 50 MB aggregate preparation read budget.' } };}
+			throw error;
+		} finally {release();}
+	}
+
+	/** Internal approval seam for a future official client; call only after explicit user action on Core disclosure. */
+	async approveHypothesisAiPreparation(preparationId: string, contentFingerprint: string): Promise<HypothesisAiLifecycleResult> {
+		return await this.hypothesisAiPreparations.approve(preparationId, contentFingerprint, async (manifest, configuration, contentEnvelope, phase) => await this.revalidateHypothesisAiPreparation(manifest, configuration, contentEnvelope, phase));
+	}
+
+	denyHypothesisAiPreparation(preparationId: string, contentFingerprint: string): HypothesisAiLifecycleResult {
+		return this.hypothesisAiPreparations.deny(preparationId, contentFingerprint);
+	}
+
+	/** Internal execution seam. The default runtime has no executor and rejects before any provider work. */
+	async executeHypothesisAiPreparation(preparationId: string, contentFingerprint: string, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<HypothesisAiLifecycleResult<{ proposalCount: number }>> {
+		const executor = this.hypothesisAiExecutor();
+		return await this.hypothesisAiPreparations.execute<{ proposalCount: number }>(preparationId, contentFingerprint, async (manifest, configuration, contentEnvelope, phase) => await this.revalidateHypothesisAiPreparation(manifest, configuration, contentEnvelope, phase), executor, options);
+	}
+
+	private hypothesisAiExecutor(): HypothesisAiExecutor | undefined {
+		return this.options.hypothesisAiExecutor ?? (PRODUCTION_HYPOTHESIS_AI_EXECUTION_ENABLED ? this.productionHypothesisAiExecutor : undefined);
+	}
+
+	private async revalidateHypothesisAiPreparation(manifest: import('../hypotheses/contracts').HypothesisAiPreparedDisclosureManifest, capturedConfiguration?: HypothesisAiProviderConfigurationSnapshot, contentEnvelope?: string, phase: 'approval' | 'execution' | 'commit' = 'approval'): Promise<boolean | { valid: boolean; executionRequest?: import('../hypotheses/hypothesisAiConfiguration').HypothesisAiBoundExecutionRequest; requestContext?: import('../hypotheses/contracts').HypothesisAiRequestContext; canCommit?: () => boolean }> {
+		if (manifest.executionAvailable !== (this.hypothesisAiExecutor() !== undefined)) {return false;}
+		if (!capturedConfiguration || capturedConfiguration.preparationId !== manifest.preparationId || capturedConfiguration.expiresAt !== manifest.expiresAt || Date.parse(capturedConfiguration.expiresAt) <= Date.now()) {return false;}
+		let executionRequest: import('../hypotheses/hypothesisAiConfiguration').HypothesisAiBoundExecutionRequest | undefined;
+		try {
+			if (phase !== 'approval') {
+				if (!contentEnvelope) {return false;}
+				try {
+					executionRequest = await buildHypothesisAiBoundRequest({ store: this.credentialStore, providerConfiguration: capturedConfiguration, preparationId: manifest.preparationId, expiresAt: manifest.expiresAt, canonicalEnvelope: contentEnvelope, credentialVersionKey: this.hypothesisAiCredentialVersionKey });
+				} catch {
+					if (phase === 'execution') {this.logger.warn('hypothesis.ai.execution.diagnostic', { stage: 'request-construction', outcome: 'failed', failureCategory: 'request-construction-failed', transportInvoked: false, transportResponseReceived: false, providerResponseValidated: false, persistenceAttempted: false });}
+					return false;
+				}
+			} else {
+				const currentConfiguration = await resolveHypothesisAiProviderConfiguration({ store: this.credentialStore, providerId: capturedConfiguration.providerId, modelId: capturedConfiguration.modelId, credentialVersionKey: this.hypothesisAiCredentialVersionKey });
+				if (!sameHypothesisAiProviderConfiguration(currentConfiguration, capturedConfiguration)) {return false;}
+			}
+			if (!contentEnvelope) {return false;}
+			const requestFingerprint = executionRequest?.plan.requestSemanticsFingerprint ?? createHypothesisAiBoundRequestPlan({
+				providerConfiguration: capturedConfiguration, preparationId: manifest.preparationId, expiresAt: manifest.expiresAt, canonicalEnvelope: contentEnvelope,
+			}).requestSemanticsFingerprint;
+			if (requestFingerprint !== capturedConfiguration.requestSemanticsFingerprint || requestFingerprint !== manifest.provider.requestFingerprint) {return false;}
+			const capability = hypothesisAiModelCapability(capturedConfiguration.providerId, capturedConfiguration.modelId);
+			if (!capability.supported || capturedConfiguration.capabilityPolicyVersion !== HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION
+				|| manifest.provider.capabilityPolicyVersion !== capturedConfiguration.capabilityPolicyVersion || manifest.provider.responseMode !== capability.responseMode
+				|| manifest.provider.id !== capturedConfiguration.providerId || manifest.provider.modelId !== capturedConfiguration.modelId
+				|| manifest.provider.endpoint !== capturedConfiguration.destination || manifest.provider.configurationFingerprint !== capturedConfiguration.configurationFingerprint) {return false;}
+		} catch {return false;}
+		const root = this.resolveHypothesisRoot(manifest.workspaceIdentity);
+		const scanRecord = this.scans.get(manifest.scanId);
+		const scan = scanRecord?.result;
+		if (!scan || scan.state.finalState !== 'completed' || normalizeWorkspaceIdentity(scan.state.workspaceRoot) !== normalizeWorkspaceIdentity(root)) {return false;}
+		const release = this.tryAcquireSnapshotBuild();
+		if (!release) {return false;}
+		try {
+			const snapshot = await buildHypothesisSnapshot({
+				workspaceRoot: root, scanId: manifest.scanId, findings: scan.findings, relationships: scan.correlation?.relationships ?? [],
+				profile: createEmptyProjectProfile(root), filesystem: this.filesystem, scanProvenance: scanRecord.sourceProvenance,
+				capturedAt: scan.state.completedAt,
+			});
+			const evidenceIsCurrent = snapshot.id === manifest.snapshotId && snapshot.fingerprint === manifest.snapshotFingerprint
+				&& normalizeWorkspaceIdentity(snapshot.workspaceRoot) === normalizeWorkspaceIdentity(manifest.workspaceIdentity)
+				&& manifest.provider.external === true && manifest.provider.endpointClassification === 'known'
+				&& manifest.provider.retentionPolicy === 'unknown' && manifest.provider.id.length > 0 && manifest.provider.modelId.length > 0;
+			if (!evidenceIsCurrent) {return false;}
+			if (phase === 'approval') {return true;}
+			if (phase === 'execution' && !executionRequest) {return false;}
+			const selectedIds = new Set(manifest.evidence.map((item) => item.evidenceId));
+			const selectedEvidence = snapshot.evidence.filter((item) => selectedIds.has(item.id));
+			if (selectedEvidence.length !== selectedIds.size) {return false;}
+			const requestContext = createHypothesisAiRequestContext(snapshot, selectedEvidence, { providerId: capturedConfiguration!.providerId, preparationId: manifest.preparationId, expiresAt: manifest.expiresAt });
+			return { valid: true, executionRequest, requestContext, canCommit: () => this.scans.get(manifest.scanId) === scanRecord && scanRecord.result === scan };
+		} catch {return false;} finally {release();}
+	}
+
+	private tryAcquireSnapshotBuild(): (() => void) | undefined {
+		if (this.snapshotBuildActive) {return undefined;}
+		this.snapshotBuildActive = true;
+		let released = false;
+		return () => {if (!released) {released = true; this.snapshotBuildActive = false;}};
+	}
+
+	private acquireSnapshotBuild(): () => void {
+		const release = this.tryAcquireSnapshotBuild();
+		if (!release) {throw Object.assign(new Error('A hypothesis evidence snapshot is already being built; retry this request later.'), { code: 'HYPOTHESIS_SNAPSHOT_BUSY' });}
+		return release;
+	}
+
+	private async reviewHypothesis(input: HypothesisReviewInput): Promise<HypothesisReviewResult> {
+		const root = this.resolveHypothesisRoot(input.workspaceRoot);
+		return await this.hypotheses.review(root, input);
 	}
 
 	private async workspaceThreatHistory(workspaceRoot: string): Promise<CoreMethodResults['workspace.threat-history.get']> {
@@ -377,7 +605,7 @@ export class CoreRuntime {
 				};
 				const prompt = `Return only a JSON array of up to five actionable Aqiron security recommendations. Each item must have title and detail; include severity (Critical, High, Medium, or Low), recommended (boolean), command, and metadata fields ruleId/file/line/category only when known. Do not include analysis, reasoning, or introductory text. Do not repeat secrets. Signals: ${signals.slice(0, 40).map((signal) => `${signal.category}:${signal.provider}:${signal.file}`).join(', ')}`;
 				const system = [
-					'You are Aqiron Security, a production DevSecOps assistant inside VS Code.',
+					'You are Aqiron Security, a production DevSecOps assistant for Aqiron Desktop and CLI.',
 					'Give concrete security analysis, remediation, secure code, exploit explanations, scan summaries, and threat analysis using the supplied workspace context.',
 					'Do not claim to have run tools unless the context says they ran. Prefer actionable fixes and clearly name risk.',
 					'Reasoning depth: Medium.',
@@ -507,18 +735,14 @@ export class CoreRuntime {
 			reportGenerator: this.reportGenerator,
 		});
 		const state: ScanState = { scanId, workspaceRoot: request.workspaceRoot, targetPath: request.targetPath ?? request.workspaceRoot, mode: request.mode ?? 'deep', stage: 'Idle', stageProgress: 100, scanners: [], findingsCount: result.findings.length, riskScore: result.findings.length ? Math.min(100, result.findings.length * 15) : 0, cancelled: false, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), reportStatus: 'completed', finalState: 'completed' };
-		const response: CoreScanStartResult = { scanId: result.scanId, state, findings: result.findings, report: result.report, filesScanned: result.filesScanned, durationMs: result.durationMs, toolResults: result.toolResults, correlation: result.correlation, graph: result.graph, telemetry: result.telemetry };
-		this.scans.set(scanId, { state, result: response });
+			const response: CoreScanStartResult = { scanId: result.scanId, state, findings: result.findings, report: result.report, filesScanned: result.filesScanned, skippedFiles: result.skippedFiles, skipReasons: result.skipReasons, durationMs: result.durationMs, toolResults: result.toolResults, correlation: result.correlation, graph: result.graph, telemetry: result.telemetry };
+		this.scans.set(scanId, { state, result: response, sourceProvenance: result.sourceProvenance, excludedProvenanceCount: result.excludedProvenanceCount });
 		return response;
 	}
 
 	private async scanFile(scanId: string, request: import('../shared/fileScan').CoreFileScanRequest, emit: (event: CoreEventMessage) => void, cancellationToken?: CancellationTokenLike): Promise<import('../shared/fileScan').CoreFileScanResult> {
 		emit({ type: 'event', event: 'scan.file.started', requestId: scanId, payload: { scanId, filePath: request.filePath } });
-		let policy = request.policy;
-		if (request.workspaceRoot && await this.workspaceRules.has(request.workspaceRoot)) {
-			policy = { ...policy, customRules: await this.workspaceRules.get(request.workspaceRoot) };
-		}
-		const result = await this.nativeScanner.scanFileContent(request.filePath, request.content, scanId, policy, cancellationToken);
+		const result = await this.nativeScanner.scanFileContent(request.filePath, request.content, scanId, request.policy, cancellationToken);
 		emit({ type: 'event', event: 'scan.file.completed', requestId: scanId, payload: { scanId, filePath: request.filePath, state: result.state, findingCount: result.findingCount, filesScanned: result.filesScanned } });
 		return result;
 	}
@@ -584,7 +808,8 @@ export class CoreRuntime {
 		await this.ensureAiReady();
 		if (request.providerId) {
 			await this.aiService.switchProvider(request.providerId as AIProviderId);
-		} else await this.aiService.refreshModels(true);
+		}
+		await this.aiService.refreshModels(true);
 		const state = await this.aiService.getState();
 		return { models: state.models, status: state.status };
 	}
@@ -597,8 +822,6 @@ export class CoreRuntime {
 		const model = request.model || ai.selection.model;
 		const generationPolicy = resolveChatGenerationPolicy(providerId, ai.models.find((entry) => entry.id === model), ai.settings.maxTokens);
 		this.logger.debug('ai.chat.request.configured', {
-			providerId,
-			modelId: model,
 			maxTokens: options?.maxTokens ?? generationPolicy.maxTokens ?? ai.settings.maxTokens,
 			reasoningControlApplied: Boolean(options?.openRouterReasoning ?? generationPolicy.openRouterReasoning),
 			reasoningControl: (options?.openRouterReasoning ?? generationPolicy.openRouterReasoning)?.enabled === false ? 'disabled' : (options?.openRouterReasoning ?? generationPolicy.openRouterReasoning) ? 'enabled-bounded' : 'unsupported-or-unneeded',
@@ -766,7 +989,7 @@ private async credentialsStatus(key: string): Promise<CoreCredentialsStatusResul
 	private mapErrorCode(error: unknown): string {
 		if (typeof error === 'object' && error && 'code' in error && typeof (error as { code?: unknown }).code === 'string') {
 			const code = (error as { code: string }).code;
-			if (code === 'CREDENTIAL_STORE_UNAVAILABLE') {
+			if (code.startsWith('HYPOTHESIS_') || code === 'CREDENTIAL_STORE_UNAVAILABLE') {
 				return code;
 			}
 		}
@@ -791,10 +1014,29 @@ function isCredentialStoreUnavailable(error: unknown): boolean {
 	return isRecord(error) && error.code === 'CREDENTIAL_STORE_UNAVAILABLE';
 }
 
-export async function runCoreRuntime(input: AsyncIterable<string>, output: (message: CoreMessage) => void, options: CoreRuntimeOptions): Promise<void> {
-	const runtime = new CoreRuntime(options);
+export async function runCoreRuntime(input: AsyncIterable<string | Uint8Array | CoreProtocolFrame>, output: (message: CoreMessage) => void, options: CoreRuntimeOptions): Promise<void> {
+	// Copy only supported public composition fields. Unknown JavaScript properties
+	// cannot smuggle a test executor or transport into the running Core instance.
+	const runtime = new CoreRuntime({ coreVersion: options.coreVersion, protocolVersion: options.protocolVersion });
 	const active = new Set<Promise<void>>();
-	for await (const line of input) {
+	for await (const item of input) {
+		if (typeof item === 'object' && !(item instanceof Uint8Array) && 'error' in item && item.error === 'frame-too-large') {
+			output({ type: 'response', id: 'unknown', success: false, error: { code: 'CORE_FRAME_TOO_LARGE', message: `Core JSON frame exceeds the ${MAX_CORE_PROTOCOL_FRAME_BYTES}-byte limit.` } });
+			break; // Close this runtime stream so CoreProcessManager rejects all outstanding requests on child exit.
+		}
+		let raw: Buffer;
+		let rawRequestBytes: number;
+		if (typeof item === 'string') {raw = Buffer.from(item, 'utf8'); rawRequestBytes = raw.byteLength;}
+		else if (item instanceof Uint8Array) {raw = Buffer.from(item.buffer, item.byteOffset, item.byteLength); rawRequestBytes = raw.byteLength;}
+		else if ('raw' in item) {raw = item.raw; rawRequestBytes = item.byteLength;}
+		else {continue;}
+		let line: string;
+		try { line = new TextDecoder('utf-8', { fatal: true }).decode(raw); }
+		catch { output({ type: 'response', id: 'unknown', success: false, error: { code: 'CORE_PROTOCOL_ERROR', message: 'Core JSON frame is not valid UTF-8.' } }); continue; }
+		if (rawRequestBytes > MAX_CORE_PROTOCOL_FRAME_BYTES) {
+			output({ type: 'response', id: 'unknown', success: false, error: { code: 'CORE_FRAME_TOO_LARGE', message: `Core JSON frame exceeds the ${MAX_CORE_PROTOCOL_FRAME_BYTES}-byte limit.` } });
+			break;
+		}
 		const trimmed = line.trim();
 		if (!trimmed) {
 			continue;
@@ -806,12 +1048,12 @@ export async function runCoreRuntime(input: AsyncIterable<string>, output: (mess
 			output({ type: 'response', id: 'unknown', success: false, error: { code: 'CORE_PROTOCOL_ERROR', message: 'Malformed JSON request.' } });
 			continue;
 		}
-		if (!validateRequest(parsed)) {
+		if (!validateRequest(parsed, rawRequestBytes)) {
 			const requestId = isRecord(parsed) && typeof parsed.id === 'string' ? parsed.id : 'unknown';
 			output({ type: 'response', id: requestId, success: false, error: { code: 'CORE_INVALID_REQUEST', message: 'Invalid request envelope, method, or params.' } });
 			continue;
 		}
-		const task = runtime.handle(parsed, (event) => output(event)).then((response) => output(response)).catch((error) => {
+		const task = runtime.handle(parsed, (event) => output(event), rawRequestBytes).then((response) => output(response)).catch((error) => {
 			output({ type: 'response', id: parsed.id, success: false, error: { code: 'CORE_OPERATION_FAILED', message: error instanceof Error ? error.message : String(error) } });
 		});
 		active.add(task);
@@ -829,24 +1071,29 @@ const CORE_METHODS = new Set<string>([
 	'workspace.rules.get', 'workspace.rules.set',
 	'workspace.threat-history.get', 'workspace.threat-history.delete',
 	'workspace.agent-sessions.get', 'workspace.agent-sessions.set', 'workspace.recommendations.get', 'workspace.reports.get',
+	'hypotheses.generate', 'hypotheses.ai.prepare', 'hypotheses.ai.approve', 'hypotheses.ai.deny', 'hypotheses.ai.execute', 'hypotheses.list', 'hypotheses.get', 'hypotheses.review',
 	'scan.start', 'scan.file', 'scan.cancel', 'scan.status', 'ai.providers', 'ai.models', 'ai.chat',
 	'ai.cancel', 'ai.review', 'ai.vulnerabilityAnalysis', 'report.generate',
 	'credentials.status', 'credentials.set', 'credentials.delete', 'credentials.exists',
 ]);
 
-function validateRequest(value: unknown): value is CoreRequestMessage {
+function validateRequest(value: unknown, rawRequestBytes?: number): value is CoreRequestMessage {
 	if (!isRecord(value) || value.type !== 'request' || typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(value.id)) {
 		return false;
 	}
 	if (typeof value.method !== 'string' || !CORE_METHODS.has(value.method)) {
 		return false;
 	}
+	if (value.method === 'hypotheses.ai.prepare' && (Object.keys(value).length > 4 || Object.keys(value).some((key) => !['type', 'id', 'method', 'params'].includes(key)))) { return false; }
+	if ((value.method === 'hypotheses.ai.approve' || value.method === 'hypotheses.ai.deny' || value.method === 'hypotheses.ai.execute') && (Object.keys(value).length > 4 || Object.keys(value).some((key) => !['type', 'id', 'method', 'params'].includes(key)))) {return false;}
 	const params = value.params;
 	if (params !== undefined && !isRecord(params)) {
 		return false;
 	}
 	const input = (params ?? {}) as Record<string, unknown>;
 	const string = (key: string): boolean => typeof input[key] === 'string' && (input[key] as string).length > 0;
+	const hypothesisWorkspace = (): boolean => string('workspaceRoot') && String(input.workspaceRoot).length <= 4096 && !String(input.workspaceRoot).includes('\0') && String(input.workspaceRoot).trim() === String(input.workspaceRoot) && path.isAbsolute(String(input.workspaceRoot));
+	const hypothesisScanId = (): boolean => string('scanId') && /^[A-Za-z0-9._:-]{1,128}$/.test(String(input.scanId));
 	const optionalString = (key: string): boolean => input[key] === undefined || typeof input[key] === 'string';
 	switch (value.method) {
 		case 'core.health': case 'core.info': case 'core.shutdown': case 'ai.providers':
@@ -855,6 +1102,22 @@ function validateRequest(value: unknown): value is CoreRequestMessage {
 		case 'core.cancel': return optionalString('requestId');
 		case 'project.detect': case 'project.profile': case 'rag.status': return string('workspaceRoot') && typeof input.trusted === 'boolean' && optionalString('currentFile');
 		case 'workspace.rules.get': case 'workspace.threat-history.get': case 'workspace.agent-sessions.get': case 'workspace.recommendations.get': case 'workspace.reports.get': return string('workspaceRoot');
+		case 'hypotheses.generate': return hypothesisWorkspace() && hypothesisScanId();
+		case 'hypotheses.ai.prepare': return Object.keys(input).length <= 6 && Object.keys(input).every((key) => ['workspaceRoot', 'scanId', 'providerId', 'modelId', 'evidenceIds', 'includeSourceExcerpts'].includes(key))
+			&& hypothesisWorkspace() && String(input.workspaceRoot).length <= HYPOTHESIS_AI_PREPARATION_LIMITS.maxWorkspaceRootChars
+			&& hypothesisScanId() && String(input.scanId).length <= HYPOTHESIS_AI_PREPARATION_LIMITS.maxScanIdChars
+			&& ['openrouter', 'openai', 'claude', 'gemini'].includes(String(input.providerId))
+			&& String(input.providerId).length <= HYPOTHESIS_AI_PREPARATION_LIMITS.maxProviderIdChars
+			&& string('modelId') && String(input.modelId).length <= 128 && /^[A-Za-z0-9._:/-]+$/.test(String(input.modelId))
+			&& Array.isArray(input.evidenceIds) && input.evidenceIds.length >= 1 && input.evidenceIds.length <= HYPOTHESIS_AI_PREPARATION_LIMITS.maxEvidenceSelectors
+			&& input.evidenceIds.every((id) => typeof id === 'string' && id.length >= 1 && id.length <= HYPOTHESIS_AI_PREPARATION_LIMITS.maxEvidenceIdChars && id.trim() === id && !/[\u0000-\u001f\u007f]/.test(id))
+			&& new Set(input.evidenceIds).size === input.evidenceIds.length
+			&& (input.includeSourceExcerpts === undefined || typeof input.includeSourceExcerpts === 'boolean')
+			&& Math.max(rawRequestBytes ?? 0, Buffer.byteLength(JSON.stringify(value), 'utf8')) <= HYPOTHESIS_AI_PREPARATION_LIMITS.maxSerializedPrepareRequestBytes;
+		case 'hypotheses.ai.approve': case 'hypotheses.ai.deny': case 'hypotheses.ai.execute': return Object.keys(input).length === 2 && Object.keys(input).every((key) => ['preparationId', 'contentFingerprint'].includes(key)) && typeof input.preparationId === 'string' && /^[a-f0-9-]{36}$/i.test(input.preparationId) && typeof input.contentFingerprint === 'string' && /^[a-f0-9]{64}$/.test(input.contentFingerprint);
+		case 'hypotheses.list': return hypothesisWorkspace() && (input.status === undefined || ['proposed', 'investigating', 'validated', 'rejected', 'dismissed', 'stale', 'unsubstantiated'].includes(String(input.status))) && (input.includeStale === undefined || typeof input.includeStale === 'boolean');
+		case 'hypotheses.get': return hypothesisWorkspace() && string('hypothesisId') && String(input.hypothesisId).length <= 80;
+		case 'hypotheses.review': return hypothesisWorkspace() && string('hypothesisId') && String(input.hypothesisId).length <= 80 && ['investigate', 'validate', 'reject', 'dismiss', 'reopen'].includes(String(input.action)) && (input.note === undefined || typeof input.note === 'string' && input.note.length <= 500) && (input.evidenceRefs === undefined || Array.isArray(input.evidenceRefs) && input.evidenceRefs.length <= 20 && input.evidenceRefs.every((item) => typeof item === 'string' && item.length <= 200));
 		case 'workspace.threat-history.delete': return string('workspaceRoot') && string('snapshotId');
 		case 'workspace.agent-sessions.set': return string('workspaceRoot') && Array.isArray(input.sessions) && input.sessions.every(isAgentSession);
 		case 'workspace.rules.set': return string('workspaceRoot') && Array.isArray(input.rules) && validateRuleList(input.rules);
@@ -900,6 +1163,11 @@ function isMissingFile(error: unknown): boolean {
 	return isRecord(error) && error.code === 'ENOENT';
 }
 
+function normalizeWorkspaceIdentity(root: string): string {
+	const resolved = path.resolve(root);
+	return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 function isAgentSession(value: unknown): value is CoreAgentSession {
 	if (!isRecord(value) || typeof value.id !== 'string' || typeof value.title !== 'string' || typeof value.createdAt !== 'string' || typeof value.updatedAt !== 'string' || typeof value.model !== 'string' || typeof value.intelligence !== 'string' || !Array.isArray(value.messages)) return false;
 	return value.messages.every((message) => isRecord(message) && typeof message.id === 'string' && (message.role === 'user' || message.role === 'assistant') && typeof message.content === 'string' && typeof message.createdAt === 'string');
@@ -916,7 +1184,7 @@ function sanitizeAgentSession(session: CoreAgentSession): CoreAgentSession {
 }
 
 function validateFileScanRequest(input: Record<string, unknown>): boolean {
-	if (typeof input.filePath !== 'string' || input.filePath.trim().length === 0 || typeof input.content !== 'string' || !isRecord(input.policy) || (input.workspaceRoot !== undefined && typeof input.workspaceRoot !== 'string')) {return false;}
+	if (Object.keys(input).some((key) => !['filePath', 'content', 'policy'].includes(key)) || typeof input.filePath !== 'string' || input.filePath.trim().length === 0 || typeof input.content !== 'string' || !isRecord(input.policy)) {return false;}
 	const policy = input.policy;
 	if (!Array.isArray(policy.supportedExtensions) || !policy.supportedExtensions.every((value) => typeof value === 'string' && value.length > 0)) {return false;}
 	if (!Array.isArray(policy.excludedPaths) || !policy.excludedPaths.every((value) => typeof value === 'string')) {return false;}

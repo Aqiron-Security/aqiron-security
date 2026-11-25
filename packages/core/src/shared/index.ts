@@ -1,4 +1,5 @@
 export * from './sourceSpan';
+export * from './sourceProvenance';
 export * from './cancellation';
 export * from './platform';
 export * from './issue';

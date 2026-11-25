@@ -50,6 +50,12 @@ export interface ChatRequest {
 	openRouterReasoning?: OpenRouterReasoningOptions;
 	includeUsage?: boolean;
 	abortSignal?: AbortSignal;
+	/** Internal transport ceilings; providers apply these after constructing the provider-specific body. */
+	transportLimits?: {
+		maxRequestBodyBytes?: number;
+		maxResponseBodyBytes?: number;
+		maxSseEventBytes?: number;
+	};
 }
 
 export interface OpenRouterReasoningOptions {

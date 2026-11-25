@@ -33,9 +33,12 @@ export class GeminiProvider extends BaseProvider implements AIProvider {
 		const contents = req.messages.filter((message) => message.role !== 'system').map((message) => ({ role: message.role === 'assistant' ? 'model' : 'user', parts: [{ text: message.content }] }));
 		const response = await withRetry(async () => await this.transport.request(`${this.endpoint}/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse`, {
 			method: 'POST', timeoutMs: req.timeoutMs, abortSignal: req.abortSignal, headers: { 'x-goog-api-key': await this.getApiKey() },
+			maxRequestBodyBytes: req.transportLimits?.maxRequestBodyBytes,
+			maxResponseBodyBytes: req.transportLimits?.maxResponseBodyBytes,
+			maxSseEventBytes: req.transportLimits?.maxSseEventBytes,
 			body: { ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}), contents, generationConfig: { temperature: req.temperature, maxOutputTokens: req.maxTokens } },
 		}), { retries: req.retries, shouldRetry: isTransientError });
-		for await (const item of parseSseStream(response)) {
+		for await (const item of parseSseStream(response, undefined, req.transportLimits?.maxResponseBodyBytes, req.transportLimits?.maxSseEventBytes)) {
 			const chunk = item as GeminiChunk;
 			const text = chunk.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
 			if (text) yield { type: 'token', content: text };

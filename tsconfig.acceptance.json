@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": ".", "outDir": ".ci-compiled-tests", "noEmit": false },
+  "exclude": [],
+  "include": [
+    "src/test/hypothesisAi*.test.ts",
+    "src/test/hypothesisEngine.test.ts",
+    "src/test/coreProtocolFraming.test.ts",
+    "src/test/coreClient.test.ts",
+    "src/test/coreAiTransport.test.ts",
+    "src/test/coreRuntime.test.ts",
+    "src/test/hypothesisStoreWorker.ts",
+    "src/test/cli.test.ts",
+    "src/webview/hypothesisAiExecution.ts",
+    "src/webview/hypothesisAiConsentMessages.ts",
+    "packages/core/src/**/*.ts",
+    "packages/cli/src/**/*.ts",
+    "packages/desktop/src/**/*.ts"
+  ]
+}

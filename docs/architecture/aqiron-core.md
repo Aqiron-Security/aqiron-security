@@ -1,6 +1,8 @@
 # Aqiron Core architecture
 
 **Status:** Current implementation and boundary map (2026-10-02)
+
+> **Historical architecture record:** this document describes the former VS Code extension layout. The active Desktop + CLI architecture and current project paths are documented in [desktop-cli-core.md](desktop-cli-core.md). Treat extension paths and commands below as historical.
 **Scope:** describe the checked-in implementation and client boundaries for VS Code, CLI/CI, and a future Desktop host. Core and IPC behavior remain unchanged.
 
 This document uses **Current** for behavior demonstrated by this repository, **Near-term** for boundary work that can be done while this remains one repository, and **Future** for capabilities not present yet. The implementation is the source of truth; proposed method names below are illustrative contracts, not existing APIs unless explicitly called Current.

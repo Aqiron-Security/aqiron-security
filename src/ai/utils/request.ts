@@ -1,7 +1,8 @@
-import { AIHttpError, AIHttpResponse, AITransport, normalizeProviderError, parseNdjsonStream, parseSseStream, redactSecret } from '../../../packages/core/src/ai';
+import { AIHttpError, AIHttpResponse, AITransport, normalizeProviderError, parseNdjsonStream, parseSseStream } from '../../../packages/core/src/ai';
 import { createTimeoutSignal } from './timeout';
 
-export { AIHttpError, normalizeProviderError, parseNdjsonStream, parseSseStream, redactSecret };
+export { AIHttpError, normalizeProviderError, parseNdjsonStream, parseSseStream };
+export { redactSecret } from '../../../packages/core/src/ai';
 export type { AIHttpResponse, AITransport };
 
 export interface RequestOptions {
@@ -14,7 +15,8 @@ export interface RequestOptions {
 
 export async function requestJson<T>(url: string, options: RequestOptions): Promise<T> {
 	const response = await request(url, options);
-	return await response.json() as T;
+	try {return await response.json() as T;}
+	catch {throw new AIHttpError(502);}
 }
 
 export async function request(url: string, options: RequestOptions): Promise<Response> {
@@ -25,15 +27,19 @@ export async function request(url: string, options: RequestOptions): Promise<Res
 			'Content-Type': options.body === undefined ? undefined : 'application/json',
 			...options.headers,
 		});
-		const response = await fetch(url, {
-			method: options.method ?? 'GET',
-			headers,
-			body: options.body === undefined ? undefined : JSON.stringify(options.body),
-			signal: timeout.signal,
-		});
+		let response: Response;
+		try {
+			response = await fetch(url, {
+				method: options.method ?? 'GET',
+				headers,
+				body: options.body === undefined ? undefined : JSON.stringify(options.body),
+				signal: timeout.signal,
+			});
+		} catch {
+			throw new AIHttpError(timeout.signal.aborted ? 408 : 502);
+		}
 		if (!response.ok) {
-			const body = await response.text().catch(() => '');
-			throw new AIHttpError(response.status, createHttpMessage(response.status, body), body.slice(0, 1000));
+			throw new AIHttpError(response.status);
 		}
 		return response;
 	} finally {
@@ -43,9 +49,4 @@ export async function request(url: string, options: RequestOptions): Promise<Res
 
 function cleanHeaders(headers: Record<string, string | undefined>): Record<string, string> {
 	return Object.fromEntries(Object.entries(headers).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0));
-}
-
-function createHttpMessage(status: number, body: string): string {
-	const cleanBody = redactSecret(body).trim();
-	return cleanBody ? `Provider request failed with HTTP ${status}: ${cleanBody.slice(0, 240)}` : `Provider request failed with HTTP ${status}.`;
 }

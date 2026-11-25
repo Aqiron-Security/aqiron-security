@@ -1,0 +1,75 @@
+name: Cross-platform validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  product-acceptance:
+    name: Desktop + CLI + Core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential curl file libgtk-3-dev libayatana-appindicator3-dev libsecret-1-dev \
+            libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev pkg-config
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Check TypeScript
+        run: npm run check-types
+
+      - name: Build Core, CLI, and Desktop bridge
+        run: npm run core:build
+
+      - name: Run focused Core, Hypothesis, and CLI tests
+        run: npm run test:focused
+
+      - name: Run Desktop bridge tests
+        run: npm run desktop:test
+
+      - name: Build Desktop frontend
+        run: npm run desktop:build
+
+      - name: Check Tauri Rust host
+        run: npm run desktop:check
+
+      - name: Run Tauri Rust tests
+        run: npm run desktop:test:rust
+
+      - name: Build native Tauri host
+        run: npm run desktop:build:native
+
+      - name: Check whitespace errors
+        run: git diff --check

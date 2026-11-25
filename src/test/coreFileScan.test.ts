@@ -101,6 +101,11 @@ suite('Core file scan contract', () => {
 		const malformed = await runtime.handle(request('bad-file', 'scan.file', { filePath: 'main.dart', content: 12, policy: {} }), () => undefined);
 		assert.equal(malformed.success, false);
 		assert.equal(malformed.error?.code, 'CORE_INVALID_REQUEST');
+		const untrustedWorkspace = await runtime.handle(request('untrusted-root', 'scan.file', {
+			filePath: 'main.dart', content: '', workspaceRoot: 'D:/attacker-selected-root', policy: policy(),
+		}), () => undefined);
+		assert.equal(untrustedWorkspace.success, false);
+		assert.equal(untrustedWorkspace.error?.code, 'CORE_INVALID_REQUEST');
 	});
 
 	test('Core source has no VS Code module imports', async () => {

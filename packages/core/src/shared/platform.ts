@@ -3,12 +3,25 @@ import { CancellationTokenLike } from './cancellation';
 export interface FileSystem {
 	readFile(path: string, encoding: BufferEncoding): Promise<string>;
 	readFile(path: string): Promise<Uint8Array>;
+	/** Read and decode a file with an adapter-enforced byte ceiling (including concurrent growth). */
+	readFileBounded?(path: string, maxBytes: number, encoding: BufferEncoding): Promise<string>;
+	/** Read raw bytes with an adapter-enforced byte ceiling; errors may expose bytesRead including the overflow probe. */
+	readFileBoundedBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
 	writeFile(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
+	/** Create a new file only if the path does not already exist. */
+	writeFileExclusive?(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
 	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
 	readdir(path: string, options?: { withFileTypes?: boolean }): Promise<Array<string | { name: string; isDirectory(): boolean; isFile(): boolean }>>;
 	stat(path: string): Promise<{ isFile(): boolean; isDirectory(): boolean; size: number; mtimeMs: number }>;
+	/** Non-following metadata lookup; required by security-sensitive workspace stores. */
+	lstat?(path: string): Promise<{ isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean; size: number; mtimeMs: number }>;
+	/** Physical path lookup; required by security-sensitive workspace stores. */
+	realpath?(path: string): Promise<string>;
 	access(path: string): Promise<void>;
 	rename(oldPath: string, newPath: string): Promise<void>;
+	/** Optional file cleanup capability for stores that need recoverable replacement on Windows. */
+	unlink?(path: string): Promise<void>;
+	rmdir?(path: string): Promise<void>;
 	exists(path: string): Promise<boolean>;
 }
 
@@ -44,10 +57,14 @@ export interface CredentialStore {
 
 export interface NetworkRequestOptions {
 	method?: string;
+	/** Provider transports use manual redirects so credentials cannot be forwarded by fetch. */
+	redirect?: RequestRedirect;
 	headers?: Record<string, string>;
 	body?: string | Uint8Array;
 	timeoutMs?: number;
 	cancellationToken?: CancellationTokenLike;
+	/** Native cancellation for bounded provider transports. */
+	abortSignal?: AbortSignal;
 }
 
 export interface NetworkResponse {

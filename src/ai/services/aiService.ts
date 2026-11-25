@@ -45,7 +45,10 @@ export class AIService implements vscode.Disposable {
 			await this.saveSettings({ ...migrated, selectedProvider: 'openrouter' });
 		}
 		await this.migrateLegacyCredentials();
-		await this.refreshModels(false);
+		// Extension activation must not contact a provider. Model discovery is
+		// available from the explicit Refresh models action.
+		this.models = [];
+		this.status = { providerId: this.settings.selectedProvider, connected: false, message: 'Model discovery has not been requested' };
 	}
 
 	dispose(): void {}
@@ -71,9 +74,8 @@ export class AIService implements vscode.Disposable {
 		const target = providerId ?? this.settings.selectedProvider;
 		const apiKey = await vscode.window.showInputBox({ title: `${providerLabel(target)} API key`, prompt: `Enter your ${providerLabel(target)} API key.`, password: true, ignoreFocusOut: true });
 		if (!apiKey) return;
-		await this.saveApiCredential({ providerId: target, name: providerLabel(target), key: apiKey.trim() }, false);
+		await this.saveApiCredential({ providerId: target, name: providerLabel(target), key: apiKey.trim() });
 		await this.saveSettings({ ...this.settings, selectedProvider: target });
-		await this.refreshModels(true);
 	}
 
 	async configureOpenRouter(): Promise<void> {
@@ -86,21 +88,18 @@ export class AIService implements vscode.Disposable {
 		if (!apiKey) {
 			return;
 		}
-		await this.saveApiCredential({ providerId: 'openrouter', name: 'OpenRouter', key: apiKey.trim() }, false);
+		await this.saveApiCredential({ providerId: 'openrouter', name: 'OpenRouter', key: apiKey.trim() });
 		await this.saveSettings({ ...this.settings, selectedProvider: 'openrouter' });
-		const result = await getCoreClient().models('openrouter');
-		this.status = result.status;
+		this.status = { providerId: 'openrouter', connected: false, message: 'Model discovery has not been requested' };
 	}
 
 	async updateSettings(patch: Partial<AISettings>): Promise<void> {
 		await this.saveSettings({ ...this.settings, ...patch });
-		await this.refreshModels(true);
 	}
 
 	async switchProvider(providerId: AIProviderId): Promise<void> {
 		const credential = this.settings.apiCredentials?.find((api) => api.providerId === providerId);
 		await this.saveSettings({ ...this.settings, selectedProvider: providerId, activeApiCredentialId: credential?.id });
-		await this.refreshModels(true);
 	}
 
 	async selectModel(modelId: string): Promise<void> {
@@ -108,7 +107,7 @@ export class AIService implements vscode.Disposable {
 		await this.saveSettings({ ...this.settings, selectedModel: modelId, recentModelIds });
 	}
 
-	async saveApiCredential(input: { id?: string; providerId: AIProviderId; name?: string; key?: string }, refresh = true): Promise<AIProviderCredential> {
+	async saveApiCredential(input: { id?: string; providerId: AIProviderId; name?: string; key?: string }): Promise<AIProviderCredential> {
 		const now = new Date().toISOString();
 		const existing = input.id ? this.settings.apiCredentials?.find((api) => api.id === input.id) : undefined;
 		const key = input.key?.trim();
@@ -131,9 +130,6 @@ export class AIService implements vscode.Disposable {
 		}
 		const apiCredentials = [next, ...(this.settings.apiCredentials ?? []).filter((api) => api.id !== next.id)];
 		await this.saveSettings({ ...this.settings, apiCredentials, activeApiCredentialId: next.id, selectedProvider: next.providerId });
-		if (refresh) {
-			await this.refreshModels(true);
-		}
 		return next;
 	}
 
@@ -143,7 +139,6 @@ export class AIService implements vscode.Disposable {
 			return;
 		}
 		await this.saveSettings({ ...this.settings, activeApiCredentialId: id, selectedProvider: api.providerId });
-		await this.refreshModels(true);
 	}
 
 	async deleteApiCredential(id: string): Promise<void> {
@@ -152,7 +147,6 @@ export class AIService implements vscode.Disposable {
 		const activeApiCredentialId = this.settings.activeApiCredentialId === id ? apiCredentials[0]?.id : this.settings.activeApiCredentialId;
 		const selectedProvider = apiCredentials.find((api) => api.id === activeApiCredentialId)?.providerId ?? this.settings.selectedProvider;
 		await this.saveSettings({ ...this.settings, apiCredentials, activeApiCredentialId, selectedProvider });
-		await this.refreshModels(true);
 	}
 
 	async saveTaskDefaults(defaults: AITaskDefaults): Promise<void> {
@@ -165,25 +159,15 @@ export class AIService implements vscode.Disposable {
 		if (providerId === 'openrouter') await getCoreClient().credentialsDelete({ key: aiSecretKeys.openRouterApiKey });
 		const apiCredentials = (this.settings.apiCredentials ?? []).filter((api) => api.providerId !== providerId);
 		await this.saveSettings({ ...this.settings, apiCredentials, activeApiCredentialId: apiCredentials[0]?.id });
-		await this.refreshModels(true);
 	}
 
-	async refreshModels(force: boolean): Promise<void> {
+	async refreshModels(_force: boolean): Promise<void> {
 		this.loadingModels = true;
 		this.modelError = undefined;
 		try {
 			const result = await getCoreClient().models(this.settings.selectedProvider);
 			this.models = result.models ?? [];
 			this.status = result.status ?? this.status;
-			if (force) {
-				const selectedExists = Boolean(this.settings.selectedModel && this.models.some((model) => model.id === this.settings.selectedModel));
-				if (!selectedExists) {
-					const recentModel = this.settings.recentModelIds?.find((modelId) => this.models.some((model) => model.id === modelId));
-					if (recentModel) {
-						await this.selectModel(recentModel);
-					}
-				}
-			}
 		} catch (error) {
 			this.models = [];
 			this.modelError = normalizeProviderError(error);

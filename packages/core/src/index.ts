@@ -9,6 +9,7 @@ export * from './orchestration';
 export * from './scanners';
 export * from './project';
 export * from './context';
+export * from './hypotheses';
 export * from './rag';
 export * from './analysis';
 export * from './ai';
