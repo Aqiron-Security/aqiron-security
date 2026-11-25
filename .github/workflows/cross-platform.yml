@@ -71,8 +71,8 @@ jobs:
           npm run core:build
           npx mocha --ui tdd ".ci-compiled-tests/src/test/hypothesisAi*.test.js" .ci-compiled-tests/src/test/hypothesisEngine.test.js .ci-compiled-tests/src/test/coreProtocolFraming.test.js .ci-compiled-tests/src/test/coreClient.test.js .ci-compiled-tests/src/test/coreAiTransport.test.js .ci-compiled-tests/src/test/coreRuntime.test.js
 
-      - name: Run Desktop bridge correlation and cancellation tests
-        run: npm run desktop:test
+      - name: Run focused Hypothesis Desktop bridge tests
+        run: node --test --test-name-pattern='hypothesis|cancellation' packages/desktop/test/bridge.test.cjs
 
       - name: Build VS Code extension and run lint
         run: npm run compile
@@ -136,3 +136,6 @@ jobs:
         env:
           AQIRON_VSCODE_TEST_OUTCOME: ${{ runner.os == 'Linux' && steps.vscode_test_xvfb.outcome || steps.vscode_test_native.outcome }}
         run: node scripts/verify-vscode-test-summary.cjs
+
+      - name: Run complete legacy Desktop bridge suite
+        run: npm run desktop:test
