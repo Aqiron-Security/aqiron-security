@@ -340,6 +340,7 @@ suite('Core runtime process', () => {
 		} };
 		const runtime = new CoreRuntime({ coreVersion: 'interactive-chat-policy-test', credentialStore, aiTransport });
 		const events: unknown[] = [];
+		await runtime.handle({ id: 'refresh-models-before-minimax-chat', type: 'request', method: 'ai.models', params: {} }, () => undefined);
 		const response = await runtime.handle({ id: 'explain-chat', type: 'request', method: 'ai.chat', params: {
 				sessionId: 'existing-session', providerId: 'openrouter', model: 'minimax/minimax-m3.1-flash:free', text: 'Explain Secure Storage Recommendation', intelligence: 'Medium',
 			history: [{ role: 'user', content: 'Secure Storage Recommendation: restrict public bucket access.' }, { role: 'assistant', content: 'The finding concerns an exposed storage bucket.' }],
@@ -376,6 +377,7 @@ suite('Core runtime process', () => {
 		} };
 		const runtime = new CoreRuntime({ coreVersion: 'interactive-chat-empty-test', credentialStore, aiTransport });
 		const events: unknown[] = [];
+		await runtime.handle({ id: 'refresh-models-before-reasoning-only-chat', type: 'request', method: 'ai.models', params: {} }, () => undefined);
 		const response = await runtime.handle({ id: 'empty-chat', type: 'request', method: 'ai.chat', params: {
 			sessionId: 'empty-session', providerId: 'openrouter', model: 'nvidia/nemotron-3.5-lightning:free', text: 'Explain this recommendation', intelligence: 'Medium', history: [],
 			context: { workspaceName: 'fixture', projectTypes: [], backend: 'Core', currentFile: 'None', scanStatus: 'Complete', issues: [], stats: { filesScanned: 0, indexedFiles: 0 }, apis: [] },

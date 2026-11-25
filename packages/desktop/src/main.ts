@@ -12,7 +12,7 @@ client.on('event', (event) => write({ type: 'event', event }));
 client.on('exit', (event) => write({ type: 'event', event: { type: 'desktop', event: 'core.disconnected', payload: event } }));
 client.on('log', (message) => process.stderr.write(`${message}\n`));
 
-type DesktopMethod = 'project.detect' | 'project.profile' | 'scan.start' | 'rag.index' | 'ai.providers' | 'ai.models' | 'ai.chat' | 'ai.cancel' | 'core.cancel' | 'credentials.status' | 'credentials.set' | 'credentials.delete' | 'workspace.rules.get' | 'workspace.rules.set' | 'workspace.threat-history.get' | 'workspace.threat-history.delete' | 'workspace.reports.get' | 'workspace.agent-sessions.get' | 'workspace.agent-sessions.set' | 'workspace.recommendations.get' | 'hypotheses.ai.prepare' | 'hypotheses.ai.approve' | 'hypotheses.ai.deny' | 'hypotheses.ai.execute';
+type DesktopMethod = 'project.detect' | 'project.profile' | 'scan.start' | 'rag.index' | 'ai.providers' | 'ai.models' | 'ai.chat' | 'ai.cancel' | 'core.cancel' | 'credentials.status' | 'credentials.set' | 'credentials.delete' | 'workspace.rules.get' | 'workspace.rules.set' | 'workspace.threat-history.get' | 'workspace.threat-history.delete' | 'workspace.reports.get' | 'workspace.agent-sessions.get' | 'workspace.agent-sessions.set' | 'workspace.recommendations.get' | 'hypotheses.generate' | 'hypotheses.list' | 'hypotheses.get' | 'hypotheses.review' | 'hypotheses.ai.prepare' | 'hypotheses.ai.approve' | 'hypotheses.ai.deny' | 'hypotheses.ai.execute';
 interface DesktopRequest { id: string; method: DesktopMethod; params: unknown; }
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -65,6 +65,10 @@ function callCore(method: DesktopMethod, params: unknown, requestId: string): Pr
 		case 'workspace.agent-sessions.get': return client.getAgentSessions((request as { workspaceRoot: string }).workspaceRoot).then((sessions) => ({ sessions }));
 		case 'workspace.agent-sessions.set': return client.setAgentSessions((request as { workspaceRoot: string; sessions: import('../../core/src/runtime/protocol').CoreAgentSession[] }).workspaceRoot, (request as { sessions: import('../../core/src/runtime/protocol').CoreAgentSession[] }).sessions).then((sessions) => ({ sessions }));
 		case 'workspace.recommendations.get': return client.getWorkspaceRecommendations((request as { workspaceRoot: string }).workspaceRoot);
+		case 'hypotheses.generate': return client.generateHypotheses({ ...(request as import('../../core/src/runtime/protocol').CoreMethodParams['hypotheses.generate']), requestId });
+		case 'hypotheses.list': return client.listHypotheses(request as import('../../core/src/runtime/protocol').CoreMethodParams['hypotheses.list']);
+		case 'hypotheses.get': return client.getHypothesis(request as import('../../core/src/runtime/protocol').CoreMethodParams['hypotheses.get']);
+		case 'hypotheses.review': return client.reviewHypothesis(request as import('../../core/src/runtime/protocol').CoreMethodParams['hypotheses.review']);
 		case 'hypotheses.ai.prepare': return client.prepareHypothesisAiDisclosure(request as import('../../core/src/hypotheses/contracts').HypothesisAiPrepareRequest);
 		case 'hypotheses.ai.approve': { const input = request as { preparationId: string; contentFingerprint: string }; return client.approveHypothesisAiPreparation(input.preparationId, input.contentFingerprint); }
 		case 'hypotheses.ai.deny': { const input = request as { preparationId: string; contentFingerprint: string }; return client.denyHypothesisAiPreparation(input.preparationId, input.contentFingerprint); }

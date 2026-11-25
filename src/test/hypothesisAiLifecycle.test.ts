@@ -26,6 +26,18 @@ suite('Core hypothesis AI approval lifecycle', () => {
 		registry.dispose();
 	});
 
+	test('a preparation approved under a different execution-gate state is invalidated before executor I/O', async () => {
+		const registry = new HypothesisAiPreparationRegistry();
+		const { manifest, fingerprint } = issue(registry, 'gate-mismatch', 'exact-canonical-content', false);
+		assert.equal(manifest.executionAvailable, false);
+		assert.equal((await registry.approve(manifest.preparationId, fingerprint, () => true)).ok, true);
+		let invoked = 0;
+		const result = await registry.execute(manifest.preparationId, fingerprint, () => true, async () => { invoked += 1; return 'unexpected'; });
+		assert.deepEqual(result, { ok: false, state: 'invalidated', reason: 'revalidation-failed' });
+		assert.equal(invoked, 0);
+		registry.dispose();
+	});
+
 	test('approval and execution are bound to the exact retained content and configuration fingerprint', async () => {
 		const registry = new HypothesisAiPreparationRegistry();
 		const { manifest, fingerprint } = issue(registry, 'immutable', JSON.stringify({ providerId: 'openai', modelId: 'model-a', endpoint: 'https://unknown.invalid', content: 'bounded' }));
@@ -241,8 +253,8 @@ suite('Core hypothesis AI approval lifecycle', () => {
 	});
 });
 
-function issue(registry: HypothesisAiPreparationRegistry, id = 'preparation', envelope = 'exact-canonical-content') {
-	const manifest = createManifest(id, Date.now() + 300_000);
+function issue(registry: HypothesisAiPreparationRegistry, id = 'preparation', envelope = 'exact-canonical-content', executionAvailable = true) {
+	const manifest = { ...createManifest(id, Date.now() + 300_000), executionAvailable };
 	assert.equal(registry.issue(manifest, envelope), true);
 	return { manifest, fingerprint: registry.fingerprint(id)! };
 }
@@ -253,7 +265,7 @@ function createManifest(id: string, expires: number): HypothesisAiPreparedDisclo
 		provider: { id: 'openai', modelId: 'model-a', external: true, endpoint: 'https://api.openai.com/v1/chat/completions', endpointClassification: 'known', credential: { identity: 'test', name: 'Test', last4: '1234', updatedAt: 'now' }, configurationFingerprint: 'a'.repeat(64), requestOptions: { temperature: 0, maxTokens: 2048, timeoutMs: 30_000, retries: 0, streaming: false, maxRequestBodyBytes: 16_384, maxResponseBodyBytes: 16_384 }, retentionPolicy: 'unknown' },
 		dataCategories: ['finding-summary'], evidenceCount: 1, findingCount: 1, relationshipCount: 0, excerptCount: 0, includeSourceExcerpts: false,
 		evidence: [], proposedContent: { purpose: 'test synthesis', instructions: 'test', evidence: [] }, proposedContentUtf8Bytes: 1, coreEnvelopeUtf8Bytes: 1,
-		previewUtf8Bytes: 1, previewOnly: true, executionAvailable: false, providerCallMade: false, disclosure: 'test',
+		previewUtf8Bytes: 1, previewOnly: true, executionAvailable: true, providerCallMade: false, disclosure: 'test',
 	};
 }
 

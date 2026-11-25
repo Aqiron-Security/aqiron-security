@@ -36,7 +36,7 @@ import { SourceReadBudget, SourceReadBudgetExceededError } from '../shared/sourc
 import { HYPOTHESIS_AI_PREPARATION_LIMITS } from '../hypotheses/contracts';
 import { HypothesisAiExecutor, HypothesisAiLifecycleResult, HypothesisAiPreparationRegistry, prepareHypothesisAiDisclosure } from '../hypotheses/hypothesisAiPreparation';
 import { CoreProtocolFrame, MAX_CORE_PROTOCOL_FRAME_BYTES } from './protocolFraming';
-import { buildHypothesisAiBoundRequest, hypothesisAiModelCapability, HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION, resolveHypothesisAiProviderConfiguration, sameHypothesisAiProviderConfiguration, HypothesisAiProviderConfigurationSnapshot } from '../hypotheses/hypothesisAiConfiguration';
+import { buildHypothesisAiBoundRequest, createHypothesisAiBoundRequestPlan, hypothesisAiModelCapability, HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION, resolveHypothesisAiProviderConfiguration, sameHypothesisAiProviderConfiguration, HypothesisAiProviderConfigurationSnapshot } from '../hypotheses/hypothesisAiConfiguration';
 import { createHypothesisAiRequestContext } from '../hypotheses/aiProposalValidation';
 import { createHypothesisAiExecutor } from '../hypotheses/hypothesisAiExecutor';
 
@@ -117,7 +117,10 @@ export class CoreRuntime {
 		// Assemble the production-intended pipeline from Core's own transport and
 		// store. The immutable source gate below keeps it unreachable in release
 		// composition until a separately reviewed activation change.
-		this.productionHypothesisAiExecutor = createHypothesisAiExecutor(this.transport, this.hypotheses);
+		this.productionHypothesisAiExecutor = createHypothesisAiExecutor(this.transport, this.hypotheses, (diagnostic) => {
+			if (diagnostic.outcome === 'failed') {this.logger.warn('hypothesis.ai.execution.diagnostic', diagnostic);}
+			else {this.logger.info('hypothesis.ai.execution.diagnostic', diagnostic);}
+		});
 		this.nativeScanner = new NativeWorkspaceScanner(this.filesystem);
 		this.aiService = new AIService({
 			credentialStore: this.credentialStore,
@@ -369,7 +372,7 @@ export class CoreRuntime {
 			} catch {
 				return { status: 'rejected', scanId: request.scanId, diagnostic: { code: 'provider-configuration-unavailable', message: 'The selected provider configuration or credential cannot be safely bound for this preparation.' } };
 			}
-			return await prepareHypothesisAiDisclosure({ request, snapshot, filesystem: this.filesystem, registry: this.hypothesisAiPreparations, providerConfiguration, readBudget, cancelled: () => Boolean(cancellationToken?.isCancellationRequested) });
+			return await prepareHypothesisAiDisclosure({ request, snapshot, filesystem: this.filesystem, registry: this.hypothesisAiPreparations, providerConfiguration, executionAvailable: this.hypothesisAiExecutor() !== undefined, readBudget, cancelled: () => Boolean(cancellationToken?.isCancellationRequested) });
 		} catch (error) {
 			if (error instanceof SourceReadBudgetExceededError) {return { status: 'rejected', scanId: request.scanId, diagnostic: { code: 'limits-exceeded', message: 'Selected evidence exceeded the 50 MB aggregate preparation read budget.' } };}
 			throw error;
@@ -378,7 +381,7 @@ export class CoreRuntime {
 
 	/** Internal approval seam for a future official client; call only after explicit user action on Core disclosure. */
 	async approveHypothesisAiPreparation(preparationId: string, contentFingerprint: string): Promise<HypothesisAiLifecycleResult> {
-		return await this.hypothesisAiPreparations.approve(preparationId, contentFingerprint, async (manifest, configuration) => await this.revalidateHypothesisAiPreparation(manifest, configuration));
+		return await this.hypothesisAiPreparations.approve(preparationId, contentFingerprint, async (manifest, configuration, contentEnvelope, phase) => await this.revalidateHypothesisAiPreparation(manifest, configuration, contentEnvelope, phase));
 	}
 
 	denyHypothesisAiPreparation(preparationId: string, contentFingerprint: string): HypothesisAiLifecycleResult {
@@ -387,25 +390,40 @@ export class CoreRuntime {
 
 	/** Internal execution seam. The default runtime has no executor and rejects before any provider work. */
 	async executeHypothesisAiPreparation(preparationId: string, contentFingerprint: string, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<HypothesisAiLifecycleResult<{ proposalCount: number }>> {
-		const executor = this.options.hypothesisAiExecutor ?? (PRODUCTION_HYPOTHESIS_AI_EXECUTION_ENABLED ? this.productionHypothesisAiExecutor : undefined);
+		const executor = this.hypothesisAiExecutor();
 		return await this.hypothesisAiPreparations.execute<{ proposalCount: number }>(preparationId, contentFingerprint, async (manifest, configuration, contentEnvelope, phase) => await this.revalidateHypothesisAiPreparation(manifest, configuration, contentEnvelope, phase), executor, options);
 	}
 
-	private async revalidateHypothesisAiPreparation(manifest: import('../hypotheses/contracts').HypothesisAiPreparedDisclosureManifest, capturedConfiguration?: HypothesisAiProviderConfigurationSnapshot, contentEnvelope?: string, phase: 'approval' | 'execution' = 'approval'): Promise<boolean | { valid: boolean; executionRequest?: import('../hypotheses/hypothesisAiConfiguration').HypothesisAiBoundExecutionRequest; requestContext?: import('../hypotheses/contracts').HypothesisAiRequestContext }> {
+	private hypothesisAiExecutor(): HypothesisAiExecutor | undefined {
+		return this.options.hypothesisAiExecutor ?? (PRODUCTION_HYPOTHESIS_AI_EXECUTION_ENABLED ? this.productionHypothesisAiExecutor : undefined);
+	}
+
+	private async revalidateHypothesisAiPreparation(manifest: import('../hypotheses/contracts').HypothesisAiPreparedDisclosureManifest, capturedConfiguration?: HypothesisAiProviderConfigurationSnapshot, contentEnvelope?: string, phase: 'approval' | 'execution' | 'commit' = 'approval'): Promise<boolean | { valid: boolean; executionRequest?: import('../hypotheses/hypothesisAiConfiguration').HypothesisAiBoundExecutionRequest; requestContext?: import('../hypotheses/contracts').HypothesisAiRequestContext; canCommit?: () => boolean }> {
+		if (manifest.executionAvailable !== (this.hypothesisAiExecutor() !== undefined)) {return false;}
 		if (!capturedConfiguration || capturedConfiguration.preparationId !== manifest.preparationId || capturedConfiguration.expiresAt !== manifest.expiresAt || Date.parse(capturedConfiguration.expiresAt) <= Date.now()) {return false;}
 		let executionRequest: import('../hypotheses/hypothesisAiConfiguration').HypothesisAiBoundExecutionRequest | undefined;
 		try {
-			if (phase === 'execution') {
+			if (phase !== 'approval') {
 				if (!contentEnvelope) {return false;}
-				executionRequest = await buildHypothesisAiBoundRequest({ store: this.credentialStore, providerConfiguration: capturedConfiguration, preparationId: manifest.preparationId, expiresAt: manifest.expiresAt, canonicalEnvelope: contentEnvelope, credentialVersionKey: this.hypothesisAiCredentialVersionKey });
+				try {
+					executionRequest = await buildHypothesisAiBoundRequest({ store: this.credentialStore, providerConfiguration: capturedConfiguration, preparationId: manifest.preparationId, expiresAt: manifest.expiresAt, canonicalEnvelope: contentEnvelope, credentialVersionKey: this.hypothesisAiCredentialVersionKey });
+				} catch {
+					if (phase === 'execution') {this.logger.warn('hypothesis.ai.execution.diagnostic', { stage: 'request-construction', outcome: 'failed', failureCategory: 'request-construction-failed', transportInvoked: false, transportResponseReceived: false, providerResponseValidated: false, persistenceAttempted: false });}
+					return false;
+				}
 			} else {
 				const currentConfiguration = await resolveHypothesisAiProviderConfiguration({ store: this.credentialStore, providerId: capturedConfiguration.providerId, modelId: capturedConfiguration.modelId, credentialVersionKey: this.hypothesisAiCredentialVersionKey });
 				if (!sameHypothesisAiProviderConfiguration(currentConfiguration, capturedConfiguration)) {return false;}
 			}
-		const capability = hypothesisAiModelCapability(capturedConfiguration.providerId, capturedConfiguration.modelId);
-		if (!capability.supported || capturedConfiguration.capabilityPolicyVersion !== HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION
-			|| manifest.provider.capabilityPolicyVersion !== capturedConfiguration.capabilityPolicyVersion || manifest.provider.responseMode !== capability.responseMode
-			|| manifest.provider.id !== capturedConfiguration.providerId || manifest.provider.modelId !== capturedConfiguration.modelId
+			if (!contentEnvelope) {return false;}
+			const requestFingerprint = executionRequest?.plan.requestSemanticsFingerprint ?? createHypothesisAiBoundRequestPlan({
+				providerConfiguration: capturedConfiguration, preparationId: manifest.preparationId, expiresAt: manifest.expiresAt, canonicalEnvelope: contentEnvelope,
+			}).requestSemanticsFingerprint;
+			if (requestFingerprint !== capturedConfiguration.requestSemanticsFingerprint || requestFingerprint !== manifest.provider.requestFingerprint) {return false;}
+			const capability = hypothesisAiModelCapability(capturedConfiguration.providerId, capturedConfiguration.modelId);
+			if (!capability.supported || capturedConfiguration.capabilityPolicyVersion !== HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION
+				|| manifest.provider.capabilityPolicyVersion !== capturedConfiguration.capabilityPolicyVersion || manifest.provider.responseMode !== capability.responseMode
+				|| manifest.provider.id !== capturedConfiguration.providerId || manifest.provider.modelId !== capturedConfiguration.modelId
 				|| manifest.provider.endpoint !== capturedConfiguration.destination || manifest.provider.configurationFingerprint !== capturedConfiguration.configurationFingerprint) {return false;}
 		} catch {return false;}
 		const root = this.resolveHypothesisRoot(manifest.workspaceIdentity);
@@ -426,12 +444,12 @@ export class CoreRuntime {
 				&& manifest.provider.retentionPolicy === 'unknown' && manifest.provider.id.length > 0 && manifest.provider.modelId.length > 0;
 			if (!evidenceIsCurrent) {return false;}
 			if (phase === 'approval') {return true;}
-			if (!executionRequest) {return false;}
+			if (phase === 'execution' && !executionRequest) {return false;}
 			const selectedIds = new Set(manifest.evidence.map((item) => item.evidenceId));
 			const selectedEvidence = snapshot.evidence.filter((item) => selectedIds.has(item.id));
 			if (selectedEvidence.length !== selectedIds.size) {return false;}
 			const requestContext = createHypothesisAiRequestContext(snapshot, selectedEvidence, { providerId: capturedConfiguration!.providerId, preparationId: manifest.preparationId, expiresAt: manifest.expiresAt });
-			return { valid: true, executionRequest, requestContext };
+			return { valid: true, executionRequest, requestContext, canCommit: () => this.scans.get(manifest.scanId) === scanRecord && scanRecord.result === scan };
 		} catch {return false;} finally {release();}
 	}
 
@@ -794,7 +812,8 @@ export class CoreRuntime {
 		await this.ensureAiReady();
 		if (request.providerId) {
 			await this.aiService.switchProvider(request.providerId as AIProviderId);
-		} else await this.aiService.refreshModels(true);
+		}
+		await this.aiService.refreshModels(true);
 		const state = await this.aiService.getState();
 		return { models: state.models, status: state.status };
 	}

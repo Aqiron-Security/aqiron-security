@@ -52,6 +52,10 @@ export interface HypothesisAiRequestContext {
 
 /** Private Core commit handshake; cancellation is honored until beginCommit wins. */
 export interface HypothesisAiCommitControl {
+	/** Revalidate the retained approval after provider I/O and immediately before persistence. */
+	beforeCommit?(): Promise<boolean>;
+	/** Synchronous final guard for Core state that can change between revalidation and rename. */
+	canCommit?(): boolean;
 	beginCommit(): boolean;
 	markCommitted(): void;
 }
@@ -90,6 +94,8 @@ export interface SecurityHypothesis {
 	contradictions: HypothesisEvidenceRef[];
 	impact?: string;
 	verificationSteps: string[];
+	/** AI-proposed criteria that could disprove the claim; absent on legacy records. */
+	falsificationCriteria?: string[];
 	status: HypothesisStatus;
 	/** Current evidence state. A validated status records reviewer history and can coexist with stale evidence. */
 	evidenceFreshness?: 'current' | 'stale' | 'provenance-unavailable';
@@ -212,6 +218,8 @@ export interface HypothesisAiPreparedDisclosureManifest {
 		endpointClassification: 'known' | 'unknown';
 		credential: { identity: string; name: string; last4: string; updatedAt: string };
 		configurationFingerprint: string;
+		/** Digest of the exact non-secret provider request body and semantics disclosed for approval. */
+		requestFingerprint?: string;
 		capabilityPolicyVersion?: string;
 		responseMode?: 'openai-json-object' | 'openrouter-required-json-object' | 'anthropic-json-schema' | 'gemini-json-mime';
 		requestOptions: { temperature: 0; maxTokens: 2048; timeoutMs: number; retries: 0; streaming: false; maxRequestBodyBytes: number; maxResponseBodyBytes: number };
@@ -230,7 +238,7 @@ export interface HypothesisAiPreparedDisclosureManifest {
 	coreEnvelopeUtf8Bytes: number;
 	previewUtf8Bytes: number;
 	previewOnly: true;
-	executionAvailable: false;
+	executionAvailable: boolean;
 	providerCallMade: false;
 	disclosure: string;
 }

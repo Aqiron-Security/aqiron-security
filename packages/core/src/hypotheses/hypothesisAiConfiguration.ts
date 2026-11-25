@@ -4,6 +4,7 @@ import { CredentialStore } from '../shared/platform';
 import { aiSecretKeys } from '../ai/services/credentialService';
 import { HYPOTHESIS_AI_ADAPTER_LIMITS } from './hypothesisAiAdapter';
 import { AITransport } from '../ai/utils/request';
+import { hypothesisAiProposalSchemaProperties } from './hypothesisAiContract';
 
 export interface HypothesisAiRequestOptionsSnapshot {
 	temperature: 0;
@@ -40,7 +41,7 @@ export function hypothesisAiModelCapability(providerId: AIProviderId, modelId: s
 export interface HypothesisAiProviderConfigurationSnapshot {
 	providerId: AIProviderId;
 	modelId: string;
-	requestPlanVersion: 1;
+	requestPlanVersion: 2;
 	capabilityPolicyVersion: string;
 	destination: string;
 	credentialIdentity: string;
@@ -55,22 +56,28 @@ export interface HypothesisAiProviderConfigurationSnapshot {
 	preparationId?: string;
 	expiresAt?: string;
 	outboundContentFingerprint?: string;
+	/** Digest of the exact non-secret provider request approved for this preparation. */
+	requestSemanticsFingerprint?: string;
 }
 
 /** Public request metadata. Authentication is deliberately a separate, short-lived value. */
 export interface HypothesisAiBoundRequestPlan {
-	readonly planVersion: 1;
+	readonly planVersion: 2;
 	readonly preparationId: string;
 	readonly expiresAt: string;
 	readonly providerId: AIProviderId;
 	readonly modelId: string;
 	readonly destination: string;
 	readonly method: 'POST';
+	readonly authenticationHeaderName: string;
 	readonly headers: Readonly<Record<string, string>>;
 	readonly body: string;
 	readonly contentFingerprint: string;
 	readonly requestBodyFingerprint: string;
 	readonly configurationFingerprint: string;
+	readonly responseMode: HypothesisAiResponseMode;
+	readonly capabilityPolicyVersion: string;
+	readonly requestSemanticsFingerprint: string;
 	readonly requestOptions: Readonly<HypothesisAiRequestOptionsSnapshot>;
 }
 
@@ -79,6 +86,14 @@ export interface HypothesisAiBoundExecutionRequest {
 	/** Secret auth value is not part of plan, JSON serialization, or diagnostics. */
 	authentication: { headerName: string; headerValue: string };
 }
+
+type HypothesisAiRequestPlanInput = {
+	providerConfiguration: HypothesisAiProviderConfigurationSnapshot;
+	preparationId: string;
+	expiresAt: string;
+	canonicalEnvelope: string;
+	now?: number;
+};
 
 const PROVIDER_DESTINATIONS: Record<Exclude<AIProviderId, 'openrouter'>, string> = {
 	openai: 'https://api.openai.com/v1/chat/completions',
@@ -150,7 +165,7 @@ async function resolveConfigurationAndCredential(input: {
 		maxResponseBodyBytes: HYPOTHESIS_AI_ADAPTER_LIMITS.maxResponseBytes,
 	};
 	const nonSecret = {
-		version: 1, requestPlanVersion: 1 as const, capabilityPolicyVersion: HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION, providerId: input.providerId, modelId: input.modelId, destination,
+		version: 1, requestPlanVersion: 2 as const, capabilityPolicyVersion: HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION, providerId: input.providerId, modelId: input.modelId, destination,
 		// Selection is an invalidation marker only. The request remains pinned to
 		// the explicit provider/model above and is never rerouted by this setting.
 		configuredSelection: { providerId: settings.selectedProvider, modelId: settings.selectedModel ?? '' },
@@ -180,37 +195,21 @@ export async function buildHypothesisAiBoundRequest(input: {
 	if (!input.preparationId || !Number.isFinite(Date.parse(input.expiresAt)) || Date.parse(input.expiresAt) <= Date.now()
 		|| input.providerConfiguration.preparationId !== input.preparationId
 		|| input.providerConfiguration.expiresAt !== input.expiresAt
+		|| !/^[a-f0-9]{64}$/.test(input.providerConfiguration.requestSemanticsFingerprint ?? '')
 		|| input.providerConfiguration.outboundContentFingerprint !== crypto.createHash('sha256').update(input.canonicalEnvelope, 'utf8').digest('hex')) {
 		throw new Error('Hypothesis request plan is unavailable.');
 	}
 	const { snapshot, secret } = await resolveConfigurationAndCredential({ store: input.store, providerId: input.providerConfiguration.providerId, modelId: input.providerConfiguration.modelId, credentialVersionKey: input.credentialVersionKey });
 	if (!sameHypothesisAiProviderConfiguration(snapshot, input.providerConfiguration)) {throw new Error('Hypothesis request plan is stale.');}
-	let envelope: unknown;
-	try {envelope = JSON.parse(input.canonicalEnvelope);} catch {throw new Error('Hypothesis request plan is invalid.');}
-	if (!isRecord(envelope) || envelope.providerId !== snapshot.providerId || envelope.modelId !== snapshot.modelId || !isRecord(envelope.content)) {throw new Error('Hypothesis request plan is inconsistent.');}
-	const contentText = JSON.stringify(envelope.content);
-	const bodyValue = providerBody(snapshot.providerId, snapshot.modelId, contentText, snapshot.requestOptions);
-	const body = JSON.stringify(bodyValue);
-	if (Buffer.byteLength(body, 'utf8') > snapshot.requestOptions.maxRequestBodyBytes) {throw new Error('Hypothesis request plan exceeds its size limit.');}
-	const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
+	const plan = createHypothesisAiBoundRequestPlan(input);
 	let headerName: string;
 	let headerValue: string;
 	switch (snapshot.providerId) {
 		case 'openai': headerName = 'Authorization'; headerValue = `Bearer ${secret}`; break;
-		case 'openrouter': headerName = 'Authorization'; headerValue = `Bearer ${secret}`; headers['HTTP-Referer'] = 'https://aqiron-security.local'; headers['X-Title'] = 'Aqiron Security'; break;
-		case 'claude': headerName = 'x-api-key'; headerValue = secret; headers['anthropic-version'] = '2023-06-01'; break;
+		case 'openrouter': headerName = 'Authorization'; headerValue = `Bearer ${secret}`; break;
+		case 'claude': headerName = 'x-api-key'; headerValue = secret; break;
 		case 'gemini': headerName = 'x-goog-api-key'; headerValue = secret; break;
 	}
-	const plan: HypothesisAiBoundRequestPlan = {
-		planVersion: 1, preparationId: input.preparationId, expiresAt: input.expiresAt, providerId: snapshot.providerId, modelId: snapshot.modelId,
-		destination: snapshot.destination, method: 'POST', headers, body,
-		contentFingerprint: input.providerConfiguration.outboundContentFingerprint!, configurationFingerprint: snapshot.configurationFingerprint,
-		requestBodyFingerprint: crypto.createHash('sha256').update(body, 'utf8').digest('hex'),
-		requestOptions: { ...snapshot.requestOptions },
-	};
-	Object.freeze(plan.headers);
-	Object.freeze(plan.requestOptions);
-	Object.freeze(plan);
 	const executionRequest = { plan, authentication: { headerName, headerValue } };
 	Object.defineProperty(executionRequest, 'authentication', { value: executionRequest.authentication, enumerable: false, writable: false });
 	Object.freeze(executionRequest.authentication);
@@ -218,12 +217,72 @@ export async function buildHypothesisAiBoundRequest(input: {
 	return executionRequest;
 }
 
+/** Builds the exact provider request representation without reading or retaining credentials. */
+export function createHypothesisAiBoundRequestPlan(input: HypothesisAiRequestPlanInput): HypothesisAiBoundRequestPlan {
+	const configuration = input.providerConfiguration;
+	const contentFingerprint = crypto.createHash('sha256').update(input.canonicalEnvelope, 'utf8').digest('hex');
+	if (!input.preparationId || !Number.isFinite(Date.parse(input.expiresAt)) || Date.parse(input.expiresAt) <= (input.now ?? Date.now())
+		|| configuration.preparationId !== input.preparationId || configuration.expiresAt !== input.expiresAt
+		|| configuration.outboundContentFingerprint !== contentFingerprint) {throw new Error('Hypothesis request plan is unavailable.');}
+	let envelope: unknown;
+	try {envelope = JSON.parse(input.canonicalEnvelope);} catch {throw new Error('Hypothesis request plan is invalid.');}
+	if (!isRecord(envelope) || envelope.providerId !== configuration.providerId || envelope.modelId !== configuration.modelId || !isRecord(envelope.content)) {throw new Error('Hypothesis request plan is inconsistent.');}
+	const capability = hypothesisAiModelCapability(configuration.providerId, configuration.modelId);
+	if (!capability.supported || capability.responseMode !== configuration.responseMode || configuration.capabilityPolicyVersion !== HYPOTHESIS_AI_CAPABILITY_POLICY_VERSION) {throw new Error('Hypothesis request plan capability is unavailable.');}
+	const body = JSON.stringify(providerBody(configuration.providerId, configuration.modelId, JSON.stringify(envelope.content), configuration.requestOptions));
+	if (Buffer.byteLength(body, 'utf8') > configuration.requestOptions.maxRequestBodyBytes) {throw new Error('Hypothesis request plan exceeds its size limit.');}
+	const headers = providerHeaders(configuration.providerId);
+	const requestOptions = Object.freeze({ ...configuration.requestOptions });
+	const digestFields = {
+		planVersion: 2 as const, preparationId: input.preparationId, expiresAt: input.expiresAt,
+		providerId: configuration.providerId, modelId: configuration.modelId, destination: configuration.destination, method: 'POST' as const,
+		authenticationHeaderName: authenticationHeaderNameFor(configuration.providerId), headers, body, contentFingerprint, configurationFingerprint: configuration.configurationFingerprint,
+		responseMode: configuration.responseMode, capabilityPolicyVersion: configuration.capabilityPolicyVersion, requestOptions,
+	};
+	const plan: HypothesisAiBoundRequestPlan = {
+		...digestFields,
+		requestBodyFingerprint: crypto.createHash('sha256').update(body, 'utf8').digest('hex'),
+		requestSemanticsFingerprint: hypothesisAiRequestSemanticsFingerprint(digestFields),
+	};
+	Object.freeze(plan);
+	if (configuration.requestSemanticsFingerprint && configuration.requestSemanticsFingerprint !== plan.requestSemanticsFingerprint) {throw new Error('Hypothesis request plan is stale.');}
+	return plan;
+}
+
+function providerHeaders(providerId: AIProviderId): Readonly<Record<string, string>> {
+	const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
+	if (providerId === 'openrouter') {headers['HTTP-Referer'] = 'https://aqiron-security.local'; headers['X-Title'] = 'Aqiron Security';}
+	if (providerId === 'claude') {headers['anthropic-version'] = '2023-06-01';}
+	return Object.freeze(headers);
+}
+
+function authenticationHeaderNameFor(providerId: AIProviderId): string {
+	return providerId === 'claude' ? 'x-api-key' : providerId === 'gemini' ? 'x-goog-api-key' : 'Authorization';
+}
+
+/** The single canonical digest representation used at preparation, approval, execution, and send. */
+export function hypothesisAiRequestSemanticsFingerprint(plan: Pick<HypothesisAiBoundRequestPlan,
+	'planVersion' | 'preparationId' | 'expiresAt' | 'providerId' | 'modelId' | 'destination' | 'method' | 'authenticationHeaderName' | 'headers' | 'body' | 'contentFingerprint' | 'configurationFingerprint' | 'responseMode' | 'capabilityPolicyVersion' | 'requestOptions'>): string {
+	return crypto.createHash('sha256').update(JSON.stringify({
+		planVersion: plan.planVersion, preparationId: plan.preparationId, expiresAt: plan.expiresAt,
+		providerId: plan.providerId, modelId: plan.modelId, destination: plan.destination, method: plan.method,
+		authenticationHeaderName: plan.authenticationHeaderName,
+		headers: plan.headers, body: plan.body, contentFingerprint: plan.contentFingerprint,
+		configurationFingerprint: plan.configurationFingerprint, responseMode: plan.responseMode,
+		capabilityPolicyVersion: plan.capabilityPolicyVersion, requestOptions: plan.requestOptions,
+	}), 'utf8').digest('hex');
+}
+
 /** Apply a plan verbatim; callers provide only the once-verified, short-lived auth value. */
-export async function sendHypothesisAiBoundRequest(transport: AITransport, request: HypothesisAiBoundExecutionRequest, signal?: AbortSignal): Promise<Awaited<ReturnType<AITransport['request']>>> {
+export async function sendHypothesisAiBoundRequest(transport: AITransport, request: HypothesisAiBoundExecutionRequest, signal?: AbortSignal, onTransportInvoked?: () => void): Promise<Awaited<ReturnType<AITransport['request']>>> {
 	const { plan, authentication } = request;
 	if (!Number.isFinite(Date.parse(plan.expiresAt)) || Date.parse(plan.expiresAt) <= Date.now()) {throw new Error('Hypothesis request plan expired.');}
 	if (signal?.aborted) {throw new Error('Hypothesis request cancelled.');}
-	if (plan.method !== 'POST' || crypto.createHash('sha256').update(plan.body, 'utf8').digest('hex') !== plan.requestBodyFingerprint) {throw new Error('Hypothesis request plan is invalid.');}
+	if (plan.method !== 'POST' || authentication.headerName !== plan.authenticationHeaderName || crypto.createHash('sha256').update(plan.body, 'utf8').digest('hex') !== plan.requestBodyFingerprint
+		|| hypothesisAiRequestSemanticsFingerprint(plan) !== plan.requestSemanticsFingerprint) {throw new Error('Hypothesis request plan is invalid.');}
+	// This marker means only that the configured adapter was invoked. It does not
+	// establish that a remote server received or processed the request.
+	onTransportInvoked?.();
 	return await transport.request(plan.destination, {
 		method: plan.method, headers: { ...plan.headers, [authentication.headerName]: authentication.headerValue },
 		serializedBody: plan.body, timeoutMs: plan.requestOptions.timeoutMs, abortSignal: signal,
@@ -253,14 +312,7 @@ function responseModeFor(providerId: AIProviderId): HypothesisAiResponseMode {
 
 // Provider-compatible structural shape only. Core's strict validator remains
 // authoritative for limits, aliases, and semantic rules after parsing.
-const proposalProperties = {
-	title: { type: 'string' }, claim: { type: 'string' }, evidenceRationale: { type: 'string' },
-	supportingEvidenceAliases: { type: 'array', items: { type: 'string' } },
-	contradictoryEvidenceAliases: { type: 'array', items: { type: 'string' } },
-	verificationCriteria: { type: 'array', items: { type: 'string' } },
-	falsificationCriteria: { type: 'array', items: { type: 'string' } },
-	uncertainties: { type: 'array', items: { type: 'string' } },
-};
+const proposalProperties = hypothesisAiProposalSchemaProperties();
 const hypothesisProposalJsonSchema = {
 	type: 'object',
 	properties: {

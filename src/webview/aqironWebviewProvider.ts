@@ -16,8 +16,10 @@ import { CoreClient } from '../../packages/core/src/client';
 import { formatAgentScanCoverage, formatSkippedFileCount, normalizeScanCoverage, statsForHistoricalSnapshot, statsWithoutSelectedSnapshot } from '../shared/scanCoverage';
 import { UnifiedFinding, findingToIssue } from '../../packages/core/src/shared/finding';
 import { buildWorkspaceRecommendations } from '../agents/recommendations';
-import { HypothesisAiPrepareResult } from '../../packages/core/src/hypotheses/contracts';
+import { HypothesisAiPrepareResult, HypothesisReviewInput, SecurityHypothesis } from '../../packages/core/src/hypotheses/contracts';
 import { isHypothesisAiPrepareMessage, isHypothesisAiResponseMessage, isWebviewMessage } from './hypothesisAiConsentMessages';
+import { HypothesisAiDecisionCoordinator, lifecycleFailureMessage } from './hypothesisAiDecision';
+import { HypothesisAiExecutionCoordinator } from './hypothesisAiExecution';
 
 export type AqironWebviewSection = 'agent' | 'scan' | 'threats' | 'reports' | 'settings' | 'aiAgent';
 export type WorkspaceScanMode = 'quick' | 'deep' | 'analysis';
@@ -26,7 +28,8 @@ type WebviewThreatSnapshot = ThreatSnapshot & { coverageDiagnosticsAvailable?: b
 interface WebviewState {
 	issues: AqironIssue[];
 	coreScanId?: string;
-	hypothesisAiConsent?: { manifest?: import('../../packages/core/src/hypotheses/contracts').HypothesisAiPreparedDisclosureManifest; contentFingerprint?: string; result?: import('../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult; executionResult?: import('../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult<{ proposalCount: number }>; executionPending?: boolean; message?: string };
+	hypotheses?: { items: SecurityHypothesis[]; loading: boolean; error?: string; generated?: boolean };
+	hypothesisAiConsent?: { manifest?: import('../../packages/core/src/hypotheses/contracts').HypothesisAiPreparedDisclosureManifest; contentFingerprint?: string; result?: import('../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult; executionResult?: import('../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult<{ proposalCount: number }>; executionPending?: boolean; executionOutcomeUnconfirmed?: boolean; decisionPending?: boolean; decisionOutcomeUnconfirmed?: boolean; message?: string };
 	stats: AqironWorkspaceStats;
 	workspace: WorkspaceProfile;
 	branches: string[];
@@ -170,7 +173,10 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 	private readonly agentOutput = vscode.window.createOutputChannel('Aqiron Agent Tools');
 	private readonly activeAgentScans = new Map<string, string>();
 	private hypothesisAiRequestBusy = false;
+	private readonly hypothesisAiDecisions = new HypothesisAiDecisionCoordinator();
+	private readonly hypothesisAiExecutions = new HypothesisAiExecutionCoordinator();
 	private hypothesisAiExecutionRequestId?: string;
+	private hypothesisListBusy = false;
 	private state: WebviewState = {
 		issues: [],
 		zoom: 1,
@@ -336,6 +342,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			...this.state,
 			coreScanId,
 			hypothesisAiConsent: coreScanId !== this.state.coreScanId ? undefined : this.state.hypothesisAiConsent,
+			hypotheses: this.state.hypotheses ? { ...this.state.hypotheses, items: coreScanId !== this.state.coreScanId ? this.state.hypotheses.items.map((item) => ({ ...item, evidenceFreshness: 'stale' as const, evidence: item.evidence.map((reference) => ({ ...reference, freshness: 'stale' as const })), contradictions: item.contradictions.map((reference) => ({ ...reference, freshness: 'stale' as const })) })) : this.state.hypotheses.items } : undefined,
 			issues: [...issues],
 			stats: { ...this.state.stats, ...stats },
 			pipeline: report ? { ...this.state.pipeline, lastReport: report } : this.state.pipeline,
@@ -357,6 +364,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			void this.persistThreatSnapshot(this.state.issues, this.state.stats.filesScanned, scanMode);
 		}
 		this.postState();
+		if (stats?.scanStatus === 'Complete' && coreScanId) {void this.refreshHypotheses();}
 	}
 
 	setScanStatus(scanStatus: AqironWorkspaceStats['scanStatus']): void {
@@ -377,6 +385,15 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			case 'prepareHypothesisAi':
 				await this.prepareHypothesisAiFromWebview(payload);
 				return;
+			case 'refreshHypotheses':
+				await this.refreshHypotheses();
+				return;
+			case 'generateHypotheses':
+				await this.generateHypothesesFromWebview();
+				return;
+			case 'reviewHypothesis':
+				await this.reviewHypothesisFromWebview(payload);
+				return;
 			case 'approveHypothesisAi':
 				await this.respondToHypothesisAiFromWebview('approve', payload);
 				return;
@@ -391,6 +408,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 				return;
 			case 'ready':
 				await this.refreshAiState();
+				if (this.state.coreScanId && this.state.stats.scanStatus === 'Complete') {await this.refreshHypotheses();}
 				this.postState();
 				return;
 			case 'focus':
@@ -576,6 +594,63 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 		});
 	}
 
+	private async refreshHypotheses(): Promise<void> {
+		const root = this.state.workspace.root;
+		if (!root || this.hypothesisListBusy) {return;}
+		this.hypothesisListBusy = true;
+		this.state = { ...this.state, hypotheses: { ...(this.state.hypotheses ?? { items: [] }), loading: true, error: undefined } };
+		this.postState();
+		try {
+			const result = await this.coreClient.listHypotheses({ workspaceRoot: root, includeStale: true });
+			if (this.state.workspace.root === root) {this.state = { ...this.state, hypotheses: { items: result.hypotheses, loading: false } };}
+		} catch {
+			if (this.state.workspace.root === root) {this.state = { ...this.state, hypotheses: { ...(this.state.hypotheses ?? { items: [] }), loading: false, error: 'Core could not load hypotheses for this workspace.' } };}
+		} finally {this.hypothesisListBusy = false; this.postState();}
+	}
+
+	private async generateHypothesesFromWebview(): Promise<void> {
+		const root = this.state.workspace.root;
+		const scanId = this.state.coreScanId;
+		if (!root || !scanId || this.state.stats.scanStatus !== 'Complete' || this.hypothesisListBusy) {return;}
+		this.hypothesisListBusy = true;
+		this.state = { ...this.state, hypotheses: { ...(this.state.hypotheses ?? { items: [] }), loading: true, error: undefined, generated: undefined } };
+		this.postState();
+		try {
+			const result = await this.coreClient.generateHypotheses({ workspaceRoot: root, scanId });
+			if (this.state.workspace.root === root && this.state.coreScanId === scanId) {
+				const listed = await this.coreClient.listHypotheses({ workspaceRoot: root, includeStale: true });
+				this.state = { ...this.state, hypotheses: { items: listed.hypotheses, loading: false, generated: result.status === 'generated', ...(result.diagnostics.length ? { error: result.diagnostics.map((item) => item.message).join(' ') } : {}) } };
+			}
+		} catch {
+			this.state = { ...this.state, hypotheses: { ...(this.state.hypotheses ?? { items: [] }), loading: false, error: 'Core could not generate hypotheses from the current scan.' } };
+		} finally {this.hypothesisListBusy = false; this.postState();}
+	}
+
+	private async reviewHypothesisFromWebview(payload: unknown): Promise<void> {
+		if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {return;}
+		const input = payload as Record<string, unknown>;
+		if (Object.keys(input).some((key) => key !== 'hypothesisId' && key !== 'action') || typeof input.hypothesisId !== 'string' || typeof input.action !== 'string') {return;}
+		const hypothesis = this.state.hypotheses?.items.find((item) => item.id === input.hypothesisId);
+		const allowed: Partial<Record<SecurityHypothesis['status'], readonly HypothesisReviewInput['action'][]>> = {
+			proposed: ['investigate', 'validate', 'reject', 'dismiss'],
+			investigating: ['validate', 'reject', 'dismiss'],
+			dismissed: ['reopen'],
+		};
+		if (!hypothesis || !allowed[hypothesis.status]?.includes(input.action as HypothesisReviewInput['action']) || !this.state.workspace.root) {return;}
+		try {
+			const result = await this.coreClient.reviewHypothesis({ workspaceRoot: this.state.workspace.root, hypothesisId: hypothesis.id, action: input.action as HypothesisReviewInput['action'] });
+			await this.refreshHypotheses();
+			if (!result.applied) {
+				const error = result.diagnostic === 'stale-evidence' ? 'Evidence is stale. Refresh it with a new scan before reviewing this hypothesis.' : result.diagnostic === 'provenance-unavailable' ? 'Evidence provenance is unavailable. Core did not apply the review action.' : 'Core did not apply the review action.';
+				this.state = { ...this.state, hypotheses: { ...(this.state.hypotheses ?? { items: [], loading: false }), error } };
+				this.postState();
+			}
+		} catch {
+			this.state = { ...this.state, hypotheses: { ...(this.state.hypotheses ?? { items: [], loading: false }), error: 'Core could not apply that review action. Refresh and check the current evidence state.' } };
+			this.postState();
+		}
+	}
+
 	private async handleWebviewMessage(command: string, payload?: unknown): Promise<void> {
 		try {
 			await this.handleMessage(command, payload);
@@ -616,37 +691,40 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 	private async respondToHypothesisAiFromWebview(action: 'approve' | 'deny', payload: unknown): Promise<void> {
 		if (this.hypothesisAiRequestBusy || !isHypothesisAiResponseMessage(payload)) {return;}
 		const retained = this.state.hypothesisAiConsent;
-		if (!retained?.manifest || !retained.contentFingerprint || retained.manifest.preparationId !== payload.preparationId || retained.contentFingerprint !== payload.contentFingerprint || retained.result) {return;}
+		if (!retained?.manifest || !retained.contentFingerprint || retained.manifest.preparationId !== payload.preparationId || retained.contentFingerprint !== payload.contentFingerprint || retained.result || retained.decisionPending || retained.decisionOutcomeUnconfirmed) {return;}
 		this.hypothesisAiRequestBusy = true;
 		try {
-			const result = action === 'approve'
-				? await this.coreClient.approveHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint)
-				: await this.coreClient.denyHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint);
-			this.state = { ...this.state, hypothesisAiConsent: { ...retained, result, ...(!result.ok ? { message: lifecycleFailureMessage(result.state, result.reason) } : {}) } };
-		} catch {
-			this.state = { ...this.state, hypothesisAiConsent: { ...retained, message: 'Core could not record this decision. It was not shown as approved.' } };
-		} finally { this.hypothesisAiRequestBusy = false; this.postState(); }
+			await this.hypothesisAiDecisions.submit({
+				action,
+				preparationId: retained.manifest.preparationId,
+				contentFingerprint: retained.contentFingerprint,
+				getConsent: () => this.state.hypothesisAiConsent,
+				setConsent: (consent) => {this.state = { ...this.state, hypothesisAiConsent: consent};},
+				request: () => action === 'approve'
+					? this.coreClient.approveHypothesisAiPreparation(retained.manifest!.preparationId, retained.contentFingerprint!)
+					: this.coreClient.denyHypothesisAiPreparation(retained.manifest!.preparationId, retained.contentFingerprint!),
+				publish: () => this.postState(),
+			});
+		} finally { this.hypothesisAiRequestBusy = false; }
 	}
 
 	private async executeHypothesisAiFromWebview(payload: unknown): Promise<void> {
 		if (this.hypothesisAiRequestBusy || !isHypothesisAiResponseMessage(payload)) {return;}
 		const retained = this.state.hypothesisAiConsent;
-		if (!retained?.manifest || !retained.contentFingerprint || retained.manifest.preparationId !== payload.preparationId || retained.contentFingerprint !== payload.contentFingerprint || retained.result?.state !== 'approved' || retained.executionResult) {return;}
+		if (!retained?.manifest || !retained.contentFingerprint || retained.manifest.preparationId !== payload.preparationId || retained.contentFingerprint !== payload.contentFingerprint || retained.result?.state !== 'approved' || retained.executionResult || retained.executionOutcomeUnconfirmed) {return;}
 		this.hypothesisAiRequestBusy = true;
 		const requestId = `hypothesis-ai-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 		this.hypothesisAiExecutionRequestId = requestId;
-		this.state = { ...this.state, hypothesisAiConsent: { ...retained, executionPending: true, message: 'Core is checking the release gate. No provider request is assumed.' } };
-		this.postState();
 		try {
-			const executionResult = await this.coreClient.executeHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint, requestId);
-			const message = executionResult.ok && executionResult.state === 'succeeded'
-				? `Core completed synthesis and persisted ${executionResult.value.proposalCount} validated proposal(s).`
-				: !executionResult.ok && executionResult.reason === 'executor-disabled'
-					? 'Execution is disabled by this release gate. No provider request was made.'
-					: `Execution ${executionResult.state}: ${executionResult.ok ? 'complete' : executionResult.reason}.`;
-			this.state = { ...this.state, hypothesisAiConsent: { ...retained, executionResult, executionPending: false, message } };
-		} catch {
-			this.state = { ...this.state, hypothesisAiConsent: { ...retained, executionPending: false, message: 'Core did not confirm execution. The result was not shown as completed.' } };
+			await this.hypothesisAiExecutions.submit({
+				preparationId: retained.manifest.preparationId,
+				contentFingerprint: retained.contentFingerprint,
+				getConsent: () => this.state.hypothesisAiConsent,
+				setConsent: (consent) => {this.state = { ...this.state, hypothesisAiConsent: consent};},
+				request: () => this.coreClient.executeHypothesisAiPreparation(retained.manifest!.preparationId, retained.contentFingerprint!, requestId),
+				publish: () => this.postState(),
+			});
+			if (this.state.hypothesisAiConsent?.executionResult?.ok && this.state.hypothesisAiConsent.executionResult.state === 'succeeded') {await this.refreshHypotheses();}
 		} finally {
 			this.hypothesisAiExecutionRequestId = undefined;
 			this.hypothesisAiRequestBusy = false;
@@ -1769,6 +1847,7 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			memory: nextMemory,
 		};
 		this.postState();
+		void this.refreshHypotheses();
 		await this.refreshRagState();
 		if (!hasGit) {
 			void this.showGitRecommendedPrompt(root);
@@ -1833,6 +1912,8 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 			branches: this.state.branches,
 			stats: this.state.stats,
 			coreScanId: this.state.coreScanId,
+			hypothesisAiConsent: this.state.hypothesisAiConsent,
+			hypotheses: this.state.hypotheses,
 			counts,
 			issues,
 			suggestions: this.state.rag.suggestionsGenerated ? buildWorkspaceRecommendations(issues, this.state.rag.suggestions) : [],
@@ -1913,13 +1994,6 @@ export class AqironWebviewProvider implements vscode.WebviewViewProvider, Aqiron
 </body>
 </html>`;
 	}
-}
-
-function lifecycleFailureMessage(state: string, reason: string): string {
-	if (state === 'expired') {return 'This disclosure expired. Prepare a fresh disclosure before deciding.';}
-	if (state === 'invalidated') {return 'The scan evidence or provider configuration changed. Prepare a fresh disclosure.';}
-	if (state === 'denied') {return 'This preparation was denied.';}
-	return `Core did not record this decision (${reason}). Current state: ${state}.`;
 }
 
 function readSkipDiagnostics(skippedValue: unknown, reasonsValue: unknown) {

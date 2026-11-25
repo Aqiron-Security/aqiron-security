@@ -141,6 +141,25 @@ const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'co
 		}
 	});
 
+	test('ignores a late response after the timed-out request was removed', async () => {
+		const child = new FakeCoreChild();
+		const restore = installSpawn(() => child);
+		const manager = new CoreProcessManager({ clientVersion: 'test', runtimePath: 'core-runtime.js', restartOnCrash: false });
+		try {
+			await manager.start();
+			const error = await manager.request('core.info', undefined, 20, 'late-response-request-id').then(() => undefined, (reason: { code?: string }) => reason);
+			assert.strictEqual(error?.code, 'CORE_REQUEST_TIMEOUT');
+			const pending = (manager as unknown as { pending: Map<string, unknown> }).pending;
+			assert.strictEqual(pending.has('late-response-request-id'), false);
+			const staleResponse = `${JSON.stringify({ id: 'late-response-request-id', type: 'response', success: true, result: { coreVersion: 'late' } })}\n`;
+			child.stdout.emit('data', staleResponse);
+			assert.strictEqual(pending.has('late-response-request-id'), false);
+		} finally {
+			restore();
+			await manager.stop();
+		}
+	});
+
 	test('rejects pending requests and automatically restarts after a crash', async () => {
 		const children: FakeCoreChild[] = [];
 		const restore = installSpawn(() => {

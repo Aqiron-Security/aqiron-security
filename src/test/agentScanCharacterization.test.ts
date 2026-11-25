@@ -120,7 +120,7 @@ suite('AI agent scan characterization', () => {
 			const missingWorkspace = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1 });
 			const missingWorkspaceResult = await missingWorkspace.runWorkspaceScan();
 			assert.match(missingWorkspaceResult.content, /coverage diagnostics are unavailable/);
-			assert.match(missingWorkspaceResult.content, /full coverage could not be confirmed/);
+			assert.match(missingWorkspaceResult.content, /full coverage could not be confirmed/i);
 			assert.equal(missingWorkspaceResult.stats?.coverageDiagnosticsAvailable, false);
 
 			const invalidExplicit = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skippedFiles: -1, skipReasons: { 'line-limit': 1 } });
@@ -145,7 +145,7 @@ suite('AI agent scan characterization', () => {
 			const missingSecrets = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1 });
 			const missingSecretsResult = await missingSecrets.runSecretsScan();
 			assert.match(missingSecretsResult.content, /Secret scan completed, but coverage diagnostics are unavailable/);
-			assert.match(missingSecretsResult.content, /full coverage could not be confirmed/);
+			assert.match(missingSecretsResult.content, /full coverage could not be confirmed/i);
 
 			const invalidSecrets = harness(undefined, () => undefined, [], undefined, { findings: [], filesScanned: 2, durationMs: 1, skippedFiles: Number.NaN, skipReasons: { 'line-limit': 1, '<img onerror=alert(1)>': 9, 'bad\u001b[31m': 2, 'size-limit': Number.MAX_VALUE } });
 			const invalidSecretsResult = await invalidSecrets.runSecretsScan();

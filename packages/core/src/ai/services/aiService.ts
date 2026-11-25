@@ -58,7 +58,6 @@ export class AIService {
 
 	async initialize(): Promise<void> {
 		await this.prepare();
-		await this.refreshModels(false);
 	}
 
 	async prepare(): Promise<void> {
@@ -83,14 +82,9 @@ export class AIService {
 		this.modelError = undefined;
 		try {
 			this.models = await this.modelManager.getModels(this.settings.selectedProvider, force);
-			this.status = await this.checkConnection();
-			const selectedExists = Boolean(this.settings.selectedModel && this.models.some((model) => model.id === this.settings.selectedModel));
-			if (!selectedExists) {
-				const recentModel = this.settings.recentModelIds?.find((modelId) => this.models.some((model) => model.id === modelId));
-				if (recentModel) {
-					await this.selectModel(recentModel);
-				}
-			}
+			// The successful model-list call itself establishes connectivity. A second
+			// validateConnection call would repeat the same provider request.
+			this.status = { providerId: this.settings.selectedProvider, connected: true, message: `Connected to ${this.registry.getCurrentProvider().name}`, checkedAt: new Date().toISOString() };
 		} catch (error) {
 			this.models = [];
 			this.modelError = normalizeProviderError(error);
@@ -109,9 +103,6 @@ export class AIService {
 		const credential = this.settings.apiCredentials?.find((api) => api.providerId === providerId);
 		await this.saveSettings({ ...this.settings, selectedProvider: providerId, activeApiCredentialId: credential?.id });
 		await this.registry.switchProvider(providerId);
-		// Provider switches commonly happen immediately after adding or changing
-		// credentials. Do not reuse an empty or stale model cache in that case.
-		await this.refreshModels(true);
 	}
 
 	async *chat(input: AIChatInput): AsyncGenerator<StreamChunk> {
@@ -245,16 +236,6 @@ export class AIService {
 		];
 	}
 
-	private async checkConnection() {
-		const provider = this.registry.getCurrentProvider();
-		const connected = await provider.validateConnection();
-		return {
-			providerId: this.settings.selectedProvider,
-			connected,
-			message: connected ? `Connected to ${provider.name}` : `${provider.name} is not connected`,
-			checkedAt: new Date().toISOString(),
-		};
-	}
 }
 
 function truncate(value: string, max: number): string {

@@ -117,7 +117,7 @@ export class HypothesisStoreService {
 						{ kind: 'freshness', value: 'current', detail: 'Evidence was current in the bound Core snapshot at validation.' },
 						{ kind: 'preconditions', value: 'unknown', detail: 'AI-generated claims require independent reviewer verification.' },
 					], policyVersion: 1 }, assumptions: proposal.uncertainties.slice(0, 10), contradictions: proposal.contradictoryEvidence.map((ref) => ({ ...ref })),
-					verificationSteps: [...proposal.verificationCriteria, ...proposal.falsificationCriteria].slice(0, 10), status: 'proposed', evidenceFreshness: 'current',
+					verificationSteps: [...proposal.verificationCriteria], falsificationCriteria: [...proposal.falsificationCriteria], status: 'proposed', evidenceFreshness: 'current',
 					createdAt: timestamp, updatedAt: timestamp, snapshotId: snapshot.id, relatedFindingIds: firstFinding ? [firstFinding.findingId!] : [],
 					relatedRuleIds: proposal.supportingEvidence.flatMap((ref) => ref.ruleId ? [ref.ruleId] : []).slice(0, 100), relatedHypothesisIds: [],
 					origin: { kind: 'ai-proposal', preparationId, providerId, modelId },
@@ -142,10 +142,15 @@ export class HypothesisStoreService {
 		const invalidHypotheses = new Set<string>();
 		const provenanceUnavailableHypotheses = new Set<string>();
 		for (const hypothesis of active) {
-			const sourceSpans = hypothesis.evidence.filter((item) => item.kind === 'source-span');
-			if (sourceSpans.length === 0) {provenanceUnavailableHypotheses.add(hypothesis.id); continue;}
+			// Contradictions are independent persisted evidence references. Check them
+			// too, even when older records did not duplicate them in `evidence`.
+			const allReferences = [...hypothesis.evidence, ...hypothesis.contradictions];
+			if (allReferences.some((ref) => ref.freshness !== 'current')) {invalidHypotheses.add(hypothesis.id);}
+			const supportingSourceSpans = hypothesis.evidence.filter((item) => item.kind === 'source-span');
+			if (supportingSourceSpans.length === 0) {provenanceUnavailableHypotheses.add(hypothesis.id); continue;}
+			if (supportingSourceSpans.every((item) => item.freshness !== 'current')) {invalidHypotheses.add(hypothesis.id);}
+			const sourceSpans = allReferences.filter((item) => item.kind === 'source-span');
 			const currentSourceSpans = sourceSpans.filter((item) => item.freshness === 'current');
-			if (currentSourceSpans.length === 0) {invalidHypotheses.add(hypothesis.id); continue;}
 			for (const ref of currentSourceSpans) {
 				if (!ref.file || !ref.contentHash || !ref.fileContentHash || !Number.isInteger(ref.startLine) || !Number.isInteger(ref.endLine) || ref.startLine! < 1 || ref.endLine! < ref.startLine!) {invalidHypotheses.add(hypothesis.id); continue;}
 				const file = path.resolve(root, ref.file);
@@ -338,7 +343,7 @@ function emptyStore(): HypothesisStore { return { version: 1, scoringPolicyVersi
 function storePath(root: string): string { return path.join(path.resolve(root), '.aqiron-security', 'hypotheses.json'); }
 function staleEvidence(hypothesis: SecurityHypothesis, freshness: 'stale' | 'provenance-unavailable' = 'stale'): SecurityHypothesis {
 	const historical = hypothesis.status === 'validated' || hypothesis.status === 'rejected';
-	return { ...hypothesis, evidenceFreshness: freshness, evidence: hypothesis.evidence.map((ref) => ({ ...ref, freshness: 'stale' })), updatedAt: new Date().toISOString(), ...(!historical ? { status: 'stale' as const } : {}) };
+	return { ...hypothesis, evidenceFreshness: freshness, evidence: hypothesis.evidence.map((ref) => ({ ...ref, freshness: 'stale' })), contradictions: hypothesis.contradictions.map((ref) => ({ ...ref, freshness: 'stale' })), updatedAt: new Date().toISOString(), ...(!historical ? { status: 'stale' as const } : {}) };
 }
 function hasCurrentSourceProvenance(hypothesis: SecurityHypothesis): boolean {
 	return hypothesis.evidence.some((ref) => ref.kind === 'source-span' && ref.freshness === 'current' && Boolean(ref.file && ref.contentHash && ref.fileContentHash && ref.findingId) && Number.isInteger(ref.startLine) && Number.isInteger(ref.endLine) && ref.startLine! >= 1 && ref.endLine! >= ref.startLine!);
@@ -552,8 +557,9 @@ function isHypothesis(value: unknown): value is SecurityHypothesis {
 		|| !Array.isArray(value.evidence) || value.evidence.length === 0 || value.evidence.length > 20
 		|| !Array.isArray(value.contradictions) || value.contradictions.length > 20
 		|| !isStringList(value.assumptions, 10, 500) || !isStringList(value.verificationSteps, 10, 500)
+		|| (value.falsificationCriteria !== undefined && !isStringList(value.falsificationCriteria, 10, 300))
 		|| !isAsset(value.asset) || !isConfidence(value.confidence)) {return false;}
-	const allowedKeys = new Set(['id','title','description','weakness','attackPath','asset','evidence','rationale','confidence','assumptions','contradictions','impact','verificationSteps','status','evidenceFreshness','createdAt','updatedAt','snapshotId','relatedFindingIds','relatedRuleIds','relatedHypothesisIds','origin','review']);
+	const allowedKeys = new Set(['id','title','description','weakness','attackPath','asset','evidence','rationale','confidence','assumptions','contradictions','impact','verificationSteps','falsificationCriteria','status','evidenceFreshness','createdAt','updatedAt','snapshotId','relatedFindingIds','relatedRuleIds','relatedHypothesisIds','origin','review']);
 	if (Object.keys(value).some((key) => !allowedKeys.has(key))) {return false;}
 	if (value.evidenceFreshness !== undefined && !['current','stale','provenance-unavailable'].includes(String(value.evidenceFreshness))) {return false;}
 	if (![...value.evidence, ...value.contradictions].every(isEvidenceRef)) {return false;}

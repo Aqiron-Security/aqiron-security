@@ -1,7 +1,30 @@
-import { AIProviderId } from '../../packages/core/src/shared/ai';
+import type { AIProviderId } from '../../packages/core/src/shared/ai';
+
+export function hypothesisAiProposalSavedMessage(count: number): string {
+	const total = Number.isSafeInteger(count) && count >= 0 ? count : 0;
+	return `Core saved ${total} AI-proposed ${total === 1 ? 'hypothesis' : 'hypotheses'} as proposed. Reviewer assessment is still required.`;
+}
+
+export function hypothesisAiExecutionPresentation(executionAvailable: boolean): { actionLabel?: string; statusText?: string } {
+	return executionAvailable
+		? { actionLabel: 'Execute approved synthesis' }
+		: { statusText: 'Core reports that provider execution is disabled. Approval did not contact the provider; no execution action is available.' };
+}
+
+export function dispatchApprovedHypothesisAiExecution(
+	executionAvailable: boolean,
+	approved: boolean,
+	preparationId: string,
+	contentFingerprint: string | undefined,
+	post: (command: 'executeHypothesisAi', payload: { preparationId: string; contentFingerprint: string }) => void,
+): boolean {
+	if (!executionAvailable || !approved || !preparationId || !contentFingerprint) {return false;}
+	post('executeHypothesisAi', { preparationId, contentFingerprint });
+	return true;
+}
 
 const WEBVIEW_COMMANDS = new Set([
-	'ready','focus','openChatSession','renameChatSession','deleteChatSession','shareChatSession','selectPermissionMode','selectModel','refreshModels','switchProvider','configureProvider','saveProviderSettings','removeProviderCredentials','saveApiCredential','selectApiCredential','deleteApiCredential','saveTaskDefaults','saveMobSfSettings','saveCustomRules','applyModelFilter','cancelGeneration','selectIntelligence','checkoutBranch','createBranch','sendChat','sendChatToSession','scanWorkspace','aiVulnerabilityAnalysis','scanCurrentFile','cancelScan','ragReindexWithAi','ragReindexWithoutAi','ragSyncRegexes','ragAddRegex','ragRefreshSuggestions','openRagSettings','setZoom','clearTerminal','exportReport','renameReportArtifact','exportFinding','ignoreIssue','createRuleFromFinding','openIssue','selectThreatSnapshot','deleteThreatSnapshot','openPolicy','agentAction','setupComplete','selectWorkspace','prepareHypothesisAi','approveHypothesisAi','denyHypothesisAi','executeHypothesisAi','cancelHypothesisAiExecution',
+	'ready','focus','openChatSession','renameChatSession','deleteChatSession','shareChatSession','selectPermissionMode','selectModel','refreshModels','switchProvider','configureProvider','saveProviderSettings','removeProviderCredentials','saveApiCredential','selectApiCredential','deleteApiCredential','saveTaskDefaults','saveMobSfSettings','saveCustomRules','applyModelFilter','cancelGeneration','selectIntelligence','checkoutBranch','createBranch','sendChat','sendChatToSession','scanWorkspace','aiVulnerabilityAnalysis','scanCurrentFile','cancelScan','ragReindexWithAi','ragReindexWithoutAi','ragSyncRegexes','ragAddRegex','ragRefreshSuggestions','openRagSettings','setZoom','clearTerminal','exportReport','renameReportArtifact','exportFinding','ignoreIssue','createRuleFromFinding','openIssue','selectThreatSnapshot','deleteThreatSnapshot','openPolicy','agentAction','setupComplete','selectWorkspace','prepareHypothesisAi','approveHypothesisAi','denyHypothesisAi','executeHypothesisAi','cancelHypothesisAiExecution','refreshHypotheses','generateHypotheses','reviewHypothesis',
 ]);
 
 export function isWebviewMessage(value: unknown): value is { command: string; payload?: unknown } {

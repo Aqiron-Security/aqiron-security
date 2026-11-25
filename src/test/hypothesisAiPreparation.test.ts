@@ -22,6 +22,7 @@ import { sendHypothesisAiBoundRequest } from '../../packages/core/src/hypotheses
 import { readAndValidateHypothesisAiResponse } from '../../packages/core/src/hypotheses/hypothesisAiResponse';
 import { HypothesisStoreService } from '../../packages/core/src/hypotheses/hypothesisStore';
 import { createHypothesisAiExecutor } from '../../packages/core/src/hypotheses/hypothesisAiExecutor';
+import { hypothesisAiProposalKeys } from '../../packages/core/src/hypotheses/hypothesisAiContract';
 
 suite('Hypothesis AI disclosure preparation', () => {
 	test('production protocol accepts the narrow execute route but the default runtime fails closed', async () => {
@@ -31,7 +32,7 @@ suite('Hypothesis AI disclosure preparation', () => {
 		assert.match(productionComposition, /Real-provider synthesis remains disabled/);
 		const runtimeComposition = await fs.readFile(path.resolve(__dirname, '../../../packages/core/src/runtime/coreRuntime.ts'), 'utf8');
 		assert.match(runtimeComposition, /PRODUCTION_HYPOTHESIS_AI_EXECUTION_ENABLED\s*=\s*false/, 'the production executor is guarded by a fixed closed gate');
-		assert.match(runtimeComposition, /createHypothesisAiExecutor\(this\.transport, this\.hypotheses\)/, 'Core composes the production-intended pipeline from its transport and authoritative store');
+		assert.match(runtimeComposition, /createHypothesisAiExecutor\(this\.transport, this\.hypotheses, \(diagnostic\)/, 'Core composes the production-intended pipeline from its transport, authoritative store, and safe diagnostic sink');
 		assert.equal('CoreRuntime' in publicCoreRuntime, false, 'the package runtime API does not expose internal constructor injection');
 		assert.match(runtimeComposition, /new CoreRuntime\(\{ coreVersion: options\.coreVersion, protocolVersion: options\.protocolVersion \}\)/, 'the public runner discards unknown fields instead of forwarding test dependencies');
 		async function* noRequests(): AsyncGenerator<string> {}
@@ -61,6 +62,7 @@ suite('Hypothesis AI disclosure preparation', () => {
 			const prepared = await prepare(runtime, root, fixture.scanId, [`finding:${fixture.finding.id}`]);
 			const retained = prepared.result as { status: string; manifest: HypothesisAiPreparedDisclosureManifest; contentFingerprint: string };
 			assert.equal(retained.status, 'prepared');
+			assert.match(retained.manifest.provider.requestFingerprint ?? '', /^[a-f0-9]{64}$/);
 			const malformed = await runtime.handle({ id: 'approve-malformed', type: 'request', method: 'hypotheses.ai.approve', params: { preparationId: retained.manifest.preparationId, contentFingerprint: retained.contentFingerprint, manifest: retained.manifest } }, () => undefined);
 			assert.equal(malformed.success, false);
 			const approved = await runtime.handle({ id: 'approve-valid', type: 'request', method: 'hypotheses.ai.approve', params: { preparationId: retained.manifest.preparationId, contentFingerprint: retained.contentFingerprint } }, () => undefined);
@@ -141,8 +143,11 @@ suite('Hypothesis AI disclosure preparation', () => {
 			assert.equal(manifest.provider.endpointClassification, 'known');
 			assert.equal(manifest.provider.endpoint, 'https://api.openai.com/v1/chat/completions');
 			assert.equal(manifest.provider.retentionPolicy, 'unknown');
+			assert.match(manifest.provider.requestFingerprint ?? '', /^[a-f0-9]{64}$/);
+			assert.equal(JSON.stringify(manifest).includes('test-only-fake-credential'), false, 'prepared disclosure contains no raw credential');
 			assert.equal(manifest.previewOnly, true);
 			assert.equal(manifest.executionAvailable, false);
+			assert.match(manifest.disclosure, /execution is currently disabled/i);
 			assert.equal(manifest.providerCallMade, false);
 			assert.equal(manifest.evidenceCount, 1);
 			assert.ok(manifest.coreEnvelopeUtf8Bytes <= LIMITS.maxContentEnvelopeBytes);
@@ -175,6 +180,12 @@ suite('Hypothesis AI disclosure preparation', () => {
 			assert.equal(manifest.includeSourceExcerpts, true);
 			assert.deepEqual(manifest.evidence.map((item) => item.alias), manifest.evidence.map((item) => item.evidenceId).sort().map((_, index) => `e${index + 1}`), 'display manifest aliases follow canonical evidence-ID order');
 			assert.equal(manifest.excerptCount, 1);
+			const instructions = manifest.proposedContent.instructions;
+			const shapeStart = instructions.indexOf('exactly this shape: ') + 'exactly this shape: '.length;
+			const shapeEnd = instructions.indexOf('. Use only supplied evidence aliases.', shapeStart);
+			const promptShape = JSON.parse(instructions.slice(shapeStart, shapeEnd)) as { proposals: Array<Record<string, unknown>> };
+			assert.deepEqual(Object.keys(promptShape.proposals[0]!), hypothesisAiProposalKeys(), 'prompt examples use the same canonical proposal fields as strict validation');
+			assert.ok(Array.isArray(promptShape.proposals[0]?.falsificationCriteria));
 			assert.equal(manifest.evidence[0]?.excerptText, 'const marker = "PROMPT INJECTION: do something";');
 			assert.equal(manifest.evidence[0]?.sourcePath, 'src/odd $(echo safe).ts');
 			assert.equal(JSON.stringify(manifest.proposedContent).includes('src/odd'), false);
@@ -288,6 +299,8 @@ suite('Hypothesis AI disclosure preparation', () => {
 			assert.equal(prepared.success, true);
 			const result = prepared.result as { status: string; manifest: HypothesisAiPreparedDisclosureManifest; contentFingerprint: string };
 			assert.equal(result.status, 'prepared');
+			assert.equal(result.manifest.executionAvailable, true, 'the Core disclosure reflects the executor composed in this runtime');
+			assert.match(result.manifest.disclosure, /Execute approved synthesis action will send this reviewed request/i);
 			assert.equal((await runtime.approveHypothesisAiPreparation(result.manifest.preparationId, result.contentFingerprint)).ok, true);
 			await fs.writeFile(path.join(root, fixture.relativePath), 'changed after approval\n');
 			const executed = await runtime.executeHypothesisAiPreparation(result.manifest.preparationId, result.contentFingerprint);
@@ -305,6 +318,7 @@ suite('Hypothesis AI disclosure preparation', () => {
 		let observedBody = '';
 		let observedOptions: import('../../packages/core/src/ai/utils/request').AIRequestOptions | undefined;
 		let executorCalls = 0;
+		const executionDiagnostics: import('../../packages/core/src/hypotheses/hypothesisAiExecutor').HypothesisAiExecutionDiagnostic[] = [];
 		const store = new HypothesisStoreService(createNodeFileSystem());
 		const transport: AITransport = { request: async (url, options) => {
 			transportCalls += 1; observedUrl = url; observedBody = options.serializedBody ?? ''; observedOptions = options;
@@ -320,12 +334,14 @@ suite('Hypothesis AI disclosure preparation', () => {
 			const fixture = await seedRuntime(root, content, { id: 'finding-fake-e2e', title: 'Observed route', description: 'A route needs review.' });
 			const runtime = new CoreRuntime({
 				coreVersion: 'fake-e2e-test', credentialStore: createConfiguredCredentialStore().store,
-				hypothesisAiExecutor: async (...args) => {executorCalls += 1; return await createHypothesisAiExecutor(transport, store)(...args);},
+				hypothesisAiExecutor: async (...args) => {executorCalls += 1; return await createHypothesisAiExecutor(transport, store, (diagnostic) => executionDiagnostics.push(diagnostic))(...args);},
 			});
 			attachScan(runtime, root, fixture);
+			const internalScans = runtime as unknown as { scans: Map<string, { result: { findings: UnifiedFinding[] } }> };
+			const findingsBeforeExecution = JSON.stringify(internalScans.scans.get(fixture.scanId)?.result.findings);
 			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: fixture.scanId, findings: [fixture.finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createNodeFileSystem(), scanProvenance: [fixture.provenance], capturedAt: '2026-10-21T00:00:00.000Z' });
-			const selected = snapshot.evidence.filter(ref => ref.kind === 'finding' || ref.kind === 'source-span').sort((a, b) => a.id.localeCompare(b.id));
-			const prepared = await prepare(runtime, root, fixture.scanId, selected.map(ref => ref.id));
+			const selected = snapshot.evidence.filter(ref => ref.kind === 'finding' || ref.kind === 'source-span');
+			const prepared = await prepare(runtime, root, fixture.scanId, selected.map(ref => ref.id).reverse());
 			assert.equal(prepared.success, true, prepared.error?.message);
 			const preparation = prepared.result as { status: string; manifest: HypothesisAiPreparedDisclosureManifest; contentFingerprint: string };
 			assert.equal(preparation.status, 'prepared');
@@ -339,6 +355,12 @@ suite('Hypothesis AI disclosure preparation', () => {
 			]);
 			assert.equal(executorCalls, 1);
 			assert.equal(transportCalls, 1);
+			assert.equal(executionDiagnostics.at(-1)?.stage, 'complete');
+			assert.equal(executionDiagnostics.at(-1)?.outcome, 'succeeded');
+			assert.equal(executionDiagnostics.at(-1)?.transportInvoked, true);
+			assert.equal(executionDiagnostics.at(-1)?.transportResponseReceived, true);
+			assert.equal(executionDiagnostics.at(-1)?.providerResponseValidated, true);
+			assert.equal(executionDiagnostics.at(-1)?.persistenceAttempted, true);
 			assert.ok(first.ok || concurrent.ok, JSON.stringify({ first, concurrent }));
 			if (first.ok && first.state === 'succeeded') {assert.deepEqual(first.value, { proposalCount: 1 });}
 			if (concurrent.ok && concurrent.state === 'succeeded') {assert.deepEqual(concurrent.value, { proposalCount: 1 });}
@@ -354,13 +376,105 @@ suite('Hypothesis AI disclosure preparation', () => {
 			const sent = JSON.parse(observedBody) as { model?: string; messages?: Array<{ content?: string }> };
 			assert.equal(sent.model, preparation.manifest.provider.modelId);
 			assert.ok(sent.messages?.[0]?.content?.includes('verified synthesis source') === false, 'excluded source excerpts are not sent');
+			assert.deepEqual(preparation.manifest.evidence.map(item => [item.alias, item.evidenceId]), [...preparation.manifest.evidence].map(item => [item.alias, item.evidenceId]).sort((left, right) => left[1].localeCompare(right[1])), 'preparation aliases stay canonical even when evidence selectors arrive in reverse order');
 			const saved = await store.list(root);
 			assert.equal(saved.hypotheses.length, 1);
+			assert.equal(JSON.stringify(saved.hypotheses).includes('test-only-fake-credential'), false, 'persisted proposals contain no provider credential');
 			assert.equal(saved.hypotheses[0]?.status, 'proposed');
 			assert.deepEqual(saved.hypotheses[0]?.origin, { kind: 'ai-proposal', preparationId: preparation.manifest.preparationId, providerId: 'openai', modelId: 'gpt-4o-mini' });
 			assert.equal(saved.hypotheses[0]?.review, undefined);
+			assert.deepEqual(saved.hypotheses[0]?.verificationSteps, ['Review the route guard and its caller.']);
+			assert.deepEqual(saved.hypotheses[0]?.falsificationCriteria, ['Confirm unauthenticated requests are rejected.'], 'disproof criteria persist separately from verification steps');
 			assert.equal(saved.hypotheses[0]?.evidence.every(ref => ref.freshness === 'current'), true);
+			assert.deepEqual(saved.hypotheses[0]?.evidence.map(ref => ref.id), preparation.manifest.evidence.map(item => item.evidenceId), 'validator aliases resolve to the exact evidence disclosed under those aliases');
+			const listResponse = await runtime.handle({ id: 'fake-e2e-list', type: 'request', method: 'hypotheses.list', params: { workspaceRoot: root, includeStale: true } }, () => undefined);
+			assert.equal(listResponse.success, true);
+			const listed = (listResponse.result as { hypotheses: typeof saved.hypotheses }).hypotheses;
+			assert.equal(listed.length, 1);
+			assert.deepEqual(listed[0], saved.hypotheses[0], 'Core list returns the proposal persisted by the executor');
+			const getResponse = await runtime.handle({ id: 'fake-e2e-get', type: 'request', method: 'hypotheses.get', params: { workspaceRoot: root, hypothesisId: saved.hypotheses[0]!.id } }, () => undefined);
+			assert.equal(getResponse.success, true);
+			const retrieved = (getResponse.result as { hypothesis?: typeof saved.hypotheses[number] }).hypothesis;
+			assert.deepEqual(retrieved, saved.hypotheses[0], 'Core get reloads the same persisted proposal');
+			assert.equal(retrieved?.status, 'proposed');
+			assert.equal(retrieved?.review, undefined, 'AI persistence does not create reviewer decisions or history');
+			assert.equal(JSON.stringify(internalScans.scans.get(fixture.scanId)?.result.findings), findingsBeforeExecution, 'AI proposal persistence leaves the completed scan findings unchanged');
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
+	test('Core rechecks the retained scan after provider response before proposal persistence', async () => {
+		const root = await fs.mkdtemp(path.join(process.cwd(), '.tmp-aqiron-ai-stale-scan-'));
+		let transportCalls = 0;
+		let releaseResponse!: () => void;
+		const responseReady = new Promise<void>(resolve => {releaseResponse = resolve;});
+		let providerEntered!: () => void;
+		const entered = new Promise<void>(resolve => {providerEntered = resolve;});
+		const payload = JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({
+			schemaVersion: 1,
+			proposals: [{ title: 'Review the source boundary', claim: 'Could this route accept an unauthenticated request?', evidenceRationale: 'The selected scan evidence identifies this route.', supportingEvidenceAliases: ['e1'], contradictoryEvidenceAliases: [], verificationCriteria: ['Review the route guard.'], falsificationCriteria: ['Confirm unauthenticated requests are rejected.'], uncertainties: ['Runtime configuration was not observed.'] }],
+		}) } }] });
+		const transport: AITransport = { request: async () => {
+			transportCalls += 1;
+			providerEntered();
+			await responseReady;
+			return { ok: true, status: 200, headers: { 'content-type': 'application/json' }, text: async () => payload, json: async <T>() => JSON.parse(payload) as T, body: null };
+		} };
+		try {
+			const fixture = await seedRuntime(root, 'verified scan-bound source\n', { id: 'finding-stale-scan', title: 'Observed route', description: 'A route needs review.' });
+			const store = new HypothesisStoreService(createNodeFileSystem());
+			const runtime = new CoreRuntime({ coreVersion: 'stale-scan-after-provider', credentialStore: createConfiguredCredentialStore().store,
+				hypothesisAiExecutor: async (...args) => await createHypothesisAiExecutor(transport, store)(...args),
+			});
+			attachScan(runtime, root, fixture);
+			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: fixture.scanId, findings: [fixture.finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createNodeFileSystem(), scanProvenance: [fixture.provenance], capturedAt: '2026-10-21T00:00:00.000Z' });
+			const selected = snapshot.evidence.filter(ref => ref.kind === 'finding');
+			const prepared = await prepare(runtime, root, fixture.scanId, selected.map(ref => ref.id));
+			const retained = prepared.result as { manifest: HypothesisAiPreparedDisclosureManifest; contentFingerprint: string };
+			assert.equal((await runtime.approveHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint)).ok, true);
+			const execution = runtime.executeHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint);
+			await entered;
+			// A replacement result under the same scan ID must not inherit the earlier approval.
+			attachScan(runtime, root, { ...fixture, finding: { ...fixture.finding, description: 'replacement scan finding' } });
+			releaseResponse();
+			const outcome = await execution;
+			assert.equal(outcome.ok, false);
+			assert.equal(transportCalls, 1, 'the single fake response reached Core validation, with no retry');
+			assert.equal((await store.list(root)).hypotheses.length, 0, 'stale scan response was rejected before persistence');
+		} finally {releaseResponse(); await fs.rm(root, { recursive: true, force: true });}
+	});
+
+	test('approved Core execution reports persistence failure without a partial proposal or reusable approval', async () => {
+		const root = await fs.mkdtemp(path.join(process.cwd(), '.tmp-aqiron-ai-persist-failure-'));
+		const marker = 'synthetic filesystem failure detail';
+		const payload = JSON.stringify({ choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({
+			schemaVersion: 1,
+			proposals: [{ title: 'Review the source boundary', claim: 'Could this route accept an unauthenticated request?', evidenceRationale: 'The selected scan evidence identifies this route.', supportingEvidenceAliases: ['e1', 'e2'], contradictoryEvidenceAliases: [], verificationCriteria: ['Review the route guard.'], falsificationCriteria: ['Confirm unauthenticated requests are rejected.'], uncertainties: ['Runtime configuration was not observed.'] }],
+		}) } }] });
+		const transport: AITransport = { request: async () => ({ ok: true, status: 200, headers: { 'content-type': 'application/json' }, text: async () => payload, json: async <T>() => JSON.parse(payload) as T, body: null }) };
+		try {
+			const fixture = await seedRuntime(root, 'verified persistence-failure source\n', { id: 'finding-persist-failure', title: 'Observed route', description: 'A route needs review.' });
+			const failingFilesystem = createNodeFileSystem();
+			failingFilesystem.writeFileExclusive = async () => {throw new Error(marker);};
+			const store = new HypothesisStoreService(failingFilesystem);
+			const executionDiagnostics: import('../../packages/core/src/hypotheses/hypothesisAiExecutor').HypothesisAiExecutionDiagnostic[] = [];
+			const runtime = new CoreRuntime({ coreVersion: 'persist-failure-test', credentialStore: createConfiguredCredentialStore().store,
+				hypothesisAiExecutor: async (...args) => await createHypothesisAiExecutor(transport, store, (diagnostic) => executionDiagnostics.push(diagnostic))(...args),
+			});
+			attachScan(runtime, root, fixture);
+			const snapshot = await buildHypothesisSnapshot({ workspaceRoot: root, scanId: fixture.scanId, findings: [fixture.finding], relationships: [], profile: createEmptyProjectProfile(root), filesystem: createNodeFileSystem(), scanProvenance: [fixture.provenance], capturedAt: '2026-10-21T00:00:00.000Z' });
+			const selected = snapshot.evidence.filter(ref => ref.kind === 'finding' || ref.kind === 'source-span');
+			const prepared = await prepare(runtime, root, fixture.scanId, selected.map(ref => ref.id));
+			const retained = prepared.result as { manifest: HypothesisAiPreparedDisclosureManifest; contentFingerprint: string };
+			assert.equal((await runtime.approveHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint)).ok, true);
+			const execution = await runtime.executeHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint);
+			assert.equal(execution.ok, false, 'Core must not report success when persistence fails');
+			assert.deepEqual(executionDiagnostics.at(-1), { stage: 'persistence', outcome: 'failed', failureCategory: 'persistence-failed', transportInvoked: true, transportResponseReceived: true, providerResponseValidated: true, persistenceAttempted: true });
+			assert.equal(JSON.stringify(executionDiagnostics).includes(marker), false, 'diagnostics exclude filesystem error text');
+			assert.equal(JSON.stringify(execution).includes(marker), false, 'filesystem details are not returned to the caller');
+			assert.equal(await fs.access(path.join(root, '.aqiron-security', 'hypotheses.json')).then(() => true, () => false), false, 'failed exclusive write leaves no partial proposal store');
+			const replay = await runtime.executeHypothesisAiPreparation(retained.manifest.preparationId, retained.contentFingerprint);
+			assert.equal(replay.ok, false, 'a persistence failure does not make the consumed approval reusable');
+		} finally {await fs.rm(root, { recursive: true, force: true });}
 	});
 
 	test('approved execution cancellation reaches and terminates the fake transport before persistence', async () => {

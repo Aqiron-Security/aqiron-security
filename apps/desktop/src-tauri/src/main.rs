@@ -271,7 +271,7 @@ fn core_request_blocking(
     supplied_params: Value,
     request_id: Option<String>,
 ) -> Result<Value, String> {
-    const ALLOWED_METHODS: [&str; 24] = ["project.detect", "project.profile", "scan.start", "rag.index", "ai.providers", "ai.models", "ai.chat", "ai.cancel", "core.cancel", "credentials.status", "credentials.set", "credentials.delete", "workspace.rules.get", "workspace.rules.set", "workspace.threat-history.get", "workspace.threat-history.delete", "workspace.agent-sessions.get", "workspace.agent-sessions.set", "workspace.recommendations.get", "workspace.reports.get", "hypotheses.ai.prepare", "hypotheses.ai.approve", "hypotheses.ai.deny", "hypotheses.ai.execute"];
+    const ALLOWED_METHODS: [&str; 28] = ["project.detect", "project.profile", "scan.start", "rag.index", "ai.providers", "ai.models", "ai.chat", "ai.cancel", "core.cancel", "credentials.status", "credentials.set", "credentials.delete", "workspace.rules.get", "workspace.rules.set", "workspace.threat-history.get", "workspace.threat-history.delete", "workspace.agent-sessions.get", "workspace.agent-sessions.set", "workspace.recommendations.get", "workspace.reports.get", "hypotheses.generate", "hypotheses.list", "hypotheses.get", "hypotheses.review", "hypotheses.ai.prepare", "hypotheses.ai.approve", "hypotheses.ai.deny", "hypotheses.ai.execute"];
     if !ALLOWED_METHODS.contains(&method.as_str()) {
         return Err("Unsupported Core method".into());
     }
@@ -286,6 +286,10 @@ fn core_request_blocking(
         let mut params = supplied_params;
         if let Some(object) = params.as_object_mut() { object.insert("workspaceRoot".into(), json!(node_compatible_path(&workspace))); }
         params
+    }
+    else if method.starts_with("hypotheses.") && !method.starts_with("hypotheses.ai.") {
+        let workspace = workspace_state.lock().map_err(|_| "Workspace selection unavailable")?.clone().ok_or("Select a project folder first")?;
+        desktop_hypothesis_params(&method, &workspace, &supplied_params)?
     }
     else if method == "hypotheses.ai.approve" || method == "hypotheses.ai.deny" || method == "hypotheses.ai.execute" { supplied_params }
     else if method.starts_with("credentials.") { supplied_params }
@@ -366,6 +370,31 @@ fn desktop_scan_params(workspace: &Path, supplied_params: &Value) -> Value {
         "trusted": true,
         "mode": supplied_params.get("mode").cloned().unwrap_or(json!("deep")),
     })
+}
+
+fn desktop_hypothesis_params(method: &str, workspace: &Path, supplied: &Value) -> Result<Value, String> {
+    let workspace = node_compatible_path(workspace);
+    match method {
+        "hypotheses.generate" => Ok(json!({ "workspaceRoot": workspace, "scanId": supplied.get("scanId").and_then(Value::as_str).ok_or("Scan id is required")? })),
+        "hypotheses.list" => {
+            let mut params = json!({ "workspaceRoot": workspace });
+            if let Some(status) = supplied.get("status") { params["status"] = status.clone(); }
+            if let Some(include_stale) = supplied.get("includeStale") { params["includeStale"] = include_stale.clone(); }
+            Ok(params)
+        },
+        "hypotheses.get" => Ok(json!({ "workspaceRoot": workspace, "hypothesisId": supplied.get("hypothesisId").and_then(Value::as_str).ok_or("Hypothesis id is required")? })),
+        "hypotheses.review" => {
+            let mut params = json!({
+                "workspaceRoot": workspace,
+                "hypothesisId": supplied.get("hypothesisId").and_then(Value::as_str).ok_or("Hypothesis id is required")?,
+                "action": supplied.get("action").and_then(Value::as_str).ok_or("Review action is required")?,
+            });
+            if let Some(note) = supplied.get("note") { params["note"] = note.clone(); }
+            if let Some(evidence_refs) = supplied.get("evidenceRefs") { params["evidenceRefs"] = evidence_refs.clone(); }
+            Ok(params)
+        },
+        _ => Err("Unsupported hypothesis method".into()),
+    }
 }
 
 #[tauri::command]
@@ -582,7 +611,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-	use super::{bind_synthesis_cancellation_token, canonical_project_path, clear_saved_project, desktop_bridge_command, desktop_scan_params, dispatch_bridge_message, fail_pending, load_project_path, node_compatible_path, persist_selected_project, read_bounded_line, resolve_node_binary, resolve_synthesis_cancellation_token, save_project_path, unbind_synthesis_cancellation_token, MAX_BRIDGE_FRAME_BYTES};
+	use super::{bind_synthesis_cancellation_token, canonical_project_path, clear_saved_project, desktop_bridge_command, desktop_hypothesis_params, desktop_scan_params, dispatch_bridge_message, fail_pending, load_project_path, node_compatible_path, persist_selected_project, read_bounded_line, resolve_node_binary, resolve_synthesis_cancellation_token, save_project_path, unbind_synthesis_cancellation_token, MAX_BRIDGE_FRAME_BYTES};
 	use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
 	use std::path::{Path, PathBuf};
@@ -654,6 +683,23 @@ mod tests {
 		assert_eq!(params["mode"], "analysis");
 		assert_eq!(params["workspaceRoot"], "C:\\projects\\flutter-app");
 		assert_eq!(params["trusted"], true);
+	}
+
+	#[test]
+	fn hypothesis_routes_bind_selected_workspace_and_forward_only_contract_fields() {
+		let workspace = Path::new("C:\\projects\\flutter-app");
+		let list = desktop_hypothesis_params("hypotheses.list", workspace, &serde_json::json!({ "workspaceRoot": "C:\\attacker\\project", "status": "proposed", "includeStale": true, "unexpected": "ignored" })).unwrap();
+		assert_eq!(list["workspaceRoot"], "C:\\projects\\flutter-app");
+		assert_eq!(list["status"], "proposed");
+		assert_eq!(list["includeStale"], true);
+		assert!(list.get("unexpected").is_none());
+		let review = desktop_hypothesis_params("hypotheses.review", workspace, &serde_json::json!({ "hypothesisId": "hyp:one", "action": "validate", "note": "reviewed", "evidenceRefs": ["ev:one"], "workspaceRoot": "C:\\attacker\\project" })).unwrap();
+		assert_eq!(review["workspaceRoot"], "C:\\projects\\flutter-app");
+		assert_eq!(review["hypothesisId"], "hyp:one");
+		assert_eq!(review["action"], "validate");
+		assert_eq!(review["evidenceRefs"][0], "ev:one");
+		assert!(desktop_hypothesis_params("hypotheses.generate", workspace, &serde_json::json!({})).is_err());
+		assert!(desktop_hypothesis_params("hypotheses.unknown", workspace, &serde_json::json!({})).is_err());
 	}
 
 	#[test]

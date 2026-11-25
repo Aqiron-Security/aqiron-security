@@ -1,4 +1,5 @@
 import { AIModel, AIModelFilter, AIProviderCredential, AIProviderId, AITaskDefaults, ProviderConnectionStatus } from '../../ai/types/ai.js';
+import type { SecurityHypothesis } from '../../../packages/core/src/hypotheses/contracts.js';
 
 export type Section = 'agent' | 'scan' | 'threats' | 'reports' | 'settings' | 'aiAgent';
 export type Severity = 'Critical' | 'High' | 'Medium' | 'Low';
@@ -193,7 +194,8 @@ export interface WebviewState {
 	counts: Counts;
 	issues: WebviewIssue[];
 	coreScanId?: string;
-	hypothesisAiConsent?: { manifest?: import('../../../packages/core/src/hypotheses/contracts').HypothesisAiPreparedDisclosureManifest; contentFingerprint?: string; result?: import('../../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult; executionResult?: import('../../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult<{ proposalCount: number }>; executionPending?: boolean; message?: string };
+	hypotheses?: { items: SecurityHypothesis[]; loading: boolean; error?: string; generated?: boolean };
+	hypothesisAiConsent?: { manifest?: import('../../../packages/core/src/hypotheses/contracts').HypothesisAiPreparedDisclosureManifest; contentFingerprint?: string; result?: import('../../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult; executionResult?: import('../../../packages/core/src/hypotheses/hypothesisAiPreparation').HypothesisAiLifecycleResult<{ proposalCount: number }>; executionPending?: boolean; executionOutcomeUnconfirmed?: boolean; decisionPending?: boolean; decisionOutcomeUnconfirmed?: boolean; message?: string };
 	suggestions: Suggestion[];
 	selectedThreatId?: string;
 	zoom: number;

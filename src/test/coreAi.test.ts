@@ -47,6 +47,21 @@ suite('Core AI', () => {
 		assert.strictEqual(registry.getCurrentProvider().id, 'gemini');
 	});
 
+	test('Core AI startup performs no model discovery and an explicit refresh performs exactly one request', async () => {
+		const calls: string[] = [];
+		const service = new AIService({
+			credentialStore: providerStore('openrouter'),
+			transport: { request: async (url, options) => {
+				calls.push(`${options.method ?? 'GET'} ${new URL(url).pathname}`);
+				return jsonResponse({ data: [] });
+			} },
+		});
+		await service.initialize();
+		assert.deepStrictEqual(calls, [], 'selecting OpenRouter at startup must not discover models or invoke synthesis');
+		await service.refreshModels(true);
+		assert.deepStrictEqual(calls, ['GET /api/v1/models'], 'explicit refresh makes one model-list request and does not duplicate it for connection checking');
+	});
+
 	test('OpenAI provider discovers models and streams chat', async () => {
 		const provider = new OpenAIProvider(new CredentialService(providerStore('openai')), transport({
 			'GET /v1/models': jsonResponse({ data: [{ id: 'gpt-4o', owned_by: 'openai' }, { id: 'text-embedding-3-small' }] }),

@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  validate:
-    name: Validate (${{ matrix.os }})
+  hypothesis-acceptance:
+    name: Hypothesis Engine acceptance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -77,6 +77,46 @@ jobs:
       - name: Build VS Code extension and run lint
         run: npm run compile
 
+      - name: Build Desktop frontend
+        run: npm run desktop:build
+
+      - name: Run Tauri host unit tests
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --bin aqiron-security-desktop
+
+      - name: Build native Tauri host
+        run: cargo build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --bin aqiron-security-desktop
+
+  legacy-extension-host:
+    name: Legacy extension-host tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    env:
+      AQIRON_TEST_OUTDIR: .ci-compiled-tests
+      AQIRON_VSCODE_TEST_SUMMARY: .ci-compiled-tests/vscode-test-summary.json
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install JavaScript dependencies from package-lock.json
+        run: npm ci
+
+      - name: Compile extension-host tests
+        run: npx tsc -p . --outDir .ci-compiled-tests
+
+      - name: Test extension-host summary reporting
+        run: node --test scripts/verify-vscode-test-summary.test.cjs
+
       - name: Run VS Code extension-host tests
         id: vscode_test_native
         if: runner.os != 'Linux'
@@ -87,17 +127,12 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a npx vscode-test --fail-zero --jobs 1
 
+      - name: Diagnose macOS VS Code archive layout after launcher failure
+        if: always() && runner.os == 'macOS' && steps.vscode_test_native.outcome == 'failure'
+        run: node -e "const fs=require('node:fs');const path=require('node:path');for(const root of [path.join(process.env.HOME,'.vscode-test'),path.join(process.env.RUNNER_TEMP,'vscode-test'),path.join(process.cwd(),'.vscode-test')]){console.log('VS Code test root:',root);if(!fs.existsSync(root)){console.log('missing');continue;}for(const entry of fs.readdirSync(root,{withFileTypes:true})){const full=path.join(root,entry.name);console.log(entry.isDirectory()?'dir':'file',full);if(entry.isDirectory()&&entry.name.toLowerCase().includes('code')){for(const rel of ['Visual Studio Code.app/Contents/MacOS/Electron','Visual Studio Code.app/Contents/MacOS/Electron Framework','Contents/MacOS/Electron']){const candidate=path.join(full,rel);console.log(fs.existsSync(candidate)?'exists':'missing',candidate);}}}}"
+
       - name: Report extension-host test result
         if: always()
         env:
           AQIRON_VSCODE_TEST_OUTCOME: ${{ runner.os == 'Linux' && steps.vscode_test_xvfb.outcome || steps.vscode_test_native.outcome }}
         run: node scripts/verify-vscode-test-summary.cjs
-
-      - name: Build Desktop frontend
-        run: npm run desktop:build
-
-      - name: Run Tauri host unit tests
-        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --bin aqiron-security-desktop
-
-      - name: Build native Tauri host
-        run: cargo build --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --bin aqiron-security-desktop

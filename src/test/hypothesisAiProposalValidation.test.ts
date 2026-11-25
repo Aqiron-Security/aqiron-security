@@ -12,8 +12,10 @@ import {
 import { HypothesisAiProposalV1, HypothesisAiRequestContext, HypothesisEvidenceRef, HypothesisSnapshot } from '../../packages/core/src/hypotheses/contracts';
 import { HypothesisStoreService } from '../../packages/core/src/hypotheses/hypothesisStore';
 import { createNodeFileSystem } from '../../packages/core/src/runtime/nodeAdapters';
+import { CoreRuntime } from '../../packages/core/src/runtime/coreRuntime';
 import { readAndValidateHypothesisAiResponse } from '../../packages/core/src/hypotheses/hypothesisAiResponse';
 import { hashSourceContent, hashSourceSpan } from '../../packages/core/src/shared/sourceProvenance';
+import { canonicalHypothesisAiEvidenceAliases, HYPOTHESIS_AI_PROPOSAL_FIELDS, hypothesisAiProposalKeys, hypothesisAiProposalSchemaProperties } from '../../packages/core/src/hypotheses/hypothesisAiContract';
 
 suite('Hypothesis AI proposal contract validation', () => {
 	test('normalizes a valid versioned proposal and resolves only context-owned evidence', () => {
@@ -48,6 +50,18 @@ suite('Hypothesis AI proposal contract validation', () => {
 		assert.equal(resolvedInB.valid, true);
 		if (resolvedInB.valid) { assert.equal(resolvedInB.proposals[0]?.supportingEvidence[0]?.id, refsB[0]?.id); }
 		assert.equal(validateHypothesisAiResponse(rawFromA, contextA).valid, true);
+	});
+
+	test('preparation and validation share deterministic canonical aliases and field names', () => {
+		const refs = evidenceRefs(3);
+		const aliases = canonicalHypothesisAiEvidenceAliases([...refs].reverse());
+		assert.deepEqual(aliases.map((entry) => [entry.alias, entry.reference.id]), [...refs].sort((a, b) => a.id.localeCompare(b.id)).map((ref, index) => [`e${index + 1}`, ref.id]));
+		assert.deepEqual(hypothesisAiProposalKeys(), Object.keys(HYPOTHESIS_AI_PROPOSAL_FIELDS));
+		assert.deepEqual(Object.keys(hypothesisAiProposalSchemaProperties()), hypothesisAiProposalKeys());
+		assert.ok(hypothesisAiProposalKeys().includes('falsificationCriteria'));
+		assert.deepEqual(hypothesisAiProposalSchemaProperties().falsificationCriteria, { type: 'array', items: { type: 'string' } });
+		assert.throws(() => canonicalHypothesisAiEvidenceAliases([refs[0]!, refs[0]!]), /unique evidence references/);
+		assert.throws(() => canonicalHypothesisAiEvidenceAliases(evidenceRefs(HYPOTHESIS_AI_RESPONSE_LIMITS.maxEvidenceAliases + 1)), /alias limit/);
 	});
 
 	test('rejects model-supplied correlation fields instead of treating them as authorization', () => {
@@ -104,6 +118,15 @@ suite('Hypothesis AI proposal contract validation', () => {
 		assert.deepEqual(validateHypothesisAiResponse(response(context, proposal(), { debug: true }), context), { valid: false, error: 'unknown-field' });
 		assert.deepEqual(validateHypothesisAiResponse(response(context, proposal({ file: 'src/fake.ts', line: 900, confidence: 'high', status: 'validated' })), context), { valid: false, error: 'unknown-field' });
 		assert.deepEqual(validateHypothesisAiResponse('x'.repeat(HYPOTHESIS_AI_RESPONSE_LIMITS.maxResponseBytes + 1), context), { valid: false, error: 'response-too-large' });
+	});
+
+	test('rejects duplicate JSON keys instead of applying last-value-wins normalization', () => {
+		const context = createHypothesisAiRequestContext(snapshotFor(evidenceRefs(2)));
+		const base = JSON.stringify(proposal());
+		const duplicateTitle = base.replace('"title":', '"title":"shadowed", "\\u0074itle":');
+		const duplicateFalsification = base.replace('"falsificationCriteria":', '"falsificationCriteria":["shadowed"], "falsificationCriteria":');
+		assert.deepEqual(validateHypothesisAiResponse(`{"schemaVersion":1,"proposals":[${duplicateTitle}]}`, context), { valid: false, error: 'duplicate-field' });
+		assert.deepEqual(validateHypothesisAiResponse(`{"schemaVersion":1,"proposals":[${duplicateFalsification}]}`, context), { valid: false, error: 'duplicate-field' });
 	});
 
 	test('enforces the response limit using UTF-8 bytes for multibyte text', () => {
@@ -226,12 +249,21 @@ suite('Hypothesis AI proposal contract validation', () => {
 			const persisted = JSON.parse(await fs.readFile(path.join(root, '.aqiron-security', 'hypotheses.json'), 'utf8')) as { hypotheses: Array<Record<string, unknown>> };
 			assert.equal(persisted.hypotheses.length, 1);
 			assert.equal(persisted.hypotheses[0].status, 'proposed');
+			assert.deepEqual(persisted.hypotheses[0].falsificationCriteria, ['Confirm the route rejects unauthenticated requests.']);
+			assert.deepEqual(persisted.hypotheses[0].verificationSteps, ['Review the route guard and its caller.']);
 			assert.deepEqual(persisted.hypotheses[0].origin, { kind: 'ai-proposal', preparationId, providerId: 'openai', modelId: 'fake-model' });
 			assert.equal(persisted.hypotheses[0].review, undefined);
 			// A second attempt with the same deterministic identity fails closed instead of overwriting.
 			await assert.rejects(validateAndPersistHypothesisAiResponse(persistenceResponse, context, store, { id: preparationId, providerId: 'openai', modelId: 'fake-model' }));
 			const afterReplay = JSON.parse(await fs.readFile(path.join(root, '.aqiron-security', 'hypotheses.json'), 'utf8')) as { hypotheses: unknown[] };
 			assert.equal(afterReplay.hypotheses.length, 1);
+			const reloaded = await store.list(root);
+			assert.deepEqual(reloaded.hypotheses[0]?.falsificationCriteria, ['Confirm the route rejects unauthenticated requests.']);
+			const runtime = new CoreRuntime({ coreVersion: 'ai-falsification-list-get-test' });
+			const listed = await runtime.handle({ id: 'ai-falsification-list', type: 'request', method: 'hypotheses.list', params: { workspaceRoot: root } }, () => undefined);
+			assert.deepEqual((listed.result as { hypotheses: Array<{ falsificationCriteria?: string[] }> }).hypotheses[0]?.falsificationCriteria, ['Confirm the route rejects unauthenticated requests.']);
+			const fetched = await runtime.handle({ id: 'ai-falsification-get', type: 'request', method: 'hypotheses.get', params: { workspaceRoot: root, hypothesisId: reloaded.hypotheses[0]!.id } }, () => undefined);
+			assert.deepEqual((fetched.result as { hypothesis: { falsificationCriteria?: string[] } }).hypothesis.falsificationCriteria, ['Confirm the route rejects unauthenticated requests.']);
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 

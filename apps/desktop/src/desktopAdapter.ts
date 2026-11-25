@@ -5,8 +5,10 @@ import { providerName } from '../../../src/webview/ui/providerOptions.js';
 import { buildWorkspaceRecommendations } from '../../../src/agents/recommendations.js';
 import { normalizeScanCoverage, statsForHistoricalSnapshot, statsWithoutSelectedSnapshot } from '../../../src/shared/scanCoverage.js';
 import aqironLogo from '../src-tauri/icons/aqiron-security-logo.png';
+import { HypothesisAiExecutionCoordinator } from '../../../src/webview/hypothesisAiExecution';
+import type { HypothesisReviewInput, HypothesisReviewResult } from '../../../packages/core/src/hypotheses/contracts';
 type DesktopCoreEvent = { event?: string; requestId?: string; payload?: Record<string, unknown> };
-type DesktopCommand = 'project.detect' | 'project.profile' | 'scan.start' | 'rag.index' | 'ai.providers' | 'ai.models' | 'ai.chat' | 'ai.cancel' | 'core.cancel' | 'credentials.status' | 'credentials.set' | 'credentials.delete' | 'workspace.rules.get' | 'workspace.rules.set' | 'workspace.threat-history.get' | 'workspace.threat-history.delete' | 'workspace.reports.get' | 'workspace.agent-sessions.get' | 'workspace.agent-sessions.set' | 'workspace.recommendations.get' | 'hypotheses.ai.prepare' | 'hypotheses.ai.approve' | 'hypotheses.ai.deny' | 'hypotheses.ai.execute';
+type DesktopCommand = 'project.detect' | 'project.profile' | 'scan.start' | 'rag.index' | 'ai.providers' | 'ai.models' | 'ai.chat' | 'ai.cancel' | 'core.cancel' | 'credentials.status' | 'credentials.set' | 'credentials.delete' | 'workspace.rules.get' | 'workspace.rules.set' | 'workspace.threat-history.get' | 'workspace.threat-history.delete' | 'workspace.reports.get' | 'workspace.agent-sessions.get' | 'workspace.agent-sessions.set' | 'workspace.recommendations.get' | 'hypotheses.generate' | 'hypotheses.list' | 'hypotheses.review' | 'hypotheses.ai.prepare' | 'hypotheses.ai.approve' | 'hypotheses.ai.deny' | 'hypotheses.ai.execute';
 
 const EMPTY = makeInitialState();
 
@@ -19,18 +21,23 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 	let reportBundle: { json: unknown; sarif: unknown; pdf: string } | undefined;
 	let refreshingRecommendations = false;
 	let hypothesisRequestBusy = false;
+	let hypothesisListBusy = false;
+	let hypothesisOperationBusy = false;
 	let hypothesisExecutionRequestId: string | undefined;
+	const hypothesisExecutions = new HypothesisAiExecutionCoordinator();
 	let coreAiSettings: Record<string, unknown> = {};
 	const credentialKey = (id: string) => `aqiron.ai.api.${id}`;
-	const refreshProviders = async () => {
+	const refreshProviders = async (discoverModels = false) => {
 		const providers = await core('ai.providers') as { providers: string[]; configuredProviders?: Array<{ id: string; configured: boolean }>; credentialSummaries?: WebviewState['ai']['apiCredentials']; settings?: Record<string, unknown> & { selectedProvider?: string; selectedModel?: string; activeApiCredentialId?: string } };
 		coreAiSettings = providers.settings ?? coreAiSettings;
 		const providerId = providers.settings?.selectedProvider ?? state.ai.selection.provider;
-		const modelResult = await core('ai.models') as { models: WebviewState['ai']['models']; status: WebviewState['ai']['status'] };
+		const modelResult = discoverModels
+			? await core('ai.models', { providerId }) as { models: WebviewState['ai']['models']; status: WebviewState['ai']['status'] }
+			: { models: state.ai.models, status: { ...state.ai.status, providerId: providerId as WebviewState['ai']['status']['providerId'], connected: false, message: 'Model discovery has not been requested' } };
 		const configured = new Map((providers.configuredProviders ?? []).map((item) => [item.id, item.configured]));
 		const selectedProvider = providerId as WebviewState['ai']['selection']['provider'];
 		const selectedModel = providers.settings?.selectedModel;
-		update({ ai: { ...state.ai, providers: providers.providers.map((id) => ({ id: id as WebviewState['ai']['selection']['provider'], name: providerName(id as WebviewState['ai']['selection']['provider']), connected: id === providerId ? modelResult.status.connected : false, message: id === providerId ? modelResult.status.message : 'Not selected', hasCredential: configured.get(id) ?? false })), apiCredentials: providers.credentialSummaries ?? [], models: modelResult.models, filteredModels: filterDesktopModels(modelResult.models, state.ai.modelFilter), status: modelResult.status, taskDefaults: (providers.settings?.taskDefaults as WebviewState['ai']['taskDefaults'] | undefined) ?? state.ai.taskDefaults, settings: { ...state.ai.settings, ...providers.settings, activeApiCredentialId: providers.settings?.activeApiCredentialId, selectedProvider }, selection: { ...state.ai.selection, provider: selectedProvider, model: selectedModel && modelResult.models.some((model) => model.id === selectedModel) ? selectedModel : state.ai.selection.model && modelResult.models.some((model) => model.id === state.ai.selection.model) ? state.ai.selection.model : modelResult.models[0]?.id ?? '' } } });
+		update({ ai: { ...state.ai, providers: providers.providers.map((id) => ({ id: id as WebviewState['ai']['selection']['provider'], name: providerName(id as WebviewState['ai']['selection']['provider']), connected: id === providerId ? modelResult.status.connected : false, message: id === providerId ? modelResult.status.message : 'Not selected', hasCredential: configured.get(id) ?? false })), apiCredentials: providers.credentialSummaries ?? [], models: modelResult.models, filteredModels: filterDesktopModels(modelResult.models, state.ai.modelFilter), status: modelResult.status, taskDefaults: (providers.settings?.taskDefaults as WebviewState['ai']['taskDefaults'] | undefined) ?? state.ai.taskDefaults, settings: { ...state.ai.settings, ...providers.settings, activeApiCredentialId: providers.settings?.activeApiCredentialId, selectedProvider }, selection: { ...state.ai.selection, provider: selectedProvider, model: selectedModel ?? state.ai.selection.model } } });
 	};
 	const persistAiSettings = async (patch: Record<string, unknown>) => {
 		coreAiSettings = { ...coreAiSettings, ...patch, apiCredentials: state.ai.apiCredentials };
@@ -125,13 +132,9 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			await core('credentials.set', { key: 'aqiron.ai.settings', value: JSON.stringify({ ...settings, apiCredentials: state.ai.apiCredentials }) });
 			coreAiSettings = { ...settings, apiCredentials: state.ai.apiCredentials };
 		}
-		update({ ai: { ...state.ai, loadingModels: true, modelError: undefined, models: [], filteredModels: [], status: { ...state.ai.status, connected: false, message: 'Loading models…' }, settings: { ...state.ai.settings, selectedProvider, activeApiCredentialId: activeApiCredentialId ?? state.ai.settings.activeApiCredentialId }, selection: { ...state.ai.selection, provider: selectedProvider, model: '' } } });
+		update({ ai: { ...state.ai, loadingModels: false, modelError: undefined, models: [], filteredModels: [], status: { ...state.ai.status, connected: false, message: 'Model discovery has not been requested' }, settings: { ...state.ai.settings, selectedProvider, activeApiCredentialId: activeApiCredentialId ?? state.ai.settings.activeApiCredentialId }, selection: { ...state.ai.selection, provider: selectedProvider, model: '' } } });
 		try {
-			const result = await core('ai.models', activeApiCredentialId ? {} : { providerId }) as { models: WebviewState['ai']['models']; status: WebviewState['ai']['status'] };
-			const providers = await core('ai.providers') as { settings?: Record<string, unknown> & { activeApiCredentialId?: string; selectedModel?: string; selectedProvider?: string } };
-			coreAiSettings = providers.settings ?? coreAiSettings;
-			const model = typeof coreAiSettings.selectedModel === 'string' && result.models.some((item) => item.id === coreAiSettings.selectedModel) ? coreAiSettings.selectedModel : result.models[0]?.id ?? '';
-			update({ ai: { ...state.ai, loadingModels: false, modelError: result.status.connected ? undefined : result.status.message, providers: state.ai.providers.map((provider) => ({ ...provider, connected: provider.id === selectedProvider ? result.status.connected : false, message: provider.id === selectedProvider ? result.status.message : 'Not selected' })), models: result.models, filteredModels: filterDesktopModels(result.models, state.ai.modelFilter), status: result.status, settings: { ...state.ai.settings, activeApiCredentialId: providers.settings?.activeApiCredentialId, selectedProvider }, selection: { ...state.ai.selection, model } } });
+			await refreshProviders();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			update({ ai: { ...state.ai, loadingModels: false, modelError: message, models: [], filteredModels: [], status: { ...state.ai.status, connected: false, message } } });
@@ -169,6 +172,52 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 		window.dispatchEvent(new MessageEvent('message', { data: { type: 'state', state } }));
 	};
 	const core = (method: DesktopCommand, params: unknown = {}, requestId?: string) => import('@tauri-apps/api/core').then(({ invoke }) => invoke<unknown>('core_request', { method, params, ...(requestId ? { requestId } : {}) }));
+	const refreshHypotheses = async (root = workspaceRoot, version = selectionVersion) => {
+		if (!root || hypothesisListBusy || hypothesisOperationBusy) { return; }
+		hypothesisListBusy = true;
+		update({ hypotheses: { ...(state.hypotheses ?? { items: [] }), loading: true, error: undefined } });
+		try {
+			const result = await core('hypotheses.list', { workspaceRoot: root, includeStale: true }) as { hypotheses: NonNullable<WebviewState['hypotheses']>['items'] };
+			if (version === selectionVersion && root === workspaceRoot) { update({ hypotheses: { items: result.hypotheses, loading: false } }); }
+		} catch {
+			if (version === selectionVersion && root === workspaceRoot) { update({ hypotheses: { ...(state.hypotheses ?? { items: [] }), loading: false, error: 'Core could not load hypotheses for this workspace.' } }); }
+		} finally { hypothesisListBusy = false; }
+	};
+	const generateHypotheses = async () => {
+		const root = workspaceRoot;
+		const scanId = state.coreScanId;
+		const version = selectionVersion;
+		if (!root || !scanId || state.stats.scanStatus !== 'Complete' || hypothesisListBusy || hypothesisOperationBusy) { return; }
+		hypothesisOperationBusy = true;
+		update({ hypotheses: { ...(state.hypotheses ?? { items: [] }), loading: true, error: undefined, generated: undefined } });
+		try {
+			const result = await core('hypotheses.generate', { workspaceRoot: root, scanId }) as { status: 'generated' | 'no-evidence'; diagnostics: Array<{ message: string }> };
+			if (version !== selectionVersion || root !== workspaceRoot || scanId !== state.coreScanId) { return; }
+			const listed = await core('hypotheses.list', { workspaceRoot: root, includeStale: true }) as { hypotheses: NonNullable<WebviewState['hypotheses']>['items'] };
+			if (version === selectionVersion && root === workspaceRoot && scanId === state.coreScanId) {
+				update({ hypotheses: { items: listed.hypotheses, loading: false, generated: result.status === 'generated', ...(result.diagnostics.length ? { error: result.diagnostics.map((item) => item.message).join(' ') } : {}) } });
+			}
+		} catch {
+			if (version === selectionVersion && root === workspaceRoot) { update({ hypotheses: { ...(state.hypotheses ?? { items: [] }), loading: false, error: 'Core could not generate hypotheses from the current scan.' } }); }
+		} finally { hypothesisOperationBusy = false; }
+	};
+	const reviewHypothesis = async (payload: unknown) => {
+		const input = isObjectRecord(payload) ? payload : undefined;
+		const actions = ['investigate', 'validate', 'reject', 'dismiss', 'reopen'];
+		if (!input || Object.keys(input).some((key) => key !== 'hypothesisId' && key !== 'action') || typeof input.hypothesisId !== 'string' || typeof input.action !== 'string' || !actions.includes(input.action) || !workspaceRoot || hypothesisListBusy || hypothesisOperationBusy) { return; }
+		const hypothesis = state.hypotheses?.items.find((item) => item.id === input.hypothesisId);
+		if (!hypothesis) { update({ hypotheses: { ...(state.hypotheses ?? { items: [], loading: false }), error: 'Core could not find that hypothesis in the current workspace. Refresh the list and try again.' } }); return; }
+		const root = workspaceRoot;
+		const version = selectionVersion;
+		hypothesisOperationBusy = true;
+		try {
+			const result = await core('hypotheses.review', { workspaceRoot: root, hypothesisId: hypothesis.id, action: input.action as HypothesisReviewInput['action'] }) as HypothesisReviewResult;
+			const listed = await core('hypotheses.list', { workspaceRoot: root, includeStale: true }) as { hypotheses: NonNullable<WebviewState['hypotheses']>['items'] };
+			if (version === selectionVersion && root === workspaceRoot) { update({ hypotheses: { items: listed.hypotheses, loading: false, ...(!result.applied ? { error: result.diagnostic === 'stale-evidence' ? 'Evidence is stale. Refresh it with a new scan before reviewing this hypothesis.' : result.diagnostic === 'provenance-unavailable' ? 'Evidence provenance is unavailable. Core did not apply the review action.' : 'Core did not apply the review action.' } : {}) } }); }
+		} catch {
+			if (version === selectionVersion && root === workspaceRoot) { update({ hypotheses: { ...(state.hypotheses ?? { items: [] }), loading: false, error: 'Core could not apply that review action. Refresh and check the current evidence state.' } }); }
+		} finally { hypothesisOperationBusy = false; }
+	};
 	const requestCancellationForActiveHypothesis = () => {
 		const requestId = hypothesisExecutionRequestId;
 		if (requestId) { void core('core.cancel', { requestId }).catch(() => undefined); }
@@ -216,6 +265,7 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 				threatSnapshots: [{ id: result.scanId ?? String(Date.now()), title: 'Latest scan', createdAt: new Date().toISOString(), filesScanned, ...coverage, executiveSummary: result.report?.model?.executiveSummary, issues }],
 				activeThreatSnapshotId: result.scanId,
 			});
+			void refreshHypotheses();
 		} catch (error) {
 			if (scanVersion !== selectionVersion) { return; }
 			update({ stats: { ...state.stats, scanStatus: 'Failed' }, pipeline: { ...state.pipeline, stages: state.pipeline.stages.map((stage) => ({ ...stage, status: 'failed' })), logs: [...state.pipeline.logs, `Scan failed: ${error instanceof Error ? error.message : String(error)}`] } });
@@ -228,7 +278,7 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 		reportBundle = undefined;
 		update({ desktopProjectError: undefined, desktopProjectLoading: true,
 			workspace: { ...state.workspace, name: folderName(selection), root: undefined, types: [], status: 'Indexing', risk: 'Secure', backend: 'Aqiron Core' },
-			issues: [], coreScanId: undefined, hypothesisAiConsent: undefined, selectedThreatId: undefined, counts: emptyCounts(), threatSnapshots: [], activeThreatSnapshotId: undefined,
+			issues: [], coreScanId: undefined, hypotheses: { items: [], loading: false }, hypothesisAiConsent: undefined, selectedThreatId: undefined, counts: emptyCounts(), threatSnapshots: [], activeThreatSnapshotId: undefined,
 			stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Idle', lastScanDurationMs: 0 },
 			pipeline: { stages: [], tools: [], logs: [] },
 			ai: { ...state.ai, providers: [], models: [], filteredModels: [], apiCredentials: [], selection: { ...state.ai.selection, model: '' } }, customRules: '[]', chatSessions: [], activeChatSessionId: undefined, suggestions: [], rag: { ...state.rag, ready: false, suggestionsGenerated: false, suggestions: [], suggestionError: undefined },
@@ -239,7 +289,7 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			const providers = await core('ai.providers') as { providers: string[]; configuredProviders?: Array<{ id: string; configured: boolean }>; credentialSummaries?: WebviewState['ai']['apiCredentials']; settings?: Record<string, unknown> & { selectedProvider?: string; selectedModel?: string; activeApiCredentialId?: string } };
 			coreAiSettings = providers.settings ?? {};
 			const providerId = providers.settings?.selectedProvider ?? state.ai.selection.provider ?? 'openrouter';
-			const modelResult = await core('ai.models') as { models: WebviewState['ai']['models']; status: WebviewState['ai']['status'] };
+			const modelResult = { models: state.ai.models, status: { ...state.ai.status, providerId: providerId as WebviewState['ai']['status']['providerId'], connected: false, message: 'Model discovery has not been requested' } };
 			const [ruleResult, historyResult, sessionResult, recommendationResult, reportResult] = await Promise.all([
 				core('workspace.rules.get') as Promise<{ rules: unknown[] }>,
 				core('workspace.threat-history.get') as Promise<{ snapshots: StoredThreatSnapshot[] }>,
@@ -260,7 +310,8 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			const suggestions = recommendationResult.generated ? buildWorkspaceRecommendations(issues, recommendationResult.suggestions) : [];
 			const selectedProvider = providerId as WebviewState['ai']['selection']['provider'];
 			const historySnapshots = historyResult.snapshots.map((snapshot) => ({ ...snapshot, coverageDiagnosticsAvailable: false, coverageDiagnosticsPresent: false, coverageDiagnosticsValid: false, coverageStatus: 'unavailable' as const, skippedFiles: undefined, skippedFilesIsLowerBound: undefined, skippedFilesCountCertainty: 'indeterminate' as const, skipCountConflict: false, skipReasonsTruncated: false, skipReasons: undefined, issues: snapshot.issues.map((issue) => mapStoredIssue(issue, selection)) }));
-			update({ desktopProjectError: undefined, desktopProjectLoading: false, workspace: { ...state.workspace, name: folderName(selection), root: selection, types: project.projectTypes ?? project.frameworks ?? project.languages ?? [], status: 'Ready', backend: 'Aqiron Core', risk: counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure' }, issues, counts, selectedThreatId: issues[0]?.id, threatSnapshots: historySnapshots, activeThreatSnapshotId: historyResult.snapshots[0]?.id, stats: historySnapshots[0] ? statsForHistoricalSnapshot(state.stats, historySnapshots[0]) : state.stats, suggestions, chatSessions: sessionResult.sessions, activeChatSessionId: sessionResult.sessions[0]?.id, ai: { ...state.ai, providers: providers.providers.map((id) => ({ id: id as WebviewState['ai']['selection']['provider'], name: providerName(id as WebviewState['ai']['selection']['provider']), connected: id === providerId ? modelResult.status.connected : false, message: id === providerId ? modelResult.status.message : 'Not selected', hasCredential: configured.get(id) ?? false })), models: modelResult.models, filteredModels: filterDesktopModels(modelResult.models, state.ai.modelFilter), status: modelResult.status, apiCredentials: providers.credentialSummaries ?? [], selection: { ...state.ai.selection, provider: selectedProvider, model: state.ai.selection.model && modelResult.models.some((item) => item.id === state.ai.selection.model) ? state.ai.selection.model : modelResult.models[0]?.id ?? '' } }, customRules: JSON.stringify(ruleResult.rules, null, 2), rag: { ...state.rag, ready: recommendationResult.generated, suggestionsGenerated: recommendationResult.generated, suggestions: recommendationResult.suggestions, suggestionError: recommendationResult.error }, pipeline: { ...state.pipeline, lastReport: reportResult.directory ? { directory: reportResult.directory, pdfPath: reportResult.pdfPath, jsonPath: reportResult.jsonPath, sarifPath: reportResult.sarifPath, sizes: reportResult.sizes, modifiedAt: reportResult.modifiedAt, artifactsAvailable: { pdf: Boolean(reportResult.pdfPath), json: Boolean(reportResult.jsonPath), sarif: Boolean(reportResult.sarifPath) } } : undefined } });
+			update({ desktopProjectError: undefined, desktopProjectLoading: false, workspace: { ...state.workspace, name: folderName(selection), root: selection, types: project.projectTypes ?? project.frameworks ?? project.languages ?? [], status: 'Ready', backend: 'Aqiron Core', risk: counts.critical ? 'Critical' : counts.high ? 'Elevated' : counts.medium ? 'Review' : 'Secure' }, issues, counts, selectedThreatId: issues[0]?.id, threatSnapshots: historySnapshots, activeThreatSnapshotId: historyResult.snapshots[0]?.id, stats: historySnapshots[0] ? statsForHistoricalSnapshot(state.stats, historySnapshots[0]) : state.stats, suggestions, chatSessions: sessionResult.sessions, activeChatSessionId: sessionResult.sessions[0]?.id, ai: { ...state.ai, providers: providers.providers.map((id) => ({ id: id as WebviewState['ai']['selection']['provider'], name: providerName(id as WebviewState['ai']['selection']['provider']), connected: id === providerId ? modelResult.status.connected : false, message: id === providerId ? modelResult.status.message : 'Not selected', hasCredential: configured.get(id) ?? false })), models: modelResult.models, filteredModels: filterDesktopModels(modelResult.models, state.ai.modelFilter), status: modelResult.status, apiCredentials: providers.credentialSummaries ?? [], settings: { ...state.ai.settings, ...providers.settings, selectedProvider }, selection: { ...state.ai.selection, provider: selectedProvider, model: providers.settings?.selectedModel ?? '' } }, customRules: JSON.stringify(ruleResult.rules, null, 2), rag: { ...state.rag, ready: recommendationResult.generated, suggestionsGenerated: recommendationResult.generated, suggestions: recommendationResult.suggestions, suggestionError: recommendationResult.error }, pipeline: { ...state.pipeline, lastReport: reportResult.directory ? { directory: reportResult.directory, pdfPath: reportResult.pdfPath, jsonPath: reportResult.jsonPath, sarifPath: reportResult.sarifPath, sizes: reportResult.sizes, modifiedAt: reportResult.modifiedAt, artifactsAvailable: { pdf: Boolean(reportResult.pdfPath), json: Boolean(reportResult.jsonPath), sarif: Boolean(reportResult.sarifPath) } } : undefined } });
+			void refreshHypotheses(selection, selectedVersion);
 			if (persistenceError) { window.alert(`Project selected, but could not remember it for the next launch: ${persistenceError}`); }
 		} catch (error) {
 			if (request !== pickerRequest || selectedVersion !== selectionVersion) { return; }
@@ -345,21 +396,26 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 	const executeDesktopHypothesis = async (payload: unknown) => {
 		if (hypothesisRequestBusy) return;
 		const retained = retainedConsent(payload);
-		if (!retained?.manifest || !retained.contentFingerprint || retained.result?.state !== 'approved') return;
+		if (!retained?.manifest || !retained.contentFingerprint || retained.result?.state !== 'approved' || retained.executionResult || retained.executionOutcomeUnconfirmed) return;
 		const requestVersion = selectionVersion;
 		hypothesisRequestBusy = true;
 		const requestId = `desktop-hypothesis-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 		hypothesisExecutionRequestId = requestId;
-		setHypothesisConsent({ ...retained, executionPending: true, message: 'Execution is running through Core.' });
 		try {
-			const response = await core('hypotheses.ai.execute', { preparationId: retained.manifest.preparationId, contentFingerprint: retained.contentFingerprint }, requestId);
-			if (requestVersion !== selectionVersion) { return; }
-			if (!isDesktopLifecycleResponse(response)) { setHypothesisConsent({ ...retained, executionPending: false, message: 'Core returned a malformed execution response. No success is reported.' }); }
-			else {
-				const result = response as NonNullable<WebviewState['hypothesisAiConsent']>['executionResult'];
-				setHypothesisConsent({ ...retained, executionResult: result, executionPending: false, message: result?.ok && result.state === 'succeeded' ? 'Core confirmed synthesis completed.' : result && !result.ok && result.reason === 'executor-disabled' ? 'Production synthesis is disabled; no provider request was made.' : 'Core did not complete this execution.' });
-			}
-		} catch { if (requestVersion === selectionVersion) { setHypothesisConsent({ ...retained, executionPending: false, message: 'Core did not confirm execution. No success is reported.' }); } }
+			await hypothesisExecutions.submit({
+				preparationId: retained.manifest.preparationId,
+				contentFingerprint: retained.contentFingerprint,
+				getConsent: () => state.hypothesisAiConsent,
+				setConsent: (consent) => setHypothesisConsent(consent),
+				request: async () => {
+					const response = await core('hypotheses.ai.execute', { preparationId: retained.manifest!.preparationId, contentFingerprint: retained.contentFingerprint! }, requestId);
+					if (!isDesktopLifecycleResponse(response)) {throw new Error('Core returned a malformed execution response.');}
+					return response as NonNullable<NonNullable<WebviewState['hypothesisAiConsent']>['executionResult']>;
+				},
+				publish: () => undefined,
+			});
+			if (requestVersion === selectionVersion && state.hypothesisAiConsent?.executionResult?.ok && state.hypothesisAiConsent.executionResult.state === 'succeeded') { await refreshHypotheses(); }
+		}
 		finally { if (hypothesisExecutionRequestId === requestId) { hypothesisExecutionRequestId = undefined; } hypothesisRequestBusy = false; }
 	};
 	const cancelDesktopHypothesisExecution = async () => {
@@ -379,6 +435,9 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			else if (command === 'ragRefreshSuggestions') { void refreshRecommendations(); }
 			else if (command === 'aiVulnerabilityAnalysis') { void scan('analysis'); }
 			else if (command === 'sendChat') { void sendChat(payload); }
+			else if (command === 'refreshHypotheses') { void refreshHypotheses(); }
+			else if (command === 'generateHypotheses') { void generateHypotheses(); }
+			else if (command === 'reviewHypothesis') { void reviewHypothesis(payload); }
 			else if (command === 'prepareHypothesisAi') { void prepareDesktopHypothesis(payload); }
 			else if (command === 'approveHypothesisAi' || command === 'denyHypothesisAi') { void decideDesktopHypothesis(command === 'approveHypothesisAi' ? 'approve' : 'deny', payload); }
 			else if (command === 'executeHypothesisAi') { void executeDesktopHypothesis(payload); }
@@ -403,7 +462,7 @@ export function createDesktopAdapter(): { state: WebviewState; postMessage(messa
 			else if (command === 'deleteChatSession' && typeof payload === 'string') { void saveSessions(state.chatSessions.filter((session) => session.id !== payload), state.activeChatSessionId === payload ? undefined : state.activeChatSessionId); }
 			else if (command === 'switchProvider' && typeof payload === 'string') { void loadProviderModels(payload).catch((error) => window.alert(`Could not load provider models: ${error instanceof Error ? error.message : String(error)}`)); }
 			else if (command === 'selectModel' && typeof payload === 'string' && state.ai.models.some((model) => model.id === payload)) { update({ ai: { ...state.ai, selection: { ...state.ai.selection, model: payload } } }); void persistAiSettings({ selectedModel: payload }).catch((error) => window.alert(`Could not save selected model: ${error instanceof Error ? error.message : String(error)}`)); }
-			else if (command === 'refreshModels') { void refreshProviders().catch((error) => window.alert(`Could not refresh provider models: ${error instanceof Error ? error.message : String(error)}`)); }
+			else if (command === 'refreshModels') { void refreshProviders(true).catch((error) => window.alert(`Could not refresh provider models: ${error instanceof Error ? error.message : String(error)}`)); }
 			else if (command === 'applyModelFilter' && payload && typeof payload === 'object') { const filter = { ...state.ai.modelFilter, ...(payload as Partial<WebviewState['ai']['modelFilter']>) }; const query = filter.query.trim().toLowerCase(); const models = state.ai.models.filter((model) => (!filter.freeOnly || model.badges.includes('free')) && (!filter.codingOnly || model.capabilities.includes('code')) && (!filter.reasoningOnly || model.capabilities.includes('reasoning')) && (!filter.visionOnly || model.capabilities.includes('vision')) && (!query || [model.id, model.label, model.description ?? '', ...model.badges, ...model.capabilities].some((part) => part.toLowerCase().includes(query)))); update({ ai: { ...state.ai, modelFilter: filter, filteredModels: models } }); }
 			else if (command === 'deleteApiCredential' && typeof payload === 'string') { void deleteCredential(payload); }
 			else if (command === 'deleteLegacyProviderCredential' && typeof payload === 'string') { void deleteLegacyProviderCredential(payload); }
@@ -476,7 +535,7 @@ function makeInitialState(): WebviewState {
 		section: 'scan', setupDone: true,
 		workspace: { name: 'No project selected', types: [], status: 'No workspace', risk: 'Secure', hasGit: false, backend: 'Aqiron Core', apis: [], currentFile: 'No file' },
 		branches: [], stats: { filesScanned: 0, indexedFiles: 0, scanStatus: 'Idle', lastScanDurationMs: 0 },
-		counts: { total: 0, critical: 0, high: 0, medium: 0, low: 0, filesAffected: 0 }, issues: [], suggestions: [], zoom: 1,
+		counts: { total: 0, critical: 0, high: 0, medium: 0, low: 0, filesAffected: 0 }, issues: [], hypotheses: { items: [], loading: false }, suggestions: [], zoom: 1,
 		threatSnapshots: [], memory: { previousPrompts: [], ignoredFindings: [], frameworksDetected: [], apisDiscovered: [], previousScans: [] },
 		graph: { nodes: [], edges: [] }, compliance: [], timeline: [], chatSessions: [], tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, contextWindow: 128000, contextUsed: 0 },
 		ai: { providers: [], models: [], filteredModels: [], modelFilter: { query: '', freeOnly: false, codingOnly: false, reasoningOnly: false, visionOnly: false }, loadingModels: false, status: { connected: false, message: 'Configure an AI provider in Aqiron Security for agent features.' }, settings: { selectedProvider: 'openrouter', temperature: 0.2, maxTokens: 4096, timeoutMs: 60000, retries: 2, streaming: true }, apiCredentials: [], taskDefaults: {} as WebviewState['ai']['taskDefaults'], permissionModes: [], intelligenceProfiles: [], selection: { provider: 'openrouter', model: '', permissionMode: 'read-only', intelligence: 'balanced' } },

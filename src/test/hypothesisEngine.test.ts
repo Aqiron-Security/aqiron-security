@@ -366,6 +366,10 @@ suite('Core deterministic hypothesis engine', function () {
 			assert.equal(validated.hypothesis.review?.action, 'validate');
 			assert.deepEqual(validated.hypothesis.review?.evidenceRefs, [sourceSpan.id]);
 			assert.equal('finding' in validated.hypothesis, false);
+			await assert.rejects(service.review(root, { workspaceRoot: root, hypothesisId: hypothesis.id, action: 'validate', evidenceRefs: [sourceSpan.id] }), /Cannot validate a hypothesis in validated status/);
+			const afterRepeatedReview = (await service.list(root)).hypotheses.find((item) => item.id === hypothesis.id)!;
+			assert.equal(afterRepeatedReview.status, 'validated');
+			assert.equal(afterRepeatedReview.review?.action, 'validate', 'an invalid repeated transition cannot replace the recorded reviewer decision');
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 
@@ -506,6 +510,53 @@ suite('Core deterministic hypothesis engine', function () {
 		}
 	});
 
+	test('freshness checks and stale serialization include contradiction-only source references', async () => {
+		const root = await testRoot('contradiction-only-freshness');
+		try {
+			const supportingSource = 'supporting evidence remains unchanged\n';
+			const contradictorySource = 'contradictory evidence before change\n';
+			await fs.writeFile(path.join(root, 'supporting.ts'), supportingSource);
+			await fs.writeFile(path.join(root, 'contradictory.ts'), contradictorySource);
+			const base = testHypothesis();
+			const makeReference = (id: string, file: string, content: string) => ({
+				id, kind: 'source-span' as const, source: 'Core', file, startLine: 1, endLine: 1,
+				contentHash: hashSourceSpan(content, 1, 1), fileContentHash: hashSourceContent(content), findingId: id,
+				observedAt: base.createdAt, freshness: 'current' as const,
+			});
+			const support = makeReference('span:support', 'supporting.ts', supportingSource);
+			const contradiction = makeReference('span:contradiction', 'contradictory.ts', contradictorySource);
+			const hypothesis: SecurityHypothesis = {
+				...base, status: 'validated', evidence: [support], contradictions: [contradiction],
+				review: { at: base.updatedAt, action: 'validate', evidenceRefs: [support.id] },
+			};
+			const staleContradictionHypothesis: SecurityHypothesis = {
+				...base, id: 'hyp:stale-contradiction-reference', evidence: [{ ...support, id: 'span:support-for-stale-ref' }],
+				contradictions: [{ ...contradiction, id: 'span:already-stale-contradiction', freshness: 'stale' }],
+			};
+			const directory = path.join(root, '.aqiron-security');
+			await fs.mkdir(directory, { recursive: true });
+			await fs.writeFile(path.join(directory, 'hypotheses.json'), JSON.stringify({ version: 1, scoringPolicyVersion: 1, updatedAt: '', hypotheses: [hypothesis, staleContradictionHypothesis], snapshots: [] }));
+			await fs.writeFile(path.join(root, 'contradictory.ts'), 'contradictory evidence changed after review\n');
+
+			const store = new HypothesisStoreService(createFileSystem());
+			const refreshed = (await store.list(root)).hypotheses[0]!;
+			assert.equal(refreshed.status, 'validated', 'staleness does not erase the historical reviewer decision');
+			assert.equal(refreshed.evidenceFreshness, 'stale');
+			assert.equal(refreshed.review?.action, 'validate');
+			assert.equal(refreshed.evidence[0]?.freshness, 'stale');
+			assert.equal(refreshed.contradictions[0]?.freshness, 'stale', 'changed contradiction cannot remain presented as current');
+			const alreadyStaleReference = (await store.list(root)).hypotheses.find((item) => item.id === staleContradictionHypothesis.id)!;
+			assert.equal(alreadyStaleReference.status, 'stale', 'a persisted non-current reference cannot be masked by another current span');
+			assert.equal(alreadyStaleReference.evidenceFreshness, 'stale');
+
+			const runtime = new CoreRuntime({ coreVersion: 'contradiction-only-freshness' });
+			const fetched = await runtime.handle({ id: 'contradiction-only-get', type: 'request', method: 'hypotheses.get', params: { workspaceRoot: root, hypothesisId: hypothesis.id } }, () => undefined);
+			const fromCore = (fetched.result as { hypothesis: SecurityHypothesis }).hypothesis;
+			assert.equal(fromCore.evidenceFreshness, 'stale');
+			assert.equal(fromCore.contradictions[0]?.freshness, 'stale');
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
 	test('legacy finding-only hypotheses remain readable but cannot be reviewed without source provenance', async () => {
 		for (const outcome of ['changed', 'missing'] as const) {
 			const root = await testRoot(`legacy-provenance-${outcome}`);
@@ -552,6 +603,27 @@ suite('Core deterministic hypothesis engine', function () {
 			assert.equal(hypothesis.evidenceFreshness, 'provenance-unavailable');
 			assert.equal(hypothesis.evidence[0]?.freshness, 'stale');
 			assert.equal(hypothesis.review?.action, 'validate');
+		} finally {await fs.rm(root, { recursive: true, force: true });}
+	});
+
+	test('legacy hypotheses without falsification criteria remain proposed and readable through Core list/get', async () => {
+		const root = await testRoot('legacy-without-falsification-criteria');
+		try {
+			const legacy = await addCurrentTestProvenance(root, testHypothesis());
+			const directory = path.join(root, '.aqiron-security');
+			await fs.mkdir(directory, { recursive: true });
+			await fs.writeFile(path.join(directory, 'hypotheses.json'), JSON.stringify({ version: 1, scoringPolicyVersion: 1, updatedAt: '', hypotheses: [legacy], snapshots: [] }));
+			const runtime = new CoreRuntime({ coreVersion: 'legacy-falsification-criteria-test' });
+			const listed = await runtime.handle({ id: 'legacy-falsification-list', type: 'request', method: 'hypotheses.list', params: { workspaceRoot: root } }, () => undefined);
+			const listHypothesis = (listed.result as { hypotheses: SecurityHypothesis[] }).hypotheses[0]!;
+			assert.equal(listHypothesis.falsificationCriteria, undefined);
+			assert.equal(listHypothesis.status, 'proposed');
+			assert.equal(listHypothesis.review, undefined);
+			const fetched = await runtime.handle({ id: 'legacy-falsification-get', type: 'request', method: 'hypotheses.get', params: { workspaceRoot: root, hypothesisId: legacy.id } }, () => undefined);
+			const fetchedHypothesis = (fetched.result as { hypothesis: SecurityHypothesis }).hypothesis;
+			assert.equal(fetchedHypothesis.falsificationCriteria, undefined);
+			assert.equal(fetchedHypothesis.status, 'proposed');
+			assert.equal(fetchedHypothesis.review, undefined);
 		} finally {await fs.rm(root, { recursive: true, force: true });}
 	});
 

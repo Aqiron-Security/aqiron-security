@@ -53,6 +53,26 @@ suite('Hypothesis AI provider configuration binding', () => {
 		await assert.rejects(resolveHypothesisAiProviderConfiguration({ store: state.store, providerId: 'openrouter', modelId: 'model', credentialVersionKey: key }), /credential configuration is unavailable/);
 	});
 
+	test('a changed credential reference and unavailable credential store fail closed', async () => {
+		const state = configuredStore();
+		const key = new Uint8Array(32).fill(4);
+		const captured = await resolveHypothesisAiProviderConfiguration({ store: state.store, providerId: 'openrouter', modelId: 'vendor/model-a', credentialVersionKey: key });
+		const settings = JSON.parse(state.values.get(aiSecretKeys.settings)!) as Record<string, any>;
+		settings.apiCredentials.push({ id: 'router-2', providerId: 'openrouter', name: 'Replacement', last4: '1111', createdAt: 'created', updatedAt: 'updated' });
+		settings.activeApiCredentialId = 'router-2';
+		state.values.set(aiSecretKeys.settings, JSON.stringify(settings));
+		state.values.set(aiSecretKeys.apiCredential('router-2'), 'replacement-secret');
+		const changed = await resolveHypothesisAiProviderConfiguration({ store: state.store, providerId: 'openrouter', modelId: 'vendor/model-a', credentialVersionKey: key });
+		assert.notEqual(changed.credentialIdentity, captured.credentialIdentity);
+		assert.equal(sameHypothesisAiProviderConfiguration(changed, captured), false);
+		const unavailable = { get: async () => {throw new Error('store failure');}, set: async () => undefined, delete: async () => undefined } as unknown as CredentialStore;
+		let diagnostic = '';
+		try {await resolveHypothesisAiProviderConfiguration({ store: unavailable, providerId: 'openrouter', modelId: 'vendor/model-a', credentialVersionKey: key });}
+		catch (error) {diagnostic = error instanceof Error ? error.message : String(error);}
+		assert.match(diagnostic, /configuration is unavailable/);
+		assert.equal(diagnostic.includes('store failure'), false, 'credential-store errors are reduced to a safe diagnostic');
+	});
+
 	test('snapshot and public disclosure fields contain destination details but no raw credential or HMAC', async () => {
 		const state = configuredStore();
 		const snapshot = await resolveHypothesisAiProviderConfiguration({ store: state.store, providerId: 'openrouter', modelId: 'vendor/model-a', credentialVersionKey: new Uint8Array(32).fill(1) });

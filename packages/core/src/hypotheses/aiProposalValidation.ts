@@ -10,12 +10,13 @@ import {
 import { validateEvidenceReference } from './hypothesisEngine';
 import { HypothesisStoreService } from './hypothesisStore';
 import { AIProviderId } from '../shared/ai';
+import { canonicalHypothesisAiEvidenceAliases, hasDuplicateJsonObjectKeys, HYPOTHESIS_AI_MAX_EVIDENCE_ALIASES, hypothesisAiProposalKeys } from './hypothesisAiContract';
 
 export const HYPOTHESIS_AI_RESPONSE_LIMITS = Object.freeze({
 	maxResponseBytes: 16_384,
 	maxValidatedProposalBytes: 12_288,
 	maxProposals: 5,
-	maxEvidenceAliases: 40,
+	maxEvidenceAliases: HYPOTHESIS_AI_MAX_EVIDENCE_ALIASES,
 	maxEvidencePerProposal: 8,
 	maxTitleLength: 160,
 	maxClaimLength: 500,
@@ -33,6 +34,7 @@ export type HypothesisAiValidationError =
 	| 'unsupported-schema-version'
 	| 'invalid-shape'
 	| 'unknown-field'
+	| 'duplicate-field'
 	| 'invalid-alias'
 	| 'invalid-context'
 	| 'invalid-correlation'
@@ -68,19 +70,19 @@ export function createHypothesisAiRequestContext(snapshot: HypothesisSnapshot, e
 	if (references.length > HYPOTHESIS_AI_RESPONSE_LIMITS.maxEvidenceAliases) {
 		throw new RangeError('Hypothesis synthesis evidence exceeds the alias limit.');
 	}
-	const sorted = [...references].sort((left, right) => left?.id?.localeCompare?.(right.id) ?? 0);
-	const ids = new Set<string>();
 	const aliases = new Map<string, HypothesisEvidenceRef>();
-	for (const ref of sorted) {
-		if (!ref || typeof ref.id !== 'string' || !ref.id || ids.has(ref.id) || ref.freshness !== 'current' || !validateEvidenceReference(snapshot, ref)) {
+	let canonicalAliases: Array<{ alias: string; reference: HypothesisEvidenceRef }>;
+	try {canonicalAliases = canonicalHypothesisAiEvidenceAliases(references);}
+	catch {throw new TypeError('Hypothesis synthesis aliases require unique, current references verified by the Core snapshot.');}
+	for (const { alias, reference: ref } of canonicalAliases) {
+		if (ref.freshness !== 'current' || !validateEvidenceReference(snapshot, ref)) {
 			throw new TypeError('Hypothesis synthesis aliases require unique, current references verified by the Core snapshot.');
 		}
-		ids.add(ref.id);
 		const canonical = snapshot.evidence.find((candidate) => candidate.id === ref.id && candidate.kind === ref.kind);
 		if (!canonical) {
 			throw new TypeError('Hypothesis synthesis evidence is not present in the Core snapshot.');
 		}
-		aliases.set(`e${aliases.size + 1}`, Object.freeze({ ...canonical }));
+		aliases.set(alias, Object.freeze({ ...canonical }));
 	}
 	const correlationToken = crypto.randomBytes(32).toString('hex');
 	const context = Object.freeze({ correlationToken });
@@ -105,6 +107,7 @@ export function validateHypothesisAiResponse(raw: unknown, context: HypothesisAi
 	let parsed: unknown;
 	try { parsed = JSON.parse(raw) as unknown; }
 	catch { return { valid: false, error: 'malformed-response' }; }
+	if (hasDuplicateJsonObjectKeys(raw)) {return { valid: false, error: 'duplicate-field' };}
 	if (!isRecord(parsed)) {return { valid: false, error: 'invalid-shape' };}
 	if (parsed.schemaVersion !== 1) {return { valid: false, error: 'unsupported-schema-version' };}
 	if (hasUnknownKeys(parsed, ['schemaVersion', 'proposals'])) {return { valid: false, error: 'unknown-field' };}
@@ -165,10 +168,7 @@ function isRequestContext(value: unknown): value is HypothesisAiRequestContext {
 	return Boolean(value && typeof value === 'object' && requestStates.has(value));
 }
 
-const proposalKeys = [
-	'title', 'claim', 'evidenceRationale', 'supportingEvidenceAliases', 'contradictoryEvidenceAliases',
-	'verificationCriteria', 'falsificationCriteria', 'uncertainties',
-] as const;
+const proposalKeys = hypothesisAiProposalKeys();
 
 function normalizeProposal(value: HypothesisAiProposalV1, aliases: ReadonlyMap<string, HypothesisEvidenceRef>): ValidatedHypothesisAiProposal | 'invalid-alias' | 'reasoning-only' | undefined {
 	const title = normalizeText(value.title, HYPOTHESIS_AI_RESPONSE_LIMITS.maxTitleLength);
@@ -194,7 +194,7 @@ function normalizeProposal(value: HypothesisAiProposalV1, aliases: ReadonlyMap<s
 }
 
 function resolveAliases(value: unknown, aliases: ReadonlyMap<string, HypothesisEvidenceRef>): HypothesisEvidenceRef[] | undefined {
-	if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !/^e[1-9]\d{0,2}$/.test(item))) {return undefined;}
+	if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !/^e[1-9]\d*$/.test(item))) {return undefined;}
 	if (new Set(value).size !== value.length) {return undefined;}
 	const resolved: HypothesisEvidenceRef[] = [];
 	for (const alias of value) {

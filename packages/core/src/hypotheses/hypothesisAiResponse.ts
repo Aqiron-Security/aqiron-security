@@ -1,6 +1,7 @@
 import { AIHttpError, AIHttpResponse } from '../ai/utils/request';
 import { HypothesisAiRequestContext } from './contracts';
 import { HYPOTHESIS_AI_RESPONSE_LIMITS, validateHypothesisAiResponse, HypothesisAiValidationResult, hypothesisAiRequestContextProvider } from './aiProposalValidation';
+import { hasDuplicateJsonObjectKeys } from './hypothesisAiContract';
 
 /**
  * Parses provider-specific, non-streaming HTTP JSON envelopes. These are API
@@ -19,6 +20,7 @@ export async function readAndValidateHypothesisAiResponse(response: AIHttpRespon
 		if (Buffer.byteLength(raw, 'utf8') > HYPOTHESIS_AI_RESPONSE_LIMITS.maxResponseBytes) {return { valid: false, error: 'response-too-large' };}
 		let envelope: unknown;
 		try { envelope = JSON.parse(raw) as unknown; } catch {return { valid: false, error: 'malformed-response' };}
+		if (hasDuplicateJsonObjectKeys(raw)) {return { valid: false, error: 'malformed-response' };}
 		if (!isRecord(envelope) || envelope.error !== undefined) {return { valid: false, error: 'invalid-shape' };}
 		const modelText = extractModelText(hypothesisAiRequestContextProvider(context), envelope);
 		if (modelText === undefined) {return { valid: false, error: 'invalid-shape' };}

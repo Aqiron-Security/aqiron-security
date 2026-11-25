@@ -13,6 +13,7 @@ import { CorrelationResult } from './security/correlation/correlationEngine';
 import { UnifiedFinding } from './security/findings/finding';
 import { CoreClient } from '../packages/core/src/client';
 import { setCoreClient } from './core/coreClientSingleton';
+import { formatHypothesisAiDiagnosticLogLine } from './core/hypothesisAiDiagnosticLog';
 
 export function activate(context: vscode.ExtensionContext): void {
 	const coreClient = new CoreClient({
@@ -22,6 +23,13 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	setCoreClient(coreClient);
 	const output = vscode.window.createOutputChannel('Aqiron Security');
+	const onCoreLog = (chunk: string) => {
+		for (const line of chunk.split(/\r?\n/)) {
+			const summary = formatHypothesisAiDiagnosticLogLine(line);
+			if (summary) {output.appendLine(summary);}
+		}
+	};
+	coreClient.on('log', onCoreLog);
 	const aiService = new AIService(context);
 	const diagnostics = new DiagnosticManager();
 	const rag = new RagWorkspaceService(context, aiService);
@@ -36,6 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		output,
+		{ dispose: () => coreClient.removeListener('log', onCoreLog) },
 		aiService,
 		diagnostics,
 		statusBar,
