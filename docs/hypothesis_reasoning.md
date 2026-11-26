@@ -13,6 +13,8 @@ Four concepts must remain distinct:
 
 This document describes the implementation in Milestone 20. It is the canonical implementation and roadmap reference; it does not describe the complete intended future engine. Evidence Engine V1 facts and storage are documented separately in [Evidence Engine V1](evidence_engine.md).
 
+Controlled Validation is a separate, Core-owned capability and is not implemented or available. It does not change deterministic reasoning or the existing hypothesis review lifecycle. See the design-only [Controlled Validation architecture and threat model](controlled_validation.md). The production AI synthesis gate remains closed.
+
 ## Current implementation — Milestone 20
 
 ### Rule and admission conditions
