@@ -202,6 +202,10 @@ The separate `ValidationLifecycleStore` implements a Core-only durable start com
 
 This is at-most-once committed start, not exactly-once completion. A committed event is not evidence that a procedure launched or completed. No terminal lifecycle facts are emitted until an independently reviewed supervisor exists. A pending marker or any malformed history fails closed and requires manual recovery; the store never truncates or prunes committed history.
 
+An in-process approval-lock timeout during `commitStart` is translated to the typed `START_COMMIT_UNAVAILABLE` result. The timeout occurs before the locked operation and therefore appends no start event, consumes no grant, and returns no receipt. Only this dedicated timeout condition is translated; unexpected programming errors are not hidden by a broad catch. The durable start append remains the sole committed-start linearization point.
+
+The real Node filesystem adapter uses exclusive no-follow file creation, file synchronization, and directory synchronization for newly created/removed entries on POSIX. A lifecycle integration test exercises real `ApprovalHistoryStore` and `ValidationLifecycleStore` operations and reopens their persisted hash-linked records. Windows continues to reject these durable operations rather than claiming equivalent directory-entry durability. Successful synchronization calls are evidence of OS/filesystem acknowledgement, not a guarantee against power loss, device-cache failure, or hardware faults. Terminal-event persistence remains unimplemented; the lifecycle schema reserves terminal categories, but current durable writes cover only start commitment.
+
 ## References
 
 - [Controlled Validation design and persistence](controlled_validation.md)

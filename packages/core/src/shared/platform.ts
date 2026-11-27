@@ -7,9 +7,19 @@ export interface FileSystem {
 	readFileBounded?(path: string, maxBytes: number, encoding: BufferEncoding): Promise<string>;
 	/** Read raw bytes with an adapter-enforced byte ceiling; errors may expose bytesRead including the overflow probe. */
 	readFileBoundedBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
+	/** Bounded no-follow read for a private regular file with a single link. */
+	readFileSafeBoundedBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
 	writeFile(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
 	/** Create a new file only if absent. A write failure may leave a partial orphan; neither adapters nor callers may unlink its pathname after an ambiguous failure. */
 	writeFileExclusive?(path: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void>;
+	/** Append bytes without replacement and acknowledge only after data (and a newly-created directory entry) are synchronized. */
+	appendFileDurable?(path: string, contents: Uint8Array): Promise<void>;
+	/** Exclusively create and durably flush a small recovery marker. */
+	writeFileDurableExclusive?(path: string, contents: Uint8Array): Promise<void>;
+	/** Remove a durable marker and flush its parent directory. */
+	unlinkDurable?(path: string): Promise<void>;
+	/** Synchronize a directory entry set; unsupported platforms must reject. */
+	syncDirectoryDurable?(path: string): Promise<void>;
 	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
 	readdir(path: string, options?: { withFileTypes?: boolean }): Promise<Array<string | { name: string; isDirectory(): boolean; isFile(): boolean }>>;
 	stat(path: string): Promise<{ isFile(): boolean; isDirectory(): boolean; size: number; mtimeMs: number }>;

@@ -135,6 +135,11 @@ export interface ControlledValidationAuthorizationIdSource {
 	epoch(): string;
 }
 
+export interface ControlledValidationAuthorizationLockTimer {
+	setTimeout(callback: () => void, milliseconds: number): unknown;
+	clearTimeout(handle: unknown): void;
+}
+
 const defaultClock: ControlledValidationAuthorizationClock = {
 	wallNow: () => Date.now(),
 	monotonicNow: () => Number(process.hrtime.bigint()) / 1_000_000,
@@ -145,6 +150,15 @@ const defaultIds: ControlledValidationAuthorizationIdSource = {
 	nonce: () => randomBytes(32).toString('hex'),
 	epoch: () => randomUUID(),
 };
+
+const defaultLockTimer: ControlledValidationAuthorizationLockTimer = {
+	setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+	clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+class AuthorizationLockTimeoutError extends Error {
+	constructor() { super('Authorization lock acquisition timed out; no state change was made.'); this.name = 'AuthorizationLockTimeoutError'; }
+}
 
 /**
  * In-memory authorization foundation only. It has no persistence, consume/start,
@@ -164,6 +178,7 @@ export class ControlledValidationAuthorizationService {
 		private readonly lifecycle?: ValidationLifecycleStore,
 		private readonly clock: ControlledValidationAuthorizationClock = defaultClock,
 		private readonly idSource: ControlledValidationAuthorizationIdSource = defaultIds,
+		private readonly lockTimer: ControlledValidationAuthorizationLockTimer = defaultLockTimer,
 	) {
 		this.epoch = idSource.epoch();
 		if (!isUuid(this.epoch)) { throw new TypeError('Core authorization epoch source returned an invalid ID.'); }
@@ -337,7 +352,7 @@ export class ControlledValidationAuthorizationService {
 
 	/** Durably consumes an authorization into a non-executable start commitment. This does not launch work. */
 	async commitStart(approvalId: string, expectedAuthorizationBindingDigest: string, candidate: unknown): Promise<ControlledValidationStartCommitResultV1> {
-		return await this.withApprovalLock(approvalId, async () => {
+		try { return await this.withApprovalLock(approvalId, async () => {
 			const current = this.approvals.get(approvalId);
 			if (!current) { return { ok: false, code: 'APPROVAL_NOT_FOUND', message: 'Approval is unavailable in this Core process.' }; }
 			if (current.record.status === 'consumed') {
@@ -373,7 +388,10 @@ export class ControlledValidationAuthorizationService {
 				schemaVersion: 1, approvalId, executionId: event.executionId, commitmentEventId: event.eventId,
 				authorizationBindingDigest: event.authorizationBindingDigest, consumedAt: event.timestamp, status: 'consumed', nonExecutable: true,
 			} };
-		});
+		}); } catch (error) {
+			if (error instanceof AuthorizationLockTimeoutError) { return { ok: false, code: 'START_COMMIT_UNAVAILABLE', message: error.message }; }
+			throw error;
+		}
 	}
 
 	inspectHistory(): Promise<HistoricalApprovalRecordV1[]> { return this.history.query(); }
@@ -405,13 +423,13 @@ export class ControlledValidationAuthorizationService {
 		const current = new Promise<void>(resolve => { release = resolve; });
 		const queued = prior.then(() => current);
 		this.approvalLocks.set(approvalId, queued);
-		let timer: NodeJS.Timeout | undefined;
-		const acquired = await Promise.race([prior.then(() => true), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 15_000); })]);
-		if (timer) { clearTimeout(timer); }
+		let timer: unknown;
+		const acquired = await Promise.race([prior.then(() => true), new Promise<boolean>(resolve => { timer = this.lockTimer.setTimeout(() => resolve(false), 15_000); })]);
+		if (timer !== undefined) { this.lockTimer.clearTimeout(timer); }
 		if (!acquired) {
 			release();
 			if (this.approvalLocks.get(approvalId) === queued) { this.approvalLocks.delete(approvalId); }
-			throw Object.assign(new Error('Authorization lock acquisition timed out; no state change was made.'), { code: 'AUTHORIZATION_LOCK_TIMEOUT' as const });
+			throw new AuthorizationLockTimeoutError();
 		}
 		try { return await task(); }
 		finally { release(); if (this.approvalLocks.get(approvalId) === queued) { this.approvalLocks.delete(approvalId); } }

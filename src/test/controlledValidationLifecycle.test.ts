@@ -182,6 +182,34 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 		} finally { await fs.rm(root, { recursive: true, force: true }); }
 	});
 
+	test('real Node filesystem durably commits and reopens a complete POSIX start lifecycle', async function () {
+		if (process.platform !== 'linux' && process.platform !== 'darwin') { this.skip(); return; }
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-posix-integration-'));
+		try {
+			const stats = await fs.statfs(root);
+			process.stdout.write(`POSIX lifecycle durability environment: os=${process.platform} ${os.release()} node=${process.version} statfs.type=0x${stats.type.toString(16)} root=${root}\n`);
+			const adapter = createNodeFileSystem();
+			const history = new ApprovalHistoryStore(adapter, root);
+			const lifecycle = new ValidationLifecycleStore(adapter, root);
+			const service = serviceFor(history, lifecycle); const candidate = request('posix-real-node-adapter');
+			const approved = await service.approve(candidate); assert.equal(approved.ok, true); if (!approved.ok) { return; }
+			const binding = authorizationBindingDigest(approved.approval.approvalId, approved.approval.requestDigest);
+			const committed = await service.commitStart(approved.approval.approvalId, binding, candidate);
+			assert.equal(committed.ok, true); if (!committed.ok) { return; }
+			assert.equal(committed.receipt.nonExecutable, true); assert.equal(committed.receipt.status, 'consumed');
+			const reopened = await new ValidationLifecycleStore(createNodeFileSystem(), root).queryStart(approved.approval.approvalId);
+			assert.ok(reopened); assert.equal(reopened?.eventType, 'execution-start-committed'); assert.equal(reopened?.sequence, 1); assert.equal(reopened?.executionId, committed.receipt.executionId);
+			assert.equal(reopened?.historicalOnly, true); assert.equal(reopened?.canAuthorizeExecution, false); assert.equal(reopened?.eventHash.length, 64);
+			const logPath = path.join(root, '.aqiron-security', 'validation-lifecycle', bucket(approved.approval.approvalId), '.aqiron-security', 'lifecycle', `${approved.approval.approvalId}.log`);
+			const lines = (await fs.readFile(logPath, 'utf8')).trimEnd().split('\n'); assert.equal(lines.length, 1);
+			const validated = validateValidationLifecycleEvent(JSON.parse(lines[0]!));
+			assert.equal(validated.eventType, 'execution-start-committed'); assert.equal(validated.sequence, 1); assert.equal(validated.eventHash, reopened?.eventHash);
+			assert.equal(validated.previousEventHash, '0'.repeat(64));
+			const approvalHistory = await new ApprovalHistoryStore(createNodeFileSystem(), root).query();
+			assert.equal(approvalHistory.length, 1); assert.equal(approvalHistory[0]?.approvalId, approved.approval.approvalId); assert.equal(approvalHistory[0]?.historicalOnly, true);
+		} finally { await fs.rm(root, { recursive: true, force: true }); }
+	});
+
 	test('independent processes serialize duplicate commitments with the filesystem lock', async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-process-race-'));
 		try {

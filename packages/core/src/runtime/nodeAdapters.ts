@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { CancellationTokenLike } from '../shared/cancellation';
@@ -12,12 +13,25 @@ const statAsync = promisify(fs.stat);
 const accessAsync = promisify(fs.access);
 const renameAsync = promisify(fs.rename);
 
-async function readRawBounded(file: string, maxBytes: number): Promise<Uint8Array> {
+/** Per-user Core state root. Validation approval history never lives in a selected project. */
+export function resolveCoreDataDirectory(platform: NodeJS.Platform = process.platform, environment: NodeJS.ProcessEnv = process.env, homeDirectory: string = os.homedir()): string {
+	if (platform === 'win32') {
+		const roaming = environment.APPDATA;
+		return path.resolve(roaming && path.isAbsolute(roaming) ? roaming : path.join(homeDirectory, 'AppData', 'Roaming'), 'Aqiron', 'Aqiron Security', 'Core');
+	}
+	if (platform === 'darwin') { return path.resolve(homeDirectory, 'Library', 'Application Support', 'Aqiron Security', 'Core'); }
+	const stateHome = environment.XDG_STATE_HOME;
+	return path.resolve(stateHome && path.isAbsolute(stateHome) ? stateHome : path.join(homeDirectory, '.local', 'state'), 'aqiron-security');
+}
+
+async function readRawBounded(file: string, maxBytes: number, noFollow = false): Promise<Uint8Array> {
 	if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {throw new RangeError('A non-negative bounded-read limit is required.');}
-	const handle = await fs.promises.open(file, 'r');
+	const safeOpenFlags = noFollow ? fs.constants.O_RDONLY | requireSafeOpenCapabilities(fs.constants.O_NOFOLLOW, fs.constants.O_NONBLOCK) : undefined;
+	const handle = await fs.promises.open(file, safeOpenFlags ?? 'r');
 	let total = 0;
 	try {
 		const initial = await handle.stat();
+		if (noFollow && (!initial.isFile() || initial.nlink !== 1)) {throw new Error('Safe bounded read requires a private regular file.');}
 		if (initial.size > maxBytes) {throw Object.assign(new Error(`File exceeds the ${maxBytes}-byte read limit.`), { code: 'FILE_TOO_LARGE', bytesRead: 0 });}
 		const chunks: Buffer[] = [];
 		while (total <= maxBytes) {
@@ -34,6 +48,67 @@ async function readRawBounded(file: string, maxBytes: number): Promise<Uint8Arra
 		throw error;
 	} finally { await handle.close(); }
 }
+
+/** Internal fail-closed capability check shared by race-resistant safe-open paths. */
+export function requireSafeOpenCapabilities(noFollowFlag: number | undefined, nonBlockFlag: number | undefined): number {
+	if (!Number.isSafeInteger(noFollowFlag) || noFollowFlag === undefined || noFollowFlag <= 0 || !Number.isSafeInteger(nonBlockFlag) || nonBlockFlag === undefined || nonBlockFlag <= 0) {
+		throw Object.assign(new Error('Race-resistant no-follow and nonblocking file opening is unavailable on this platform.'), { code: 'SAFE_OPEN_UNAVAILABLE' });
+	}
+	return noFollowFlag | nonBlockFlag;
+}
+
+interface DurableAppendHandle {
+	stat(): Promise<{ isFile(): boolean; nlink: number }>;
+	write(buffer: Uint8Array, offset: number, length: number, position: number | null): Promise<{ bytesWritten: number }>;
+	sync(): Promise<void>;
+	close(): Promise<void>;
+}
+interface DurableAppendOperations {
+	open(file: string, flags: number, mode?: number): Promise<DurableAppendHandle>;
+	syncDirectory(directory: string): Promise<void>;
+}
+/** Internal seam for deterministic create-race tests; not re-exported from the Core package entry point. */
+export async function appendFileDurableWithRetry(file: string, contents: Uint8Array, operations: DurableAppendOperations, constants: { readWrite: number; append: number; create: number; exclusive: number; noFollow: number | undefined; nonBlock: number | undefined }, maxCreateRaces = 3): Promise<void> {
+	const safeFlags = requireSafeOpenCapabilities(constants.noFollow, constants.nonBlock);
+	if (!Number.isSafeInteger(maxCreateRaces) || maxCreateRaces < 1 || maxCreateRaces > 8) { throw new RangeError('Invalid durable append create-race retry bound.'); }
+	let handle: DurableAppendHandle | undefined;
+	let created = false;
+	try {
+		for (let attempt = 0; attempt < maxCreateRaces; attempt++) {
+			try {
+				handle = await operations.open(file, constants.readWrite | constants.append | constants.create | constants.exclusive | safeFlags, 0o600);
+				created = true;
+				break;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'EEXIST') { throw error; }
+				try {
+					// Existing-file path deliberately omits O_CREAT. If it vanished after EEXIST, retry exclusive creation.
+					handle = await operations.open(file, constants.readWrite | constants.append | safeFlags);
+					created = false;
+					break;
+				} catch (fallbackError) {
+					if ((fallbackError as NodeJS.ErrnoException).code !== 'ENOENT' || attempt === maxCreateRaces - 1) { throw fallbackError; }
+				}
+			}
+		}
+		if (!handle) { throw Object.assign(new Error('Durable append could not stabilize a concurrently replaced file.'), { code: 'APPEND_CREATE_RACE_EXHAUSTED' }); }
+		const stat = await handle.stat();
+		if (!stat.isFile() || stat.nlink !== 1) { throw new Error('Ledger target is not a private regular file.'); }
+		let offset = 0;
+		while (offset < contents.byteLength) {
+			const { bytesWritten } = await handle.write(contents, offset, contents.byteLength - offset, null);
+			if (bytesWritten <= 0) { throw new Error('Durable append made no progress.'); }
+			offset += bytesWritten;
+		}
+		await handle.sync();
+		await handle.close(); handle = undefined;
+		if (created) { await operations.syncDirectory(path.dirname(file)); }
+	} catch (error) {
+		try { await handle?.close(); } catch { /* preserve the ambiguous append */ }
+		throw error;
+	}
+}
+
 
 export function createNodeLogger(scope = 'aqiron-core'): Logger {
 	return {
@@ -66,6 +141,7 @@ export function createNodeFileSystem(): FileSystem {
 			return new Uint8Array(await readFileAsync(file));
 		}) as FileSystem['readFile'],
 		readFileBoundedBytes: readRawBounded,
+		readFileSafeBoundedBytes: async (file:string,maxBytes:number)=>await readRawBounded(file,maxBytes,true),
 		readFileBounded: async (file: string, maxBytes: number, encoding: BufferEncoding): Promise<string> => Buffer.from(await readRawBounded(file, maxBytes)).toString(encoding),
 		writeFile: async (file: string, contents: string | Uint8Array, encoding?: BufferEncoding): Promise<void> => {
 			await mkdirAsync(path.dirname(file), { recursive: true });
@@ -79,6 +155,40 @@ export function createNodeFileSystem(): FileSystem {
 				// Keep a partial orphan. Pathname unlink is not ownership-safe after an ambiguous write failure.
 				throw error;
 			}
+		},
+		appendFileDurable: async (file: string, contents: Uint8Array): Promise<void> => {
+			if (process.platform === 'win32') {
+				throw Object.assign(new Error('Durable append is unavailable on Windows because this adapter cannot establish directory-entry durability.'), { code: 'DURABILITY_UNAVAILABLE' });
+			}
+			await appendFileDurableWithRetry(file, contents, {
+				open: async (target, flags, mode) => await fs.promises.open(target, flags, mode) as unknown as DurableAppendHandle,
+				syncDirectory: async directoryPath => { const directory = await fs.promises.open(directoryPath, fs.constants.O_RDONLY); try { await directory.sync(); } finally { await directory.close(); } },
+			}, { readWrite: fs.constants.O_WRONLY, append: fs.constants.O_APPEND, create: fs.constants.O_CREAT, exclusive: fs.constants.O_EXCL, noFollow: fs.constants.O_NOFOLLOW, nonBlock: fs.constants.O_NONBLOCK });
+		},
+		writeFileDurableExclusive: async (file: string, contents: Uint8Array): Promise<void> => {
+			if (process.platform === 'win32') { throw Object.assign(new Error('Durable file creation is unavailable on Windows because directory-entry durability cannot be established.'), { code: 'DURABILITY_UNAVAILABLE' }); }
+			const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0);
+			const handle = await fs.promises.open(file, flags, 0o600);
+			try {
+				let offset = 0;
+				while (offset < contents.byteLength) { const { bytesWritten } = await handle.write(contents, offset, contents.byteLength - offset, offset); if (bytesWritten <= 0) { throw new Error('Durable file creation made no progress.'); } offset += bytesWritten; }
+				await handle.sync();
+			} finally { await handle.close(); }
+			const directory = await fs.promises.open(path.dirname(file), fs.constants.O_RDONLY);
+			try { await directory.sync(); } finally { await directory.close(); }
+		},
+		unlinkDurable: async (file: string): Promise<void> => {
+			if (process.platform === 'win32') { throw Object.assign(new Error('Durable unlink is unavailable on Windows.'), { code: 'DURABILITY_UNAVAILABLE' }); }
+			const stat = await fs.promises.lstat(file);
+			if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) { throw new Error('Unsafe durable-unlink target.'); }
+			await fs.promises.unlink(file);
+			const directory = await fs.promises.open(path.dirname(file), fs.constants.O_RDONLY);
+			try { await directory.sync(); } finally { await directory.close(); }
+		},
+		syncDirectoryDurable: async (directoryPath: string): Promise<void> => {
+			if (process.platform === 'win32') { throw Object.assign(new Error('Directory-entry durability is unavailable on Windows.'), { code: 'DURABILITY_UNAVAILABLE' }); }
+			const handle = await fs.promises.open(directoryPath, fs.constants.O_RDONLY);
+			try { await handle.sync(); } finally { await handle.close(); }
 		},
 		mkdir: async (directory: string, options?: { recursive?: boolean }): Promise<void> => {
 			await mkdirAsync(directory, options);

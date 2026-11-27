@@ -6,9 +6,11 @@ import { suite, test } from 'mocha';
 import {
 	CONTROLLED_VALIDATION_APPROVAL_TTL_MS,
 	CONTROLLED_VALIDATION_CONSENT_DISCLOSURE_VERSION,
+	authorizationBindingDigest,
 	ControlledValidationAuthorizationClock,
 	ControlledValidationAuthorizationDependencies,
 	ControlledValidationAuthorizationIdSource,
+	ControlledValidationAuthorizationLockTimer,
 	ControlledValidationAuthorizationRequestV1,
 	ControlledValidationAuthorizationService,
 	VerifiedControlledValidationProcedure,
@@ -64,7 +66,7 @@ function request(id = 'request-1'): ControlledValidationAuthorizationRequestV1 {
 	};
 }
 
-function fixture(history: ApprovalHistoryPersistence = new TestApprovalHistory(), lifecycle?: ValidationLifecycleStore) {
+function fixture(history: ApprovalHistoryPersistence = new TestApprovalHistory(), lifecycle?: ValidationLifecycleStore, lockTimer?: ControlledValidationAuthorizationLockTimer) {
 	let wall = Date.parse('2026-11-27T12:00:00.000Z');
 	let mono = 10_000;
 	let evidenceCurrent = true;
@@ -90,12 +92,36 @@ function fixture(history: ApprovalHistoryPersistence = new TestApprovalHistory()
 		epoch: () => '00000000-0000-4000-8000-000000000000',
 	};
 	return {
-		service: new ControlledValidationAuthorizationService(dependencies, history, lifecycle, clock, ids),
+		service: new ControlledValidationAuthorizationService(dependencies, history, lifecycle, clock, ids, lockTimer),
 		setMono(value: number) { mono = value; },
 		setEvidenceCurrent(value: boolean) { evidenceCurrent = value; },
 		setProcedure(value: VerifiedControlledValidationProcedure | undefined) { procedure = value; },
 		dependencies, clock, ids, history,
 	};
+}
+
+class ManualLockTimer implements ControlledValidationAuthorizationLockTimer {
+	private next = 0;
+	private readonly callbacks = new Map<number, () => void>();
+	setTimeout(callback: () => void, _milliseconds: number): unknown { const id = ++this.next; this.callbacks.set(id, callback); return id; }
+	clearTimeout(handle: unknown): void { this.callbacks.delete(handle as number); }
+	expireNext(): void { const entry = this.callbacks.entries().next().value as [number, () => void] | undefined; assert.ok(entry, 'expected an approval lock wait timer'); this.callbacks.delete(entry[0]); entry[1](); }
+}
+
+function deferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>(yes => { resolve = yes; });
+	return { promise, resolve };
+}
+
+function fakeLifecycleStore(commits: Array<{ approvalId: string; timestamp: string; authorizationBindingDigest: string }>) {
+	return {
+		async queryStart(approvalId: string) { return undefined; },
+		async commitStart(input: { approvalId: string; timestamp: string; authorizationBindingDigest: string }) {
+			commits.push({ approvalId: input.approvalId, timestamp: input.timestamp, authorizationBindingDigest: input.authorizationBindingDigest });
+			return { committed: true, duplicate: false, event: { executionId: '00000000-0000-4000-8000-000000000900', eventId: input.approvalId, timestamp: input.timestamp, authorizationBindingDigest: input.authorizationBindingDigest } };
+		},
+	} as unknown as ValidationLifecycleStore;
 }
 
 function reliableHistoryFileSystem(options: { failAppend?: boolean } = {}): FileSystem {
@@ -302,6 +328,46 @@ suite('Controlled Validation Core authorization', () => {
 		const result = await core.authorizeControlledValidation(request());
 		assert.equal(result.ok, false);
 		if (!result.ok) { assert.ok(['DEPENDENCY_UNAVAILABLE','HISTORY_STORAGE_UNAVAILABLE'].includes(result.code)); }
+	});
+
+	test('approval-lock timeout returns a typed unavailable result without consuming or committing, then allows retry', async () => {
+		const timer = new ManualLockTimer(); const commits: Array<{ approvalId: string; timestamp: string; authorizationBindingDigest: string }> = [];
+		const lifecycle = fakeLifecycleStore(commits); const f = fixture(new TestApprovalHistory(), lifecycle, timer);
+		const candidateA = request('lock-timeout-a'); const candidateB = request('lock-timeout-b');
+		const [issuedA, issuedB] = await Promise.all([f.service.approve(candidateA), f.service.approve(candidateB)]);
+		assert.equal(issuedA.ok && issuedB.ok, true); if (!issuedA.ok || !issuedB.ok) { return; }
+		const entered = deferred<void>(); const release = deferred<void>(); let blockNextProjectCheck = true;
+		f.dependencies.resolveProject = async root => { if (blockNextProjectCheck) { blockNextProjectCheck = false; entered.resolve(); await release.promise; } return { canonicalRoot: root, identity: digest }; };
+		const bindingA = authorizationBindingDigest(issuedA.approval.approvalId, issuedA.approval.requestDigest);
+		const bindingB = authorizationBindingDigest(issuedB.approval.approvalId, issuedB.approval.requestDigest);
+		const heldValidation = f.service.validate(issuedA.approval.approvalId, candidateA); await entered.promise;
+		const independent = await f.service.commitStart(issuedB.approval.approvalId, bindingB, candidateB);
+		assert.equal(independent.ok, true, 'independent approval is not blocked by another approval lock');
+		const competing = f.service.commitStart(issuedA.approval.approvalId, bindingA, candidateA); timer.expireNext();
+		const timedOut = await competing;
+		assert.deepEqual(timedOut.ok ? { ok: true } : { ok: false, code: timedOut.code }, { ok: false, code: 'START_COMMIT_UNAVAILABLE' });
+		if (!timedOut.ok) { assert.match(timedOut.message, /Authorization lock acquisition timed out/); assert.equal('receipt' in timedOut, false); }
+		assert.equal(commits.filter(item => item.approvalId === issuedA.approval.approvalId).length, 0, 'timed-out commit did not append a lifecycle event');
+		assert.equal(commits.filter(item => item.approvalId === issuedB.approval.approvalId).length, 1);
+		release.resolve(); assert.equal((await heldValidation).ok, true);
+		assert.equal((await f.service.validate(issuedA.approval.approvalId, candidateA)).ok, true, 'grant remains approved after lock timeout');
+		const retry = await f.service.commitStart(issuedA.approval.approvalId, bindingA, candidateA);
+		assert.equal(retry.ok, true, 'released lock allows a later valid start');
+		assert.equal(commits.filter(item => item.approvalId === issuedA.approval.approvalId).length, 1, 'at most one start was committed for the retried approval');
+	});
+
+	test('non-lock programming errors escape the timeout translation and persistence faults retain their fail-closed result', async () => {
+		const commits: Array<{ approvalId: string; timestamp: string; authorizationBindingDigest: string }> = [];
+		const lifecycle = fakeLifecycleStore(commits); const f = fixture(new TestApprovalHistory(), lifecycle);
+		const candidate = request('lock-unexpected-error'); const approved = await f.service.approve(candidate); assert.equal(approved.ok, true); if (!approved.ok) { return; }
+		const binding = authorizationBindingDigest(approved.approval.approvalId, approved.approval.requestDigest);
+		const failure = new Error('unexpected monotonic clock fault'); f.clock.monotonicNow = () => { throw failure; };
+		await assert.rejects(() => f.service.commitStart(approved.approval.approvalId, binding, candidate), error => error === failure);
+		const brokenLifecycle = { async queryStart() { return undefined; }, async commitStart() { throw Object.assign(new Error('EIO durable filesystem fault'), { code: 'EIO' }); } } as unknown as ValidationLifecycleStore;
+		const retryFixture = fixture(new TestApprovalHistory(), brokenLifecycle); const retryApproval = await retryFixture.service.approve(candidate); assert.equal(retryApproval.ok, true); if (!retryApproval.ok) { return; }
+		const retryBinding = authorizationBindingDigest(retryApproval.approval.approvalId, retryApproval.approval.requestDigest);
+		const persistence = await retryFixture.service.commitStart(retryApproval.approval.approvalId, retryBinding, candidate);
+		assert.equal(persistence.ok, false); if (!persistence.ok) { assert.equal(persistence.code, 'START_COMMIT_UNAVAILABLE'); assert.match(persistence.message, /EIO durable filesystem fault/); }
 	});
 });
 
