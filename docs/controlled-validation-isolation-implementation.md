@@ -8,7 +8,7 @@
 2. The supervisor verifies that the receipt was accepted at the internal adapter boundary, that the descriptor and scope are well formed and mutually consistent, and that the input is within its cap. Invalid inputs are blocked before provider invocation.
 3. Admission requires a provider for the current platform and an explicit `qualified` status with evidence ID and every required capability true. Provider and supervisor qualification must agree.
 4. An accepted provider would receive only a fixed worker-entry identifier, verified data descriptor, read-only scope/profile, bounded input, and a constant environment allowlist (`LANG`, `LC_ALL`, `TZ`). There is no command, executable, shell, or environment inheritance field.
-5. The supervisor applies an execution deadline, asks the provider to terminate on timeout/failure, bounds returned output, and attempts resource cleanup on every post-launch path. Unconfirmed teardown is represented explicitly.
+5. Once `launch` returns a handle, the supervisor transfers all wait, deadline, cancellation, termination-confirmation, cleanup, and terminal-outcome ownership to `WorkerCancellationCoordinator`. The supervisor only converts the coordinator's settled result and checks the output bound; it never independently calls handle lifecycle methods. A launch rejection has no handle and follows a separate failure path.
 
 This lifecycle exists as a narrow internal contract. The non-test production gate is source-controlled `false`; the test factory requires an explicit fake-provider seam and cannot modify that gate. Nothing imports this module from CoreRuntime or shared export barrels.
 
@@ -18,6 +18,7 @@ This lifecycle exists as a narrow internal contract. The non-test production gat
 - **M22.3.4 registry:** adapter must resolve an immutable registry entry, verify signature/revocation/digest and policy, then produce `VerifiedProcedureDescriptor`. No registry code is imported here.
 - **Scope and limits:** Core must derive canonical project identity, target IDs, and exact captured input paths and supply approved ceilings. Caller-provided paths, limits, or launch strings are not authoritative.
 - **M22.3.6 cancellation:** adapter must deliver cancellation by execution identity and report confirmed local teardown separately from request acknowledgement. A provider must terminate the whole OS job/VM, not just a direct child.
+- **M22.3.6 lifecycle ownership:** the supervisor now registers the coordinator for internal cancellation while a launch is active. Explicit cancellation and the coordinator's profile deadline share the same operation; timeout, completion, and cancellation cannot independently terminate or clean the handle. This internal method is not wired to CoreRuntime, protocol, Desktop, or CLI.
 - A later integration must also supply safe immutable input staging. The current contract validates lexical containment; it does not implement race-safe path opening or filesystem snapshots.
 
 ## Provider status and required controls

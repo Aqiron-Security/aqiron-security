@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { IsolationQualification, qualificationAllowsExecution } from './isolation/contracts';
-import { IsolationProvider, IsolatedWorkerResult, ValidatedTargetProjectScope, VerifiedProcedureDescriptor, DEFAULT_ISOLATION_QUALIFICATIONS, currentIsolationPlatform } from './isolation/providers';
+import { IsolationProvider, ValidatedTargetProjectScope, VerifiedProcedureDescriptor, DEFAULT_ISOLATION_QUALIFICATIONS, currentIsolationPlatform } from './isolation/providers';
 import { ValidatedIsolationProfile } from './isolation/contracts';
 import { CommittedStartReceipt, isAcceptedCommittedStartReceipt } from './isolation/receipt';
+import { CancellationClock, CancellationResult, DEFAULT_SHUTDOWN_BOUNDS, WorkerCancellationCoordinator } from './cancellation';
 
 /** Kept source-controlled and closed. No runtime/client option can enable production launch. */
 export const CONTROLLED_VALIDATION_PRODUCTION_EXECUTION_ENABLED = false;
@@ -19,10 +20,13 @@ export interface SupervisorLaunchInput {
 
 export interface SupervisorResult {
 	readonly executionId: string;
-	readonly status: 'completed' | 'failed' | 'timed-out' | 'blocked';
+	readonly status: 'completed' | 'failed' | 'timed-out' | 'cancelled' | 'interrupted' | 'blocked';
 	readonly output?: Uint8Array;
 	readonly outputDigest?: string;
 	readonly teardownConfirmed?: boolean;
+	readonly cleanupOutcome?: CancellationResult['cleanup'];
+	readonly executionUncertain?: boolean;
+	readonly cancellationRequested?: boolean;
 }
 
 export interface SupervisorDependencies {
@@ -30,10 +34,14 @@ export interface SupervisorDependencies {
 	readonly qualification?: IsolationQualification;
 	/** Explicit contract-test seam. It cannot change the production factory. */
 	readonly contractTestOnly?: true;
+	/** Test-only clock seam; the production factory never accepts injected dependencies. */
+	readonly cancellationClock?: CancellationClock;
 }
 
 export interface ExecutionSupervisor {
 	launch(input: SupervisorLaunchInput): Promise<SupervisorResult>;
+	/** Core-internal cancellation by the committed execution identity; no client route is registered. */
+	cancel(executionId: string): Promise<CancellationResult | undefined>;
 	qualification(): IsolationQualification | undefined;
 }
 
@@ -52,31 +60,35 @@ export function createContractTestSupervisor(dependencies: Omit<SupervisorDepend
 function createSupervisor(dependencies: SupervisorDependencies): ExecutionSupervisor {
 	const provider = dependencies.providers?.find(item => item.platform === dependencies.qualification?.platform);
 	const qualification = dependencies.qualification ?? provider?.getQualification();
+	const active = new Map<string, WorkerCancellationCoordinator>();
 	return {
 		qualification: () => qualification,
+		async cancel(executionId) { return active.get(executionId)?.cancel('cancel'); },
 		async launch(input): Promise<SupervisorResult> {
 			const id = input?.receipt?.executionId ?? 'unknown';
 			if (!dependencies.contractTestOnly || CONTROLLED_VALIDATION_PRODUCTION_EXECUTION_ENABLED) { return { executionId: id, status: 'blocked' }; }
 			if (!isAcceptedCommittedStartReceipt(input.receipt) || !validDescriptor(input.descriptor) || !validScope(input.scope, input.profile) || !(input.input instanceof Uint8Array) || input.input.byteLength > MAX_INPUT_BYTES) { return { executionId: id, status: 'blocked' }; }
 			if (!provider || !qualification || provider.platform !== qualification.platform || !qualificationAllowsExecution(qualification) || !qualificationAllowsExecution(provider.getQualification())) { return { executionId: id, status: 'blocked' }; }
+			if (active.has(id)) { return { executionId: id, status: 'blocked' }; }
 			const profile = input.profile;
 			const boundedInput = new Uint8Array(input.input);
-			let handle;
 			try {
-				handle = await provider.launch({ workerEntry: WORKER_ENTRY, descriptor: input.descriptor, scope: input.scope, profile, environment: EMPTY_ENVIRONMENT, input: boundedInput });
-				let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-				const timeout = new Promise<never>((_, reject) => { timeoutHandle = setTimeout(() => reject(Object.assign(new Error('Worker execution deadline exceeded.'), { code: 'WORKER_TIMEOUT' })), profile.timeoutMs); });
-				let result: IsolatedWorkerResult;
-				try { result = await Promise.race([handle.wait(), timeout]); }
-				catch (error) {
-					const timedOut = (error as { code?: string })?.code === 'WORKER_TIMEOUT';
-					const stopped = await handle.terminate(timedOut ? 'timeout' : 'failure');
-					return { executionId: id, status: timedOut ? 'timed-out' : 'failed', teardownConfirmed: stopped.confirmed };
-				} finally { if (timeoutHandle) { clearTimeout(timeoutHandle); } }
-				if (!(result.output instanceof Uint8Array) || result.output.byteLength > profile.outputBytes || result.truncated) { return { executionId: id, status: 'failed' }; }
-				return { executionId: id, status: result.exitCategory === 'success' ? 'completed' : 'failed', output: new Uint8Array(result.output), outputDigest: createHash('sha256').update(result.output).digest('hex') };
+				const handle = await provider.launch({ workerEntry: WORKER_ENTRY, descriptor: input.descriptor, scope: input.scope, profile, environment: EMPTY_ENVIRONMENT, input: boundedInput });
+				const coordinatorBounds = { ...DEFAULT_SHUTDOWN_BOUNDS, waitMs: profile.timeoutMs, totalMs: Math.min(DEFAULT_SHUTDOWN_BOUNDS.totalMs, profile.timeoutMs + DEFAULT_SHUTDOWN_BOUNDS.terminateMs + DEFAULT_SHUTDOWN_BOUNDS.confirmationMs + DEFAULT_SHUTDOWN_BOUNDS.cleanupMs) };
+				const coordinator = new WorkerCancellationCoordinator(handle, coordinatorBounds, dependencies.cancellationClock);
+				active.set(id, coordinator);
+				try {
+					const lifecycle = await coordinator.waitForCompletion();
+					if (lifecycle.outcome === 'interrupted' || lifecycle.outcome === 'cancelled' || lifecycle.outcome === 'timed-out') {
+						return { executionId: id, status: lifecycle.outcome, teardownConfirmed: lifecycle.terminationConfirmed, cleanupOutcome: lifecycle.cleanup, executionUncertain: lifecycle.executionUncertain, cancellationRequested: lifecycle.cancellationRequested };
+					}
+					const result = lifecycle.workerResult;
+					if (lifecycle.outcome !== 'completed' || !result || !(result.output instanceof Uint8Array) || result.output.byteLength > profile.outputBytes || result.truncated) {
+						return { executionId: id, status: 'failed', teardownConfirmed: lifecycle.terminationConfirmed, cleanupOutcome: lifecycle.cleanup, executionUncertain: lifecycle.executionUncertain };
+					}
+					return { executionId: id, status: 'completed', output: new Uint8Array(result.output), outputDigest: createHash('sha256').update(result.output).digest('hex'), cleanupOutcome: lifecycle.cleanup };
+				} finally { if (active.get(id) === coordinator) { active.delete(id); } }
 			} catch { return { executionId: id, status: 'failed' }; }
-			finally { if (handle) { try { await handle.cleanup(); } catch { /* retain failure-closed result */ } } }
 		},
 	};
 }
