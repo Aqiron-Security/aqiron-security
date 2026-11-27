@@ -5,7 +5,7 @@ import { resolveChatGenerationPolicy } from '../ai/services/chatGenerationPolicy
 import { AIVulnerabilityAnalysis, AIAnalysisResult } from '../ai/analysis/aiVulnerabilityAnalysis';
 import { AIReviewService } from '../ai/analysis/aiReview';
 import { createNetworkTransport } from '../ai/utils/request';
-import { createNodeFileSystem, createNodeLogger, createNodeNetworkClient, createNodeProcessRunner, NodeCredentialStore } from './nodeAdapters';
+import { createNodeFileSystem, createNodeLogger, createNodeNetworkClient, createNodeProcessRunner, NodeCredentialStore, resolveCoreDataDirectory } from './nodeAdapters';
 import { CORE_PROTOCOL_VERSION, CoreAgentSession, CoreAiChatRequest, CoreAiModelsRequest, CoreAiModelsResult, CoreAiProvidersResult, CoreAiReviewRequest, CoreAiVulnerabilityAnalysisRequest, CoreCredentialsDeleteRequest, CoreCredentialsSetRequest, CoreCredentialsStatusResult, CoreEventMessage, CoreHandshakeRequest, CoreHandshakeResponse, CoreHealthResult, CoreInfoResult, CoreMessage, CoreMethod, CoreMethodParams, CoreMethodResults, CoreProjectDetectRequest, CoreProjectProfileResult, CoreRagIndexRequest, CoreRagIndexResult, CoreRagQueryRequest, CoreRagQueryResult, CoreRagStatusResult, CoreRequestMessage, CoreResponseMessage, CoreScanStartRequest, CoreScanStartResult, CoreScanStatusResult, CoreRuntimeServicesState, CoreReportGenerateRequest } from './protocol';
 import { ProjectDetectorOptions, detectProjectProfile } from '../project/projectDetector';
 import { createEmptyProjectProfile } from '../project/projectProfile';
@@ -40,6 +40,9 @@ import { buildHypothesisAiBoundRequest, createHypothesisAiBoundRequestPlan, hypo
 import { createHypothesisAiRequestContext } from '../hypotheses/aiProposalValidation';
 import { createHypothesisAiExecutor } from '../hypotheses/hypothesisAiExecutor';
 import { EvidenceEngine } from '../evidence/evidenceEngine';
+import { ControlledValidationAuthorizationRequestV1, ControlledValidationAuthorizationResult, ControlledValidationAuthorizationService, ControlledValidationStartCommitResultV1 } from '../validation/authorization';
+import { ApprovalHistoryPersistence, ApprovalHistoryStore } from '../validation/approvalHistory';
+import { ValidationLifecycleStore } from '../validation/validationLifecycle';
 
 /**
  * Release gate for the production composition. Keep this source-controlled and
@@ -60,6 +63,10 @@ interface CoreRuntimeTestOptions extends CoreRuntimeOptions {
 	aiTransport?: AITransport;
 	/** Test-only seam; not accepted by the public runCoreRuntime composition. */
 	hypothesisAiExecutor?: HypothesisAiExecutor;
+	controlledValidationAuthorizationDependencies?: import('../validation/authorization').ControlledValidationAuthorizationDependencies;
+	controlledValidationHistory?: ApprovalHistoryPersistence;
+	controlledValidationDataDirectory?: string;
+	controlledValidationLifecycle?: ValidationLifecycleStore;
 }
 
 interface ScanStateRecord {
@@ -100,6 +107,7 @@ export class CoreRuntime {
 	private readonly workspaceRules = new WorkspaceRuleStore(this.filesystem);
 	private readonly hypotheses = new HypothesisStoreService(this.filesystem);
 	private readonly evidence = new EvidenceEngine(this.filesystem);
+	private readonly controlledValidationAuthorization: ControlledValidationAuthorizationService;
 	private readonly hypothesisAiPreparations = new HypothesisAiPreparationRegistry();
 	private readonly productionHypothesisAiExecutor: HypothesisAiExecutor;
 	/** Process-local key used only to detect in-process credential rotation; never persisted or disclosed. */
@@ -114,6 +122,18 @@ export class CoreRuntime {
 	private shutdownRequested = false;
 
 	constructor(private readonly options: CoreRuntimeTestOptions) {
+		const authorizationDependencies = options.controlledValidationAuthorizationDependencies ?? {
+			resolveProject: async () => { throw new Error('Project authorization provider is not configured.'); },
+			validateProjectTargets: async () => false,
+			resolveVerifiedProcedure: async () => undefined,
+			resolveCurrentEvidence: async () => undefined,
+			validatePolicy: () => false,
+		};
+		this.controlledValidationAuthorization = new ControlledValidationAuthorizationService(
+			authorizationDependencies,
+			options.controlledValidationHistory ?? new ApprovalHistoryStore(this.filesystem, options.controlledValidationDataDirectory ?? resolveCoreDataDirectory()),
+			options.controlledValidationLifecycle ?? new ValidationLifecycleStore(this.filesystem, options.controlledValidationDataDirectory ?? resolveCoreDataDirectory()),
+		);
 		this.credentialStore = options.credentialStore ?? new NodeCredentialStore();
 		this.transport = options.aiTransport ?? createNetworkTransport(this.networkClient);
 		// Assemble the production-intended pipeline from Core's own transport and
@@ -141,6 +161,21 @@ export class CoreRuntime {
 		this.scannerManager.register(new OsvScanner());
 		this.scannerManager.register(new SemgrepScanner());
 		this.scannerManager.register(new TrivyScanner());
+	}
+
+	/** Internal Core authorization entry point. It is not a protocol operation and fails closed until providers are implemented. */
+	authorizeControlledValidation(request: ControlledValidationAuthorizationRequestV1): Promise<ControlledValidationAuthorizationResult> {
+		return this.controlledValidationAuthorization.approve(request);
+	}
+
+	/** Internal authorization-state check only; never consumes or starts an approval. */
+	validateControlledValidationAuthorization(approvalId: string, request: unknown): Promise<ControlledValidationAuthorizationResult> {
+		return this.controlledValidationAuthorization.validate(approvalId, request);
+	}
+
+	/** Internal Core persistence boundary only. Returns a non-executable receipt and never launches work. */
+	commitControlledValidationStart(approvalId: string, expectedAuthorizationBindingDigest: string, request: unknown): Promise<ControlledValidationStartCommitResultV1> {
+		return this.controlledValidationAuthorization.commitStart(approvalId, expectedAuthorizationBindingDigest, request);
 	}
 
 	async handle(input: unknown, emit: (event: CoreEventMessage) => void, rawRequestBytes?: number): Promise<CoreResponseMessage> {
@@ -306,6 +341,8 @@ export class CoreRuntime {
 	private async shutdown(): Promise<{ ok: true }> {
 		this.shutdownRequested = true;
 		this.hypothesisAiPreparations.dispose();
+		const invalidated = await this.controlledValidationAuthorization.invalidateAllForShutdown();
+		if (!invalidated.ok) { this.logger.error('controlled-validation.approval-history.shutdown-invalidation-failed', { code: invalidated.code, message: invalidated.message }); }
 		return { ok: true };
 	}
 
