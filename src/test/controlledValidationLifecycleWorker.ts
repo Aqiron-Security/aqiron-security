@@ -18,7 +18,8 @@ async function main(): Promise<void> {
 	const root = process.argv[2]; const raw = process.argv[3];
 	if (!root || !raw || raw.length > 16_384) { throw new TypeError('Worker input is missing or oversized.'); }
 	const input = JSON.parse(raw) as StartCommitInputV1;
-	const result = await new ValidationLifecycleStore(testFileSystem(), root).commitStart(input);
+	const canonicalRoot = await fs.realpath(root);
+	const result = await new ValidationLifecycleStore(testFileSystem(), canonicalRoot).commitStart(input);
 	process.stdout.write(JSON.stringify({ committed: result.committed, duplicate: result.duplicate, executionId: result.event.executionId }));
 }
 

@@ -73,7 +73,7 @@ suite('Core runtime process', () => {
 	});
 
 	test('handshakes, reports health, and exposes credential metadata without requiring a keychain session', async () => {
-		const runtime = path.resolve(__dirname, '../../../dist/core-runtime.js');
+		const runtime = path.resolve(__dirname, '../../../.aqiron-build/node/core-runtime.js');
 		const child = childProcess.spawn(process.execPath, [runtime], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 		const responses = new Map<string, (response: CoreResponse) => void>();
 		let buffer = '';

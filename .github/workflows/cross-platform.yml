@@ -57,7 +57,7 @@ jobs:
         run: npm run test:focused
 
       - name: Verify real POSIX durable lifecycle commitment
-        if: runner.os == 'Linux' || runner.os == 'macOS'
+        if: ${{ !cancelled() && (runner.os == 'Linux' || runner.os == 'macOS') }}
         run: npx mocha --ui tdd .ci-compiled-tests/src/test/controlledValidationLifecycle.test.js --grep "real Node filesystem durably commits and reopens a complete POSIX start lifecycle"
 
       - name: Run Desktop bridge tests

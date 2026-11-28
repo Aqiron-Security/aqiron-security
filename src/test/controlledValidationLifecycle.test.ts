@@ -46,6 +46,19 @@ function durableTestFileSystem(options: { failAppend?: boolean } = {}): FileSyst
 }
 function bucket(approvalId: string): string { return createHash('sha256').update(approvalId).digest('hex').slice(0, 2); }
 
+async function canonicalTempRoot(prefix: string): Promise<string> {
+	const supplied = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	return await fs.realpath(supplied);
+}
+
+async function lifecyclePathDiagnostics(suppliedRoot: string, bucketRoot: string): Promise<string> {
+	const [physical, stat] = await Promise.all([fs.realpath(bucketRoot), fs.lstat(bucketRoot)]);
+	const normalized = (value: string) => path.resolve(value).replace(/\\/g, '/').replace(/^\\\\\?\\/, '').toLowerCase();
+	return JSON.stringify({ suppliedLifecycleRoot: suppliedRoot, bucketRoot, realpathBucketRoot: physical,
+		lstat: { directory: stat.isDirectory(), symlink: stat.isSymbolicLink() },
+		normalized: { bucketRoot: normalized(bucketRoot), realpathBucketRoot: normalized(physical) } });
+}
+
 function serviceFor(history: ApprovalHistoryStore, lifecycle: ValidationLifecycleStore) {
 	let next = 1;
 	const dependencies: ControlledValidationAuthorizationDependencies = {
@@ -61,7 +74,7 @@ function serviceFor(history: ApprovalHistoryStore, lifecycle: ValidationLifecycl
 suite('Controlled Validation atomic lifecycle commitment', function () {
 	this.timeout(20_000);
 	test('commits one durable non-executable start and rejects reuse', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-once-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-once-');
 		try {
 			const fileSystem = durableTestFileSystem(); const history = new ApprovalHistoryStore(fileSystem, root); const lifecycle = new ValidationLifecycleStore(fileSystem, root);
 			const service = serviceFor(history, lifecycle); const candidate = request('once'); const approval = await service.approve(candidate); assert.equal(approval.ok, true); if (!approval.ok) { return; }
@@ -76,7 +89,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 	});
 
 	test('simultaneous starts for one approval have a single durable winner', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-race-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-race-');
 		try {
 			const fileSystem = durableTestFileSystem(); const history = new ApprovalHistoryStore(fileSystem, root); const lifecycle = new ValidationLifecycleStore(fileSystem, root); const service = serviceFor(history, lifecycle);
 			const candidate = request('race'); const approval = await service.approve(candidate); assert.equal(approval.ok, true); if (!approval.ok) { return; }
@@ -88,7 +101,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 	});
 
 	test('different approvals commit independently and bind all authorization facts', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-distinct-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-distinct-');
 		try {
 			const fileSystem = durableTestFileSystem(); const history = new ApprovalHistoryStore(fileSystem, root); const lifecycle = new ValidationLifecycleStore(fileSystem, root); const service = serviceFor(history, lifecycle);
 			const a = request('different-a'); const b = request('different-b'); const [issuedA, issuedB] = await Promise.all([service.approve(a), service.approve(b)]); assert.equal(issuedA.ok && issuedB.ok, true); if (!issuedA.ok || !issuedB.ok) { return; }
@@ -99,7 +112,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 
 	test('binding tampering, revocation, and expiry never commit a start', async () => {
 		for (const scenario of ['binding', 'revoked', 'expired'] as const) {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), `aqiron-lifecycle-${scenario}-`));
+			const root = await canonicalTempRoot(`aqiron-lifecycle-${scenario}-`);
 			try {
 				const fileSystem = durableTestFileSystem(); const history = new ApprovalHistoryStore(fileSystem, root); const lifecycle = new ValidationLifecycleStore(fileSystem, root); const service = serviceFor(history, lifecycle); const candidate = request(scenario); const issued = await service.approve(candidate); assert.equal(issued.ok, true); if (!issued.ok) { continue; }
 				const binding = authorizationBindingDigest(issued.approval.approvalId, issued.approval.requestDigest);
@@ -112,7 +125,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 	});
 
 	test('revocation ordered before start commitment prevents the write', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-revoke-race-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-revoke-race-');
 		try {
 			const fileSystem = durableTestFileSystem(); const history = new ApprovalHistoryStore(fileSystem, root); const lifecycle = new ValidationLifecycleStore(fileSystem, root); const service = serviceFor(history, lifecycle); const candidate = request('revoke-race'); const issued = await service.approve(candidate); assert.equal(issued.ok, true); if (!issued.ok) { return; }
 			const binding = authorizationBindingDigest(issued.approval.approvalId, issued.approval.requestDigest);
@@ -122,7 +135,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 	});
 
 	test('event-size and bucket capacity reject new records without deleting history', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-limits-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-limits-');
 		try {
 			const fileSystem = durableTestFileSystem(); const tooSmall = new ValidationLifecycleStore(fileSystem, root, { maxApprovalBytes: 512 });
 			const input = { approvalId: '00000000-0000-4000-8000-000000000041', timestamp: '2026-11-27T12:00:00.000Z', approvalHistory: { eventId: '00000000-0000-4000-8000-000000000042', eventHash: 'a'.repeat(64) }, authorizationBindingDigest: 'b'.repeat(64), projectRoot: path.resolve(os.tmpdir()).replace(/\\/g, '/'), projectIdentity: digest, permittedTargets: ['src/a.ts'], procedureId: procedureMetadata.id, procedureVersion: procedureMetadata.version, artifactDigest: digest, argumentDigest: digest, evidenceSnapshotId: 'snapshot-1', evidenceDigest: digest, capabilities: { filesystem: 'read-only' as const, network: 'none' as const, projectWrites: false as const, inheritedCredentials: false as const }, resourceLimits: { timeoutMs: 1000, memoryBytes: 1024, outputBytes: 1024, processCount: 1 } };
@@ -133,12 +146,12 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 
 	test('stale lock recovery is safe and a live lock timeout fails closed', async function () {
 		this.timeout(20_000);
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-locks-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-locks-');
 		try {
 			const fileSystem = durableTestFileSystem(); const input = { approvalId: '00000000-0000-4000-8000-000000000051', timestamp: '2026-11-27T12:00:00.000Z', approvalHistory: { eventId: '00000000-0000-4000-8000-000000000052', eventHash: 'a'.repeat(64) }, authorizationBindingDigest: 'b'.repeat(64), projectRoot: path.resolve(os.tmpdir()).replace(/\\/g, '/'), projectIdentity: digest, permittedTargets: ['src/a.ts'], procedureId: procedureMetadata.id, procedureVersion: procedureMetadata.version, artifactDigest: digest, argumentDigest: digest, evidenceSnapshotId: 'snapshot-1', evidenceDigest: digest, capabilities: { filesystem: 'read-only' as const, network: 'none' as const, projectWrites: false as const, inheritedCredentials: false as const }, resourceLimits: { timeoutMs: 1000, memoryBytes: 1024, outputBytes: 1024, processCount: 1 } };
 			const deadPid = Number((await execFile(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'])).stdout); const bucketRoot = path.join(root, '.aqiron-security', 'validation-lifecycle', bucket(input.approvalId)); const lockPath = path.join(bucketRoot, '.aqiron-security', 'hypotheses.json.lock'); await fs.mkdir(lockPath, { recursive: true }); await fs.writeFile(path.join(lockPath, 'owner.json'), JSON.stringify({ pid: deadPid, token: 'stale-lock-owner' }));
 			const recovered = await new ValidationLifecycleStore(fileSystem, root).commitStart(input); assert.equal(recovered.committed, true);
-			const timeoutRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-lock-timeout-'));
+			const timeoutRoot = await canonicalTempRoot('aqiron-lifecycle-lock-timeout-');
 			try {
 				const timeoutBucket = path.join(timeoutRoot, '.aqiron-security', 'validation-lifecycle', bucket(input.approvalId)); const liveLock = path.join(timeoutBucket, '.aqiron-security', 'hypotheses.json.lock'); await fs.mkdir(liveLock, { recursive: true }); await fs.writeFile(path.join(liveLock, 'owner.json'), JSON.stringify({ pid: process.pid, token: 'live-lock-owner' }));
 				await assert.rejects(() => new ValidationLifecycleStore(fileSystem, timeoutRoot).commitStart(input), /Lifecycle commitment/);
@@ -148,7 +161,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 	});
 
 	test('failed durable append returns no receipt and leaves a manual-recovery marker', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-fault-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-fault-');
 		try {
 			const fileSystem = durableTestFileSystem({ failAppend: true }); const history = new ApprovalHistoryStore(fileSystem, root); const lifecycle = new ValidationLifecycleStore(fileSystem, root); const service = serviceFor(history, lifecycle); const candidate = request('fault'); const issued = await service.approve(candidate); assert.equal(issued.ok, true); if (!issued.ok) { return; }
 			const binding = authorizationBindingDigest(issued.approval.approvalId, issued.approval.requestDigest); const result = await service.commitStart(issued.approval.approvalId, binding, candidate); assert.equal(result.ok, false);
@@ -159,7 +172,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 	});
 
 	test('corrupt, truncated, duplicate, and reordered lifecycle records fail closed', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-corrupt-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-corrupt-');
 		try {
 			const store = new ValidationLifecycleStore(durableTestFileSystem(), root); const input = { approvalId: '00000000-0000-4000-8000-000000000011', timestamp: '2026-11-27T12:00:00.000Z', approvalHistory: { eventId: '00000000-0000-4000-8000-000000000012', eventHash: 'a'.repeat(64) }, authorizationBindingDigest: 'b'.repeat(64), projectRoot: path.resolve(os.tmpdir()).replace(/\\/g, '/'), projectIdentity: digest, permittedTargets: ['src/a.ts'], procedureId: procedureMetadata.id, procedureVersion: procedureMetadata.version, artifactDigest: digest, argumentDigest: digest, evidenceSnapshotId: 'snapshot-1', evidenceDigest: digest, capabilities: { filesystem: 'read-only' as const, network: 'none' as const, projectWrites: false as const, inheritedCredentials: false as const }, resourceLimits: { timeoutMs: 1000, memoryBytes: 1024, outputBytes: 1024, processCount: 1 } };
 			await store.commitStart(input); const good = await store.queryStart(input.approvalId); assert.ok(good); assert.equal(good?.historicalOnly, true); assert.equal(good?.canAuthorizeExecution, false);
@@ -173,7 +186,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 	});
 
 	test('real Node filesystem integration fails closed when durable directory sync is unavailable', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-nodefs-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-nodefs-');
 		try {
 			const store = new ValidationLifecycleStore(createNodeFileSystem(), root);
 			const input = { approvalId: '00000000-0000-4000-8000-000000000021', timestamp: '2026-11-27T12:00:00.000Z', approvalHistory: { eventId: '00000000-0000-4000-8000-000000000022', eventHash: 'a'.repeat(64) }, authorizationBindingDigest: 'b'.repeat(64), projectRoot: path.resolve(os.tmpdir()).replace(/\\/g, '/'), projectIdentity: digest, permittedTargets: ['src/a.ts'], procedureId: procedureMetadata.id, procedureVersion: procedureMetadata.version, artifactDigest: digest, argumentDigest: digest, evidenceSnapshotId: 'snapshot-1', evidenceDigest: digest, capabilities: { filesystem: 'read-only' as const, network: 'none' as const, projectWrites: false as const, inheritedCredentials: false as const }, resourceLimits: { timeoutMs: 1000, memoryBytes: 1024, outputBytes: 1024, processCount: 1 } };
@@ -184,7 +197,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 
 	test('real Node filesystem durably commits and reopens a complete POSIX start lifecycle', async function () {
 		if (process.platform !== 'linux' && process.platform !== 'darwin') { this.skip(); return; }
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-posix-integration-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-posix-integration-');
 		try {
 			const stats = await fs.statfs(root);
 			process.stdout.write(`POSIX lifecycle durability environment: os=${process.platform} ${os.release()} node=${process.version} statfs.type=0x${stats.type.toString(16)} root=${root}\n`);
@@ -194,7 +207,13 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 			const service = serviceFor(history, lifecycle); const candidate = request('posix-real-node-adapter');
 			const approved = await service.approve(candidate); assert.equal(approved.ok, true); if (!approved.ok) { return; }
 			const binding = authorizationBindingDigest(approved.approval.approvalId, approved.approval.requestDigest);
-			const committed = await service.commitStart(approved.approval.approvalId, binding, candidate);
+			let committed;
+			try { committed = await service.commitStart(approved.approval.approvalId, binding, candidate); }
+			catch (error) {
+				const bucketRoot = path.join(root, '.aqiron-security', 'validation-lifecycle', bucket(approved.approval.approvalId));
+				process.stderr.write(`Lifecycle path diagnostics: ${await lifecyclePathDiagnostics(root, bucketRoot)}\n`);
+				throw error;
+			}
 			assert.equal(committed.ok, true); if (!committed.ok) { return; }
 			assert.equal(committed.receipt.nonExecutable, true); assert.equal(committed.receipt.status, 'consumed');
 			const reopened = await new ValidationLifecycleStore(createNodeFileSystem(), root).queryStart(approved.approval.approvalId);
@@ -211,7 +230,7 @@ suite('Controlled Validation atomic lifecycle commitment', function () {
 	});
 
 	test('independent processes serialize duplicate commitments with the filesystem lock', async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aqiron-lifecycle-process-race-'));
+		const root = await canonicalTempRoot('aqiron-lifecycle-process-race-');
 		try {
 			const approvalId = '00000000-0000-4000-8000-000000000031';
 			const input = { approvalId, timestamp: '2026-11-27T12:00:00.000Z', approvalHistory: { eventId: '00000000-0000-4000-8000-000000000032', eventHash: 'a'.repeat(64) }, authorizationBindingDigest: 'b'.repeat(64), projectRoot: path.resolve(os.tmpdir()).replace(/\\/g, '/'), projectIdentity: digest, permittedTargets: ['src/a.ts'], procedureId: procedureMetadata.id, procedureVersion: procedureMetadata.version, artifactDigest: digest, argumentDigest: digest, evidenceSnapshotId: 'snapshot-1', evidenceDigest: digest, capabilities: { filesystem: 'read-only', network: 'none', projectWrites: false, inheritedCredentials: false }, resourceLimits: { timeoutMs: 1000, memoryBytes: 1024, outputBytes: 1024, processCount: 1 } };

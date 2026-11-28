@@ -7,7 +7,7 @@ import { CoreClient } from '../../packages/core/src/client';
 import { CoreClientTransport } from '../../packages/core/src/client/coreProcessManager';
 import { CoreEventMessage, CoreMethod, CoreMethodParams, CoreResultFor } from '../../packages/core/src/runtime';
 
-const runtimePath = path.resolve(__dirname, '../../../dist/core-runtime.js');
+const runtimePath = path.resolve(__dirname, '../../../.aqiron-build/node/core-runtime.js');
 
 suite('Host-neutral Core client', () => {
 	test('starts Core, completes handshake, makes typed requests and forwards protocol events with the supplied request ID', async function () {
